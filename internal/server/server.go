@@ -9,7 +9,7 @@ import (
 
 	_ "github.com/joho/godotenv/autoload"
 
-	"watchlist-notify/internal/database"
+	"github.com/neilsmahajan/watchlist-notify/internal/database"
 )
 
 type Server struct {

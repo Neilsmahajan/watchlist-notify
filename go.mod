@@ -1,4 +1,4 @@
-module watchlist-notify
+module github.com/neilsmahajan/watchlist-notify
 
 go 1.25.0
 
