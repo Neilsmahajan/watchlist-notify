@@ -17,6 +17,7 @@ import (
 type Service interface {
 	Health() map[string]string
 	UpsertUser(ctx context.Context, u *models.User) error
+	GetUserByEmail(ctx context.Context, email string) (*models.User, error)
 }
 
 type service struct {
@@ -32,7 +33,13 @@ var (
 )
 
 func New() Service {
-	client, err := mongo.Connect(context.Background(), options.Client().ApplyURI(fmt.Sprintf("mongodb://%s:%s@%s:%s", databaseUsername, databaseRootPassword, databaseHost, databasePort)))
+	var uri string
+	if databaseUsername != "" { // use credentials only if provided
+		uri = fmt.Sprintf("mongodb://%s:%s@%s:%s", databaseUsername, databaseRootPassword, databaseHost, databasePort)
+	} else {
+		uri = fmt.Sprintf("mongodb://%s:%s", databaseHost, databasePort)
+	}
+	client, err := mongo.Connect(context.Background(), options.Client().ApplyURI(uri))
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -71,4 +78,17 @@ func (s *service) UpsertUser(ctx context.Context, u *models.User) error {
 		},
 	}, options.Update().SetUpsert(true))
 	return err
+}
+
+func (s *service) GetUserByEmail(ctx context.Context, email string) (*models.User, error) {
+	collection := s.db.Database(databaseName).Collection("users")
+	var user models.User
+	err := collection.FindOne(ctx, bson.M{"email": email}).Decode(&user)
+	if err != nil {
+		if err == mongo.ErrNoDocuments {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &user, nil
 }
