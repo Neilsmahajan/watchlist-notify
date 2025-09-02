@@ -10,7 +10,7 @@ import (
 )
 
 func mustStartMongoContainer() (func(context.Context, ...testcontainers.TerminateOption) error, error) {
-	dbContainer, err := mongodb.Run(context.Background(), "mongo:latest")
+	dbContainer, err := mongodb.Run(context.Background(), "mongo:8.0.13")
 	if err != nil {
 		return nil, err
 	}
@@ -25,8 +25,8 @@ func mustStartMongoContainer() (func(context.Context, ...testcontainers.Terminat
 		return dbContainer.Terminate, err
 	}
 
-	host = dbHost
-	port = dbPort.Port()
+	databaseHost = dbHost
+	databasePort = dbPort.Port()
 
 	return dbContainer.Terminate, err
 }

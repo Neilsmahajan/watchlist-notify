@@ -1,6 +1,6 @@
 services:
   mongo_bp:
-    image: mongo:8.0.13
+    image: ${DB_IMAGE}
     restart: unless-stopped
     environment:
       MONGO_INITDB_ROOT_USERNAME: ${DB_USERNAME}

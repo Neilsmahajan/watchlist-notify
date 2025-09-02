@@ -24,15 +24,15 @@ type service struct {
 }
 
 var (
-	host                 = os.Getenv("DB_HOST")
-	port                 = os.Getenv("DB_PORT")
+	databaseHost         = os.Getenv("DB_HOST")
+	databasePort         = os.Getenv("DB_PORT")
 	databaseUsername     = os.Getenv("DB_USERNAME")
 	databaseRootPassword = os.Getenv("DB_ROOT_PASSWORD")
-	// database = os.Getenv("DB_DATABASE")
+	databaseName         = os.Getenv("DB_DATABASE")
 )
 
 func New() Service {
-	client, err := mongo.Connect(context.Background(), options.Client().ApplyURI(fmt.Sprintf("mongodb://%s:%s@%s:%s", databaseUsername, databaseRootPassword, host, port)))
+	client, err := mongo.Connect(context.Background(), options.Client().ApplyURI(fmt.Sprintf("mongodb://%s:%s@%s:%s", databaseUsername, databaseRootPassword, databaseHost, databasePort)))
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -56,7 +56,7 @@ func (s *service) Health() map[string]string {
 }
 
 func (s *service) UpsertUser(ctx context.Context, u *models.User) error {
-	collection := s.db.Database("test-db").Collection("users")
+	collection := s.db.Database(databaseName).Collection("users")
 	now := time.Now()
 	_, err := collection.UpdateOne(ctx, bson.M{"google_id": u.GoogleID}, bson.M{
 		"$set": bson.M{
