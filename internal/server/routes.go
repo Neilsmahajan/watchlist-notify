@@ -26,6 +26,7 @@ func (s *Server) RegisterRoutes() http.Handler {
 	r.GET("/health", s.healthHandler)
 	r.GET("/auth/google/login", auth.LoginHandler)
 	r.GET("/auth/google/callback", func(c *gin.Context) { auth.CallbackHandler(c, s.db) })
+	r.POST("/auth/logout", func(c *gin.Context) { auth.LogoutHandler(c) })
 
 	protected := r.Group("/api")
 	protected.Use(middleware.AuthRequired())

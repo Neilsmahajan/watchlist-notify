@@ -147,6 +147,19 @@ func CallbackHandler(c *gin.Context, db database.Service) {
 	c.JSON(http.StatusOK, gin.H{"message": "login success", "email": user.Email, "token": jwtToken})
 }
 
+func LogoutHandler(c *gin.Context) {
+	http.SetCookie(c.Writer, &http.Cookie{
+		Name:     "auth_token",
+		Value:    "",
+		Path:     "/",
+		HttpOnly: true,
+		Secure:   false, // true in prod
+		MaxAge:   -1,
+		SameSite: http.SameSiteLaxMode,
+	})
+	c.JSON(http.StatusOK, gin.H{"message": "logout success"})
+}
+
 func issueJWT(email string) (string, error) {
 	if len(jwtSecret) == 0 {
 		return "", errors.New("jwt secret not set")
