@@ -76,7 +76,6 @@ func (s *Server) meHandler(c *gin.Context) {
 }
 
 func (s *Server) createWatchlistItemHandler(c *gin.Context) {
-	// Extract user email from context (set by AuthRequired middleware), then fetch user to get ID
 	emailVal, ok := c.Get("user_email")
 	if !ok {
 		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
@@ -160,7 +159,24 @@ func (s *Server) createWatchlistItemHandler(c *gin.Context) {
 }
 
 func (s *Server) listWatchlistItemsHandler(c *gin.Context) {
-	var items []models.WatchlistItem
+	emailVal, ok := c.Get("user_email")
+	if !ok {
+		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+	email := emailVal.(string)
+
+	user, err := s.db.GetUserByEmail(c.Request.Context(), email)
+	if err != nil || user == nil {
+		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "user not found"})
+		return
+	}
+
+	items, err := s.db.ListWatchlistItems(c.Request.Context(), user.ID)
+	if err != nil {
+		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "failed to fetch items"})
+		return
+	}
 	c.JSON(http.StatusOK, items)
 }
 

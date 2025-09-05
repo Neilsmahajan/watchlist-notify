@@ -21,6 +21,7 @@ type Service interface {
 	UpsertUser(ctx context.Context, u *models.User) error
 	GetUserByEmail(ctx context.Context, email string) (*models.User, error)
 	CreateWatchlistItem(ctx context.Context, item *models.WatchlistItem) error
+	ListWatchlistItems(ctx context.Context, userID primitive.ObjectID) ([]*models.WatchlistItem, error)
 }
 
 type service struct {
@@ -201,4 +202,25 @@ func (s *service) CreateWatchlistItem(ctx context.Context, item *models.Watchlis
 		item.ID = oid
 	}
 	return nil
+}
+
+func (s *service) ListWatchlistItems(ctx context.Context, userID primitive.ObjectID) ([]*models.WatchlistItem, error) {
+	coll := s.db.Database(databaseName).Collection("watchlist_items")
+	var items []*models.WatchlistItem
+	cursor, err := coll.Find(ctx, bson.M{"user_id": userID})
+	if err != nil {
+		return nil, err
+	}
+	defer cursor.Close(ctx)
+	for cursor.Next(ctx) {
+		var item models.WatchlistItem
+		if err := cursor.Decode(&item); err != nil {
+			return nil, err
+		}
+		items = append(items, &item)
+	}
+	if err := cursor.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
