@@ -22,6 +22,7 @@ type Service interface {
 	GetUserByEmail(ctx context.Context, email string) (*models.User, error)
 	CreateWatchlistItem(ctx context.Context, item *models.WatchlistItem) error
 	ListWatchlistItems(ctx context.Context, userID primitive.ObjectID) ([]*models.WatchlistItem, error)
+	UpdateWatchlistItem(ctx context.Context, userID, itemID primitive.ObjectID, fields map[string]any) (*models.WatchlistItem, error)
 }
 
 type service struct {
@@ -45,6 +46,8 @@ var (
 var (
 	// ErrDuplicateWatchlistItem returned when unique constraint (user + tmdb id) violated
 	ErrDuplicateWatchlistItem = errors.New("watchlist item already exists for user")
+	// ErrWatchlistItemNotFound when update target doesn't exist or not owned by user
+	ErrWatchlistItemNotFound = errors.New("watchlist item not found")
 )
 
 func New() Service {
@@ -223,4 +226,24 @@ func (s *service) ListWatchlistItems(ctx context.Context, userID primitive.Objec
 		return nil, err
 	}
 	return items, nil
+}
+
+func (s *service) UpdateWatchlistItem(ctx context.Context, userID, itemID primitive.ObjectID, fields map[string]any) (*models.WatchlistItem, error) {
+	coll := s.db.Database(databaseName).Collection("watchlist_items")
+	if len(fields) == 0 {
+		return nil, errors.New("no fields to update")
+	}
+	fields["updated_at"] = time.Now()
+	var updated models.WatchlistItem
+	res := coll.FindOneAndUpdate(ctx, bson.M{"_id": itemID, "user_id": userID}, bson.M{"$set": fields}, options.FindOneAndUpdate().SetReturnDocument(options.After))
+	if res.Err() != nil {
+		if res.Err() == mongo.ErrNoDocuments {
+			return nil, ErrWatchlistItemNotFound
+		}
+		return nil, res.Err()
+	}
+	if err := res.Decode(&updated); err != nil {
+		return nil, err
+	}
+	return &updated, nil
 }

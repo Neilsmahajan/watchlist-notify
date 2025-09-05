@@ -181,7 +181,81 @@ func (s *Server) listWatchlistItemsHandler(c *gin.Context) {
 }
 
 func (s *Server) updateWatchlistItemHandler(c *gin.Context) {
-	c.JSON(http.StatusOK, gin.H{"message": "watchlist item updated"})
+	emailVal, ok := c.Get("user_email")
+	if !ok {
+		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+	email := emailVal.(string)
+
+	user, err := s.db.GetUserByEmail(c.Request.Context(), email)
+	if err != nil || user == nil {
+		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "user not found"})
+		return
+	}
+
+	idStr := c.Param("id")
+	itemID, err := primitive.ObjectIDFromHex(idStr)
+	if err != nil {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "invalid id"})
+		return
+	}
+
+	var body struct {
+		Title  *string  `json:"title"`
+		Status *string  `json:"status"`
+		Tags   []string `json:"tags"`
+		Year   *int     `json:"year"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
+		return
+	}
+
+	update := map[string]any{}
+	if body.Title != nil {
+		trimmed := strings.TrimSpace(*body.Title)
+		if trimmed == "" {
+			c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "title cannot be empty"})
+			return
+		}
+		update["title"] = trimmed
+	}
+	if body.Status != nil {
+		st := *body.Status
+		if st != models.WatchlistStatusPlanned && st != models.WatchlistStatusWatching && st != models.WatchlistStatusFinished {
+			c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "invalid status"})
+			return
+		}
+		update["status"] = st
+	}
+	if body.Tags != nil {
+		update["tags"] = body.Tags
+	}
+	if body.Year != nil {
+		if *body.Year < 1870 || *body.Year > time.Now().Year()+1 { // basic sanity
+			c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "invalid year"})
+			return
+		}
+		update["year"] = *body.Year
+	}
+
+	if len(update) == 0 {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "no fields to update"})
+		return
+	}
+
+	updated, err := s.db.UpdateWatchlistItem(c.Request.Context(), user.ID, itemID, update)
+	if err != nil {
+		if errors.Is(err, database.ErrWatchlistItemNotFound) {
+			c.AbortWithStatusJSON(http.StatusNotFound, gin.H{"error": "not found"})
+			return
+		}
+		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "update failed"})
+		return
+	}
+
+	c.JSON(http.StatusOK, updated)
 }
 
 func (s *Server) deleteWatchlistItemHandler(c *gin.Context) {
