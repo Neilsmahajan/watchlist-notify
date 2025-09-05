@@ -124,6 +124,12 @@ func (s *Server) createWatchlistItemHandler(c *gin.Context) {
 		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "invalid status"})
 		return
 	}
+	if body.Year != 0 {
+		if body.Year < 1870 || body.Year > time.Now().Year()+1 { // basic sanity
+			c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "invalid year"})
+			return
+		}
+	}
 
 	var ext models.ExternalIDs
 	if body.TMDB != nil {
