@@ -259,5 +259,35 @@ func (s *Server) updateWatchlistItemHandler(c *gin.Context) {
 }
 
 func (s *Server) deleteWatchlistItemHandler(c *gin.Context) {
+	emailVal, ok := c.Get("user_email")
+	if !ok {
+		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+	email := emailVal.(string)
+
+	user, err := s.db.GetUserByEmail(c.Request.Context(), email)
+	if err != nil || user == nil {
+		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "user not found"})
+		return
+	}
+
+	idStr := c.Param("id")
+	itemID, err := primitive.ObjectIDFromHex(idStr)
+	if err != nil {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "invalid id"})
+		return
+	}
+
+	err = s.db.DeleteWatchlistItem(c.Request.Context(), user.ID, itemID)
+	if err != nil {
+		if errors.Is(err, database.ErrWatchlistItemNotFound) {
+			c.AbortWithStatusJSON(http.StatusNotFound, gin.H{"error": "not found"})
+			return
+		}
+		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "delete failed"})
+		return
+	}
+
 	c.JSON(http.StatusOK, gin.H{"message": "watchlist item deleted"})
 }

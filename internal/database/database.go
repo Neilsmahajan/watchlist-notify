@@ -23,6 +23,7 @@ type Service interface {
 	CreateWatchlistItem(ctx context.Context, item *models.WatchlistItem) error
 	ListWatchlistItems(ctx context.Context, userID primitive.ObjectID) ([]*models.WatchlistItem, error)
 	UpdateWatchlistItem(ctx context.Context, userID, itemID primitive.ObjectID, fields map[string]any) (*models.WatchlistItem, error)
+	DeleteWatchlistItem(ctx context.Context, userID, itemID primitive.ObjectID) error
 }
 
 type service struct {
@@ -246,4 +247,16 @@ func (s *service) UpdateWatchlistItem(ctx context.Context, userID, itemID primit
 		return nil, err
 	}
 	return &updated, nil
+}
+
+func (s *service) DeleteWatchlistItem(ctx context.Context, userID, itemID primitive.ObjectID) error {
+	coll := s.db.Database(databaseName).Collection("watchlist_items")
+	res, err := coll.DeleteOne(ctx, bson.M{"_id": itemID, "user_id": userID})
+	if err != nil {
+		return err
+	}
+	if res.DeletedCount == 0 {
+		return ErrWatchlistItemNotFound
+	}
+	return nil
 }
