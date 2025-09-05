@@ -4,7 +4,6 @@ import (
 	"errors"
 	"net/http"
 	"os"
-	"strconv"
 	"strings"
 	"time"
 
@@ -61,32 +60,14 @@ func (s *Server) healthHandler(c *gin.Context) {
 
 // meHandler returns the authenticated user's full record from the database
 func (s *Server) meHandler(c *gin.Context) {
-	emailVal, ok := c.Get("user_email")
-	if !ok {
-		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
-		return
+	if user, ok := s.getUser(c); ok {
+		c.JSON(http.StatusOK, user)
 	}
-	email := emailVal.(string)
-
-	user, err := s.db.GetUserByEmail(c.Request.Context(), email)
-	if err != nil || user == nil {
-		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "user not found"})
-		return
-	}
-	c.JSON(http.StatusOK, user)
 }
 
 func (s *Server) updateUserPreferencesHandler(c *gin.Context) {
-	emailVal, ok := c.Get("user_email")
+	user, ok := s.getUser(c)
 	if !ok {
-		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
-		return
-	}
-	email := emailVal.(string)
-
-	user, err := s.db.GetUserByEmail(c.Request.Context(), email)
-	if err != nil || user == nil {
-		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "user not found"})
 		return
 	}
 
@@ -100,7 +81,7 @@ func (s *Server) updateUserPreferencesHandler(c *gin.Context) {
 		QuietHoursEnd    *int    `json:"quiet_hours_end"`
 	}
 	if err := c.ShouldBindJSON(&body); err != nil {
-		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
+		jsonError(c, http.StatusBadRequest, "invalid body")
 		return
 	}
 
@@ -110,7 +91,7 @@ func (s *Server) updateUserPreferencesHandler(c *gin.Context) {
 		email := strings.TrimSpace(*body.NotifyEmail)
 		// allow empty if UseAccountEmail will be true
 		if email == "" && (body.UseAccountEmail == nil || !*body.UseAccountEmail) {
-			c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "notify_email cannot be empty unless use_account_email is true"})
+			jsonError(c, http.StatusBadRequest, "notify_email cannot be empty unless use_account_email is true")
 			return
 		}
 		updates["preferences.notify_email"] = email
@@ -137,48 +118,40 @@ func (s *Server) updateUserPreferencesHandler(c *gin.Context) {
 		case models.DigestFrequencyDaily, models.DigestFrequencyWeekly, models.DigestFrequencyManual:
 			updates["preferences.digest_frequency"] = df
 		default:
-			c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "invalid digest_frequency"})
+			jsonError(c, http.StatusBadRequest, "invalid digest_frequency")
 			return
 		}
 	}
 	if body.QuietHoursStart != nil {
 		if *body.QuietHoursStart < 0 || *body.QuietHoursStart > 23 {
-			c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "quiet_hours_start must be 0-23"})
+			jsonError(c, http.StatusBadRequest, "quiet_hours_start must be 0-23")
 			return
 		}
 		updates["preferences.quiet_hours_start"] = *body.QuietHoursStart
 	}
 	if body.QuietHoursEnd != nil {
 		if *body.QuietHoursEnd < 0 || *body.QuietHoursEnd > 23 {
-			c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "quiet_hours_end must be 0-23"})
+			jsonError(c, http.StatusBadRequest, "quiet_hours_end must be 0-23")
 			return
 		}
 		updates["preferences.quiet_hours_end"] = *body.QuietHoursEnd
 	}
 	if len(updates) == 0 {
-		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "no fields to update"})
+		jsonError(c, http.StatusBadRequest, "no fields to update")
 		return
 	}
 
 	updated, err := s.db.UpdateUserPreferences(c.Request.Context(), user.ID, updates)
 	if err != nil {
-		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "failed to update preferences"})
+		jsonError(c, http.StatusInternalServerError, "failed to update preferences")
 		return
 	}
 	c.JSON(http.StatusOK, updated)
 }
 
 func (s *Server) updateUserServicesHandler(c *gin.Context) {
-	emailVal, ok := c.Get("user_email")
+	user, ok := s.getUser(c)
 	if !ok {
-		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
-		return
-	}
-	email := emailVal.(string)
-
-	user, err := s.db.GetUserByEmail(c.Request.Context(), email)
-	if err != nil || user == nil {
-		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "user not found"})
 		return
 	}
 
@@ -193,7 +166,7 @@ func (s *Server) updateUserServicesHandler(c *gin.Context) {
 		Toggle []toggle `json:"toggle"`
 	}
 	if err := c.ShouldBindJSON(&body); err != nil {
-		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
+		jsonError(c, http.StatusBadRequest, "invalid body")
 		return
 	}
 
@@ -204,7 +177,7 @@ func (s *Server) updateUserServicesHandler(c *gin.Context) {
 	for _, code := range body.Add {
 		code = strings.ToLower(code)
 		if !validCodes[code] {
-			c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "invalid service code in add: " + code})
+			jsonError(c, http.StatusBadRequest, "invalid service code in add: "+code)
 			return
 		}
 		toAdd[code] = true
@@ -213,7 +186,7 @@ func (s *Server) updateUserServicesHandler(c *gin.Context) {
 	for _, code := range body.Remove {
 		code = strings.ToLower(code)
 		if !validCodes[code] {
-			c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "invalid service code in remove: " + code})
+			jsonError(c, http.StatusBadRequest, "invalid service code in remove: "+code)
 			return
 		}
 		toRemove[code] = true
@@ -222,7 +195,7 @@ func (s *Server) updateUserServicesHandler(c *gin.Context) {
 	for _, t := range body.Toggle {
 		code := strings.ToLower(t.Code)
 		if !validCodes[code] {
-			c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "invalid service code in toggle: " + code})
+			jsonError(c, http.StatusBadRequest, "invalid service code in toggle: "+code)
 			return
 		}
 		if t.Active {
@@ -234,7 +207,7 @@ func (s *Server) updateUserServicesHandler(c *gin.Context) {
 		}
 	}
 	if len(toAdd) == 0 && len(toRemove) == 0 {
-		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "no changes requested"})
+		jsonError(c, http.StatusBadRequest, "no changes requested")
 		return
 	}
 
@@ -273,23 +246,15 @@ func (s *Server) updateUserServicesHandler(c *gin.Context) {
 	user.Services = newServices
 	updatedUser, err := s.db.UpdateServices(c.Request.Context(), user.ID, user.Services)
 	if err != nil {
-		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "failed to update services"})
+		jsonError(c, http.StatusInternalServerError, "failed to update services")
 		return
 	}
 	c.JSON(http.StatusOK, updatedUser)
 }
 
 func (s *Server) listUserServicesHandler(c *gin.Context) {
-	emailVal, ok := c.Get("user_email")
+	user, ok := s.getUser(c)
 	if !ok {
-		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
-		return
-	}
-	email := emailVal.(string)
-
-	user, err := s.db.GetUserByEmail(c.Request.Context(), email)
-	if err != nil || user == nil {
-		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "user not found"})
 		return
 	}
 
@@ -335,16 +300,8 @@ func (s *Server) listUserServicesHandler(c *gin.Context) {
 }
 
 func (s *Server) createWatchlistItemHandler(c *gin.Context) {
-	emailVal, ok := c.Get("user_email")
+	user, ok := s.getUser(c)
 	if !ok {
-		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
-		return
-	}
-	email := emailVal.(string)
-
-	user, err := s.db.GetUserByEmail(c.Request.Context(), email)
-	if err != nil || user == nil {
-		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "user not found"})
 		return
 	}
 
@@ -358,13 +315,13 @@ func (s *Server) createWatchlistItemHandler(c *gin.Context) {
 		Tags   []string `json:"tags"`
 	}
 	if err := c.ShouldBindJSON(&body); err != nil {
-		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
+		jsonError(c, http.StatusBadRequest, "invalid body")
 		return
 	}
 
 	// Basic validation
 	if body.Title == "" {
-		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "title required"})
+		jsonError(c, http.StatusBadRequest, "title required")
 		return
 	}
 	typeVal := strings.ToLower(body.Type)
@@ -372,7 +329,7 @@ func (s *Server) createWatchlistItemHandler(c *gin.Context) {
 		typeVal = models.WatchlistTypeMovie
 	}
 	if typeVal != models.WatchlistTypeMovie && typeVal != models.WatchlistTypeShow {
-		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "invalid type"})
+		jsonError(c, http.StatusBadRequest, "invalid type")
 		return
 	}
 	statusVal := body.Status
@@ -380,12 +337,12 @@ func (s *Server) createWatchlistItemHandler(c *gin.Context) {
 		statusVal = models.WatchlistStatusPlanned
 	}
 	if statusVal != models.WatchlistStatusPlanned && statusVal != models.WatchlistStatusWatching && statusVal != models.WatchlistStatusFinished {
-		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "invalid status"})
+		jsonError(c, http.StatusBadRequest, "invalid status")
 		return
 	}
 	if body.Year != 0 {
 		if body.Year < 1870 || body.Year > time.Now().Year()+1 { // basic sanity
-			c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "invalid year"})
+			jsonError(c, http.StatusBadRequest, "invalid year")
 			return
 		}
 	}
@@ -413,10 +370,10 @@ func (s *Server) createWatchlistItemHandler(c *gin.Context) {
 
 	if err := s.db.CreateWatchlistItem(c.Request.Context(), item); err != nil {
 		if errors.Is(err, database.ErrDuplicateWatchlistItem) {
-			c.AbortWithStatusJSON(http.StatusConflict, gin.H{"error": "duplicate item"})
+			jsonError(c, http.StatusConflict, "duplicate item")
 			return
 		}
-		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "failed to create"})
+		jsonError(c, http.StatusInternalServerError, "failed to create")
 		return
 	}
 
@@ -424,44 +381,25 @@ func (s *Server) createWatchlistItemHandler(c *gin.Context) {
 }
 
 func (s *Server) listWatchlistItemsHandler(c *gin.Context) {
-	emailVal, ok := c.Get("user_email")
+	user, ok := s.getUser(c)
 	if !ok {
-		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
-		return
-	}
-	email := emailVal.(string)
-
-	user, err := s.db.GetUserByEmail(c.Request.Context(), email)
-	if err != nil || user == nil {
-		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "user not found"})
 		return
 	}
 
 	// Parse query params
 	q := c.Request.URL.Query()
-	limit := 20
-	if v := q.Get("limit"); v != "" {
-		if n, convErr := strconv.Atoi(v); convErr == nil && n > 0 {
-			if n > 100 {
-				n = 100
-			}
-			limit = n
-		}
-	}
-	offset := 0
-	if v := q.Get("offset"); v != "" {
-		if n, convErr := strconv.Atoi(v); convErr == nil && n >= 0 {
-			offset = n
-		}
+	limit, offset, ok := parseLimitOffset(c)
+	if !ok {
+		return
 	}
 	status := strings.ToLower(q.Get("status"))
-	if status != "" && status != models.WatchlistStatusPlanned && status != models.WatchlistStatusWatching && status != models.WatchlistStatusFinished {
-		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "invalid status filter"})
+	if !validWatchlistStatus(status) {
+		jsonError(c, http.StatusBadRequest, "invalid status filter")
 		return
 	}
 	itemType := strings.ToLower(q.Get("type"))
-	if itemType != "" && itemType != models.WatchlistTypeMovie && itemType != models.WatchlistTypeShow {
-		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "invalid type filter"})
+	if !validWatchlistType(itemType) {
+		jsonError(c, http.StatusBadRequest, "invalid type filter")
 		return
 	}
 	search := q.Get("search")
