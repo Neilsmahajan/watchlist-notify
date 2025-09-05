@@ -39,6 +39,7 @@ func (s *Server) RegisterRoutes() http.Handler {
 	protected.Use(middleware.AuthRequired())
 	protected.GET("/me", s.meHandler)
 	protected.PATCH("/me/services", s.updateUserServicesHandler)
+	protected.GET("/services", s.listUserServicesHandler)
 	protected.POST("/watchlist", s.createWatchlistItemHandler)
 	protected.GET("/watchlist", s.listWatchlistItemsHandler)
 	protected.PATCH("/watchlist/:id", s.updateWatchlistItemHandler)
@@ -107,13 +108,7 @@ func (s *Server) updateUserServicesHandler(c *gin.Context) {
 	}
 
 	// Validate service codes and normalize intent into add/remove sets
-	validCodes := map[string]bool{
-		models.ServiceNetflix:    true,
-		models.ServicePrimeVideo: true,
-		models.ServiceHulu:       true,
-		models.ServiceDisneyPlus: true,
-		models.ServiceMax:        true,
-	}
+	validCodes := models.ServiceCodeSet
 	toAdd := map[string]bool{}
 	toRemove := map[string]bool{}
 	for _, code := range body.Add {
@@ -192,6 +187,61 @@ func (s *Server) updateUserServicesHandler(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, updatedUser)
+}
+
+func (s *Server) listUserServicesHandler(c *gin.Context) {
+	emailVal, ok := c.Get("user_email")
+	if !ok {
+		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+	email := emailVal.(string)
+
+	user, err := s.db.GetUserByEmail(c.Request.Context(), email)
+	if err != nil || user == nil {
+		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "user not found"})
+		return
+	}
+
+	// Map user's services by normalized code for quick lookup
+	byCode := make(map[string]models.ServiceSubscription, len(user.Services))
+	for _, ssub := range user.Services {
+		byCode[strings.ToLower(ssub.Code)] = ssub
+	}
+
+	// Supported catalog
+	catalog := models.ServiceCatalog
+
+	type serviceOut struct {
+		Code    string     `json:"code"`
+		Name    string     `json:"name"`
+		Active  bool       `json:"active"`
+		AddedAt *time.Time `json:"added_at,omitempty"`
+		Plan    string     `json:"plan,omitempty"`
+	}
+
+	out := make([]serviceOut, 0, len(catalog))
+	for _, def := range catalog {
+		entry, ok := byCode[def.Code]
+		var added *time.Time
+		if ok && !entry.AddedAt.IsZero() {
+			t := entry.AddedAt
+			added = &t
+		}
+		plan := ""
+		if ok && entry.Plan != "" {
+			plan = entry.Plan
+		}
+		out = append(out, serviceOut{
+			Code:    def.Code,
+			Name:    def.Name,
+			Active:  ok && entry.Active,
+			AddedAt: added,
+			Plan:    plan,
+		})
+	}
+
+	c.JSON(http.StatusOK, gin.H{"services": out})
 }
 
 func (s *Server) createWatchlistItemHandler(c *gin.Context) {
