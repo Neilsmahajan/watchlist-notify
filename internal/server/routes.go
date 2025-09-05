@@ -38,6 +38,7 @@ func (s *Server) RegisterRoutes() http.Handler {
 	protected := r.Group("/api")
 	protected.Use(middleware.AuthRequired())
 	protected.GET("/me", s.meHandler)
+	protected.PATCH("/me/services", s.updateUserServicesHandler)
 	protected.POST("/watchlist", s.createWatchlistItemHandler)
 	protected.GET("/watchlist", s.listWatchlistItemsHandler)
 	protected.PATCH("/watchlist/:id", s.updateWatchlistItemHandler)
@@ -74,6 +75,123 @@ func (s *Server) meHandler(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, user)
+}
+
+func (s *Server) updateUserServicesHandler(c *gin.Context) {
+	emailVal, ok := c.Get("user_email")
+	if !ok {
+		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+	email := emailVal.(string)
+
+	user, err := s.db.GetUserByEmail(c.Request.Context(), email)
+	if err != nil || user == nil {
+		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "user not found"})
+		return
+	}
+
+	type toggle struct {
+		Code   string `json:"code" binding:"required"`   // e.g. "netflix"
+		Active bool   `json:"active" binding:"required"` // true to add/activate, false to remove/deactivate
+	}
+
+	var body struct {
+		Add    []string `json:"add"`
+		Remove []string `json:"remove"`
+		Toggle []toggle `json:"toggle"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
+		return
+	}
+
+	// Validate service codes and normalize intent into add/remove sets
+	validCodes := map[string]bool{
+		models.ServiceNetflix:    true,
+		models.ServicePrimeVideo: true,
+		models.ServiceHulu:       true,
+		models.ServiceDisneyPlus: true,
+		models.ServiceMax:        true,
+	}
+	toAdd := map[string]bool{}
+	toRemove := map[string]bool{}
+	for _, code := range body.Add {
+		code = strings.ToLower(code)
+		if !validCodes[code] {
+			c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "invalid service code in add: " + code})
+			return
+		}
+		toAdd[code] = true
+		delete(toRemove, code)
+	}
+	for _, code := range body.Remove {
+		code = strings.ToLower(code)
+		if !validCodes[code] {
+			c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "invalid service code in remove: " + code})
+			return
+		}
+		toRemove[code] = true
+		delete(toAdd, code)
+	}
+	for _, t := range body.Toggle {
+		code := strings.ToLower(t.Code)
+		if !validCodes[code] {
+			c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "invalid service code in toggle: " + code})
+			return
+		}
+		if t.Active {
+			toAdd[code] = true
+			delete(toRemove, code)
+		} else {
+			toRemove[code] = true
+			delete(toAdd, code)
+		}
+	}
+	if len(toAdd) == 0 && len(toRemove) == 0 {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "no changes requested"})
+		return
+	}
+
+	// Merge with existing services without dropping unchanged entries
+	now := time.Now()
+	existing := map[string]models.ServiceSubscription{}
+	for _, ssub := range user.Services {
+		existing[strings.ToLower(ssub.Code)] = ssub
+	}
+	// Apply additions/activations
+	for code := range toAdd {
+		if es, ok := existing[code]; ok {
+			es.Active = true
+			if es.AddedAt.IsZero() {
+				es.AddedAt = now
+			}
+			es.Code = code
+			existing[code] = es
+		} else {
+			existing[code] = models.ServiceSubscription{Code: code, AddedAt: now, Active: true}
+		}
+	}
+	// Apply removals/deactivations
+	for code := range toRemove {
+		if es, ok := existing[code]; ok {
+			es.Active = false
+			existing[code] = es
+		}
+		// If not already present, no-op; we don't create new inactive entries on remove
+	}
+	// Build slice back preserving all entries
+	newServices := make([]models.ServiceSubscription, 0, len(existing))
+	for _, v := range existing {
+		newServices = append(newServices, v)
+	}
+	user.Services = newServices
+	updatedUser, err := s.db.UpdateServices(c.Request.Context(), user.ID, user.Services)
+	if err != nil {
+		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "failed to update services"})
+		return
+	}
+	c.JSON(http.StatusOK, updatedUser)
 }
 
 func (s *Server) createWatchlistItemHandler(c *gin.Context) {
