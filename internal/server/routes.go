@@ -1,14 +1,20 @@
 package server
 
 import (
+	"errors"
 	"net/http"
 	"os"
+	"strings"
+	"time"
 
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
 	_ "github.com/joho/godotenv/autoload"
 	"github.com/neilsmahajan/watchlist-notify/internal/auth"
+	"github.com/neilsmahajan/watchlist-notify/internal/database"
 	"github.com/neilsmahajan/watchlist-notify/internal/middleware"
+	"github.com/neilsmahajan/watchlist-notify/internal/models"
+	"go.mongodb.org/mongo-driver/bson/primitive"
 )
 
 func (s *Server) RegisterRoutes() http.Handler {
@@ -31,6 +37,10 @@ func (s *Server) RegisterRoutes() http.Handler {
 	protected := r.Group("/api")
 	protected.Use(middleware.AuthRequired())
 	protected.GET("/me", s.meHandler)
+	protected.POST("/watchlist", s.createWatchlistItemHandler)
+	protected.GET("/watchlist", s.listWatchlistItemsHandler)
+	protected.PATCH("/watchlist/:id", s.updateWatchlistItemHandler)
+	protected.DELETE("/watchlist/:id", s.deleteWatchlistItemHandler)
 	return r
 }
 
@@ -63,4 +73,101 @@ func (s *Server) meHandler(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, user)
+}
+
+func (s *Server) createWatchlistItemHandler(c *gin.Context) {
+	// Extract user email from context (set by AuthRequired middleware), then fetch user to get ID
+	emailVal, ok := c.Get("user_email")
+	if !ok {
+		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+	email := emailVal.(string)
+
+	user, err := s.db.GetUserByEmail(c.Request.Context(), email)
+	if err != nil || user == nil {
+		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "user not found"})
+		return
+	}
+
+	var body struct {
+		Title  string   `json:"title" binding:"required"`
+		Type   string   `json:"type"` // movie | show
+		Year   int      `json:"year"`
+		TMDB   *int     `json:"tmdb_id"`
+		IMDB   string   `json:"imdb_id"`
+		Status string   `json:"status"`
+		Tags   []string `json:"tags"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
+		return
+	}
+
+	// Basic validation
+	if body.Title == "" {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "title required"})
+		return
+	}
+	typeVal := strings.ToLower(body.Type)
+	if typeVal == "" {
+		typeVal = models.WatchlistTypeMovie
+	}
+	if typeVal != models.WatchlistTypeMovie && typeVal != models.WatchlistTypeShow {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "invalid type"})
+		return
+	}
+	statusVal := body.Status
+	if statusVal == "" {
+		statusVal = models.WatchlistStatusPlanned
+	}
+	if statusVal != models.WatchlistStatusPlanned && statusVal != models.WatchlistStatusWatching && statusVal != models.WatchlistStatusFinished {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "invalid status"})
+		return
+	}
+
+	var ext models.ExternalIDs
+	if body.TMDB != nil {
+		ext.TMDB = *body.TMDB
+	}
+	if body.IMDB != "" {
+		ext.IMDB = body.IMDB
+	}
+
+	item := &models.WatchlistItem{
+		ID:          primitive.NilObjectID,
+		UserID:      user.ID,
+		Title:       body.Title,
+		Type:        typeVal,
+		Year:        body.Year,
+		ExternalIDs: ext,
+		Tags:        body.Tags,
+		Status:      statusVal,
+		AddedAt:     time.Time{}, // set in DB layer
+		UpdatedAt:   time.Time{},
+	}
+
+	if err := s.db.CreateWatchlistItem(c.Request.Context(), item); err != nil {
+		if errors.Is(err, database.ErrDuplicateWatchlistItem) {
+			c.AbortWithStatusJSON(http.StatusConflict, gin.H{"error": "duplicate item"})
+			return
+		}
+		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "failed to create"})
+		return
+	}
+
+	c.JSON(http.StatusCreated, item)
+}
+
+func (s *Server) listWatchlistItemsHandler(c *gin.Context) {
+	var items []models.WatchlistItem
+	c.JSON(http.StatusOK, items)
+}
+
+func (s *Server) updateWatchlistItemHandler(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{"message": "watchlist item updated"})
+}
+
+func (s *Server) deleteWatchlistItemHandler(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{"message": "watchlist item deleted"})
 }

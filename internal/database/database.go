@@ -2,6 +2,7 @@ package database
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -10,6 +11,7 @@ import (
 	_ "github.com/joho/godotenv/autoload"
 	"github.com/neilsmahajan/watchlist-notify/internal/models"
 	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 )
@@ -18,6 +20,7 @@ type Service interface {
 	Health() map[string]string
 	UpsertUser(ctx context.Context, u *models.User) error
 	GetUserByEmail(ctx context.Context, email string) (*models.User, error)
+	CreateWatchlistItem(ctx context.Context, item *models.WatchlistItem) error
 }
 
 type service struct {
@@ -36,6 +39,11 @@ var (
 		}
 		return "US"
 	}()
+)
+
+var (
+	// ErrDuplicateWatchlistItem returned when unique constraint (user + tmdb id) violated
+	ErrDuplicateWatchlistItem = errors.New("watchlist item already exists for user")
 )
 
 func New() Service {
@@ -165,4 +173,32 @@ func (s *service) GetUserByEmail(ctx context.Context, email string) (*models.Use
 		return nil, err
 	}
 	return &user, nil
+}
+
+func (s *service) CreateWatchlistItem(ctx context.Context, item *models.WatchlistItem) error {
+	coll := s.db.Database(databaseName).Collection("watchlist_items")
+	now := time.Now()
+	item.AddedAt = now
+	item.UpdatedAt = now
+	// Defensive defaults
+	if item.Status == "" {
+		item.Status = models.WatchlistStatusPlanned
+	}
+	res, err := coll.InsertOne(ctx, item)
+	if err != nil {
+		// Detect duplicate key (user + tmdb id) -> 11000
+		var we mongo.WriteException
+		if errors.As(err, &we) {
+			for _, e := range we.WriteErrors {
+				if e.Code == 11000 {
+					return ErrDuplicateWatchlistItem
+				}
+			}
+		}
+		return err
+	}
+	if oid, ok := res.InsertedID.(primitive.ObjectID); ok {
+		item.ID = oid
+	}
+	return nil
 }
