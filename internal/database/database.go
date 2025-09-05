@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
 	"time"
 
 	_ "github.com/joho/godotenv/autoload"
@@ -21,7 +22,8 @@ type Service interface {
 	UpsertUser(ctx context.Context, u *models.User) error
 	GetUserByEmail(ctx context.Context, email string) (*models.User, error)
 	CreateWatchlistItem(ctx context.Context, item *models.WatchlistItem) error
-	ListWatchlistItems(ctx context.Context, userID primitive.ObjectID) ([]*models.WatchlistItem, error)
+	ListWatchlistItems(ctx context.Context, opts models.ListWatchlistOptions) ([]*models.WatchlistItem, error)
+	CountWatchlistItems(ctx context.Context, opts models.ListWatchlistOptions) (int64, error)
 	UpdateWatchlistItem(ctx context.Context, userID, itemID primitive.ObjectID, fields map[string]any) (*models.WatchlistItem, error)
 	DeleteWatchlistItem(ctx context.Context, userID, itemID primitive.ObjectID) error
 }
@@ -109,12 +111,17 @@ func ensureIndexes(ctx context.Context, db *mongo.Database) error {
 	if err != nil {
 		return err
 	}
-	// Watchlist indexes will be created lazily when collection used (optional to pre-create here)
+	// Watchlist indexes
 	watchlist := db.Collection("watchlist_items")
 	_, err = watchlist.Indexes().CreateMany(ctx, []mongo.IndexModel{
+		// Query patterns: user_id + status filter + sort added_at desc; listing by user only; duplicates by tmdb
 		{
-			Keys:    bson.D{{Key: "user_id", Value: 1}, {Key: "status", Value: 1}},
-			Options: options.Index().SetName("user_status_idx"),
+			Keys:    bson.D{{Key: "user_id", Value: 1}, {Key: "status", Value: 1}, {Key: "added_at", Value: -1}},
+			Options: options.Index().SetName("user_status_addedat_idx"),
+		},
+		{
+			Keys:    bson.D{{Key: "user_id", Value: 1}, {Key: "added_at", Value: -1}},
+			Options: options.Index().SetName("user_addedat_idx"),
 		},
 		{
 			Keys:    bson.D{{Key: "user_id", Value: 1}, {Key: "external_ids.tmdb", Value: 1}},
@@ -208,14 +215,24 @@ func (s *service) CreateWatchlistItem(ctx context.Context, item *models.Watchlis
 	return nil
 }
 
-func (s *service) ListWatchlistItems(ctx context.Context, userID primitive.ObjectID) ([]*models.WatchlistItem, error) {
+func (s *service) ListWatchlistItems(ctx context.Context, opts models.ListWatchlistOptions) ([]*models.WatchlistItem, error) {
 	coll := s.db.Database(databaseName).Collection("watchlist_items")
 	var items []*models.WatchlistItem
-	cursor, err := coll.Find(ctx, bson.M{"user_id": userID})
+	filter := buildWatchlistFilter(opts)
+	sort := resolveWatchlistSort(opts.Sort)
+	findOpts := options.Find().SetSort(sort)
+	if opts.Limit > 0 {
+		findOpts.SetLimit(int64(opts.Limit))
+	}
+	if opts.Offset > 0 {
+		findOpts.SetSkip(int64(opts.Offset))
+	}
+	cursor, err := coll.Find(ctx, filter, findOpts)
 	if err != nil {
 		return nil, err
 	}
 	defer cursor.Close(ctx)
+
 	for cursor.Next(ctx) {
 		var item models.WatchlistItem
 		if err := cursor.Decode(&item); err != nil {
@@ -226,7 +243,48 @@ func (s *service) ListWatchlistItems(ctx context.Context, userID primitive.Objec
 	if err := cursor.Err(); err != nil {
 		return nil, err
 	}
+
 	return items, nil
+}
+
+func (s *service) CountWatchlistItems(ctx context.Context, opts models.ListWatchlistOptions) (int64, error) {
+	coll := s.db.Database(databaseName).Collection("watchlist_items")
+	filter := buildWatchlistFilter(opts)
+	return coll.CountDocuments(ctx, filter)
+}
+
+// buildWatchlistFilter constructs a Mongo filter from list options
+func buildWatchlistFilter(opts models.ListWatchlistOptions) bson.M {
+	filter := bson.M{"user_id": opts.UserID}
+	if opts.Status != "" {
+		filter["status"] = opts.Status
+	}
+	if opts.Type != "" {
+		filter["type"] = opts.Type
+	}
+	if opts.Search != "" {
+		filter["title"] = bson.M{"$regex": opts.Search, "$options": "i"}
+	}
+	return filter
+}
+
+// resolveWatchlistSort parses sort strings like "-added_at", "title", "-year"
+func resolveWatchlistSort(sortStr string) bson.D {
+	if sortStr == "" {
+		return bson.D{{Key: "added_at", Value: -1}}
+	}
+	field := sortStr
+	dir := 1
+	if strings.HasPrefix(sortStr, "-") {
+		dir = -1
+		field = strings.TrimPrefix(sortStr, "-")
+	}
+	switch field {
+	case "added_at", "title", "year", "status":
+		return bson.D{{Key: field, Value: dir}}
+	default:
+		return bson.D{{Key: "added_at", Value: -1}}
+	}
 }
 
 func (s *service) UpdateWatchlistItem(ctx context.Context, userID, itemID primitive.ObjectID, fields map[string]any) (*models.WatchlistItem, error) {

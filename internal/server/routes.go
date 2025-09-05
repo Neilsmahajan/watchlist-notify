@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -178,12 +179,61 @@ func (s *Server) listWatchlistItemsHandler(c *gin.Context) {
 		return
 	}
 
-	items, err := s.db.ListWatchlistItems(c.Request.Context(), user.ID)
+	// Parse query params
+	q := c.Request.URL.Query()
+	limit := 20
+	if v := q.Get("limit"); v != "" {
+		if n, convErr := strconv.Atoi(v); convErr == nil && n > 0 {
+			if n > 100 {
+				n = 100
+			}
+			limit = n
+		}
+	}
+	offset := 0
+	if v := q.Get("offset"); v != "" {
+		if n, convErr := strconv.Atoi(v); convErr == nil && n >= 0 {
+			offset = n
+		}
+	}
+	status := strings.ToLower(q.Get("status"))
+	if status != "" && status != models.WatchlistStatusPlanned && status != models.WatchlistStatusWatching && status != models.WatchlistStatusFinished {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "invalid status filter"})
+		return
+	}
+	itemType := strings.ToLower(q.Get("type"))
+	if itemType != "" && itemType != models.WatchlistTypeMovie && itemType != models.WatchlistTypeShow {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "invalid type filter"})
+		return
+	}
+	search := q.Get("search")
+	sort := q.Get("sort") // e.g. -added_at, title, -year
+	withCount := q.Get("with_count") == "1"
+
+	opts := models.ListWatchlistOptions{
+		UserID: user.ID,
+		Limit:  limit,
+		Offset: offset,
+		Status: status,
+		Type:   itemType,
+		Search: search,
+		Sort:   sort,
+	}
+	items, err := s.db.ListWatchlistItems(c.Request.Context(), opts)
 	if err != nil {
 		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "failed to fetch items"})
 		return
 	}
-	c.JSON(http.StatusOK, items)
+	meta := gin.H{"limit": limit, "offset": offset, "returned": len(items)}
+	if len(items) == limit {
+		meta["next_offset"] = offset + limit
+	}
+	if withCount {
+		if total, cntErr := s.db.CountWatchlistItems(c.Request.Context(), opts); cntErr == nil {
+			meta["total"] = total
+		}
+	}
+	c.JSON(http.StatusOK, gin.H{"items": items, "meta": meta})
 }
 
 func (s *Server) updateWatchlistItemHandler(c *gin.Context) {

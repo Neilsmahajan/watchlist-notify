@@ -34,3 +34,13 @@ type WatchlistItem struct {
 	LastCheckedAt *time.Time          `bson:"last_checked_at,omitempty" json:"last_checked_at,omitempty"`
 	Availability  []AvailabilityMatch `bson:"availability,omitempty" json:"availability,omitempty"` // optional embeded or compute
 }
+
+type ListWatchlistOptions struct {
+	UserID primitive.ObjectID
+	Limit  int
+	Offset int
+	Status string
+	Type   string
+	Search string
+	Sort   string
+}
