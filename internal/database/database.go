@@ -22,6 +22,7 @@ type Service interface {
 	UpsertUser(ctx context.Context, u *models.User) error
 	GetUserByEmail(ctx context.Context, email string) (*models.User, error)
 	UpdateServices(ctx context.Context, userID primitive.ObjectID, services []models.ServiceSubscription) (*models.User, error)
+	UpdateUserPreferences(ctx context.Context, userID primitive.ObjectID, fields map[string]any) (*models.User, error)
 	CreateWatchlistItem(ctx context.Context, item *models.WatchlistItem) error
 	ListWatchlistItems(ctx context.Context, opts models.ListWatchlistOptions) ([]*models.WatchlistItem, error)
 	CountWatchlistItems(ctx context.Context, opts models.ListWatchlistOptions) (int64, error)
@@ -203,6 +204,24 @@ func (s *service) UpdateServices(ctx context.Context, userID primitive.ObjectID,
 			"services":   services,
 			"updated_at": now,
 		},
+	}, options.FindOneAndUpdate().SetReturnDocument(options.After))
+	if err := res.Decode(&updated); err != nil {
+		return nil, err
+	}
+	return &updated, nil
+}
+
+func (s *service) UpdateUserPreferences(ctx context.Context, userID primitive.ObjectID, fields map[string]any) (*models.User, error) {
+	if len(fields) == 0 {
+		return nil, errors.New("no fields to update")
+	}
+	collection := s.db.Database(databaseName).Collection("users")
+	// Always update the top-level updated_at
+	now := time.Now()
+	fields["updated_at"] = now
+	var updated models.User
+	res := collection.FindOneAndUpdate(ctx, bson.M{"_id": userID}, bson.M{
+		"$set": fields,
 	}, options.FindOneAndUpdate().SetReturnDocument(options.After))
 	if err := res.Decode(&updated); err != nil {
 		return nil, err

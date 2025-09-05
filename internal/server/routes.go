@@ -38,6 +38,7 @@ func (s *Server) RegisterRoutes() http.Handler {
 	protected := r.Group("/api")
 	protected.Use(middleware.AuthRequired())
 	protected.GET("/me", s.meHandler)
+	protected.PATCH("/me/preferences", s.updateUserPreferencesHandler)
 	protected.PATCH("/me/services", s.updateUserServicesHandler)
 	protected.GET("/services", s.listUserServicesHandler)
 	protected.POST("/watchlist", s.createWatchlistItemHandler)
@@ -60,22 +61,111 @@ func (s *Server) healthHandler(c *gin.Context) {
 
 // meHandler returns the authenticated user's full record from the database
 func (s *Server) meHandler(c *gin.Context) {
-	emailVal, exists := c.Get("user_email")
-	if !exists {
+	emailVal, ok := c.Get("user_email")
+	if !ok {
 		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
 		return
 	}
-	email, _ := emailVal.(string)
+	email := emailVal.(string)
+
 	user, err := s.db.GetUserByEmail(c.Request.Context(), email)
-	if err != nil {
-		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "failed to fetch user"})
-		return
-	}
-	if user == nil {
-		c.AbortWithStatusJSON(http.StatusNotFound, gin.H{"error": "user not found"})
+	if err != nil || user == nil {
+		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "user not found"})
 		return
 	}
 	c.JSON(http.StatusOK, user)
+}
+
+func (s *Server) updateUserPreferencesHandler(c *gin.Context) {
+	emailVal, ok := c.Get("user_email")
+	if !ok {
+		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+	email := emailVal.(string)
+
+	user, err := s.db.GetUserByEmail(c.Request.Context(), email)
+	if err != nil || user == nil {
+		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "user not found"})
+		return
+	}
+
+	var body struct {
+		NotifyEmail      *string `json:"notify_email"`
+		UseAccountEmail  *bool   `json:"use_account_email"`
+		MarketingConsent *bool   `json:"marketing_consent"`
+		DigestConsent    *bool   `json:"digest_consent"`
+		DigestFrequency  *string `json:"digest_frequency"`
+		QuietHoursStart  *int    `json:"quiet_hours_start"`
+		QuietHoursEnd    *int    `json:"quiet_hours_end"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
+		return
+	}
+
+	// Build updates and validate
+	updates := map[string]any{}
+	if body.NotifyEmail != nil {
+		email := strings.TrimSpace(*body.NotifyEmail)
+		// allow empty if UseAccountEmail will be true
+		if email == "" && (body.UseAccountEmail == nil || !*body.UseAccountEmail) {
+			c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "notify_email cannot be empty unless use_account_email is true"})
+			return
+		}
+		updates["preferences.notify_email"] = email
+	}
+	if body.UseAccountEmail != nil {
+		updates["preferences.use_account_email"] = *body.UseAccountEmail
+		// If switching to account email, we can clear notify_email to avoid confusion (optional)
+		if *body.UseAccountEmail {
+			// Only clear if caller didn’t specify a custom notify_email in same request
+			if body.NotifyEmail == nil {
+				updates["preferences.notify_email"] = ""
+			}
+		}
+	}
+	if body.MarketingConsent != nil {
+		updates["preferences.marketing_consent"] = *body.MarketingConsent
+	}
+	if body.DigestConsent != nil {
+		updates["preferences.digest_consent"] = *body.DigestConsent
+	}
+	if body.DigestFrequency != nil {
+		df := strings.ToLower(strings.TrimSpace(*body.DigestFrequency))
+		switch df {
+		case models.DigestFrequencyDaily, models.DigestFrequencyWeekly, models.DigestFrequencyManual:
+			updates["preferences.digest_frequency"] = df
+		default:
+			c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "invalid digest_frequency"})
+			return
+		}
+	}
+	if body.QuietHoursStart != nil {
+		if *body.QuietHoursStart < 0 || *body.QuietHoursStart > 23 {
+			c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "quiet_hours_start must be 0-23"})
+			return
+		}
+		updates["preferences.quiet_hours_start"] = *body.QuietHoursStart
+	}
+	if body.QuietHoursEnd != nil {
+		if *body.QuietHoursEnd < 0 || *body.QuietHoursEnd > 23 {
+			c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "quiet_hours_end must be 0-23"})
+			return
+		}
+		updates["preferences.quiet_hours_end"] = *body.QuietHoursEnd
+	}
+	if len(updates) == 0 {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "no fields to update"})
+		return
+	}
+
+	updated, err := s.db.UpdateUserPreferences(c.Request.Context(), user.ID, updates)
+	if err != nil {
+		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "failed to update preferences"})
+		return
+	}
+	c.JSON(http.StatusOK, updated)
 }
 
 func (s *Server) updateUserServicesHandler(c *gin.Context) {
