@@ -36,5 +36,6 @@ func (s *Server) RegisterRoutes() http.Handler {
 	protected.GET("/watchlist", s.listWatchlistItemsHandler)
 	protected.PATCH("/watchlist/:id", s.updateWatchlistItemHandler)
 	protected.DELETE("/watchlist/:id", s.deleteWatchlistItemHandler)
+	protected.GET("/search", s.searchHandler)
 	return r
 }

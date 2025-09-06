@@ -11,20 +11,30 @@ import (
 
 	"github.com/neilsmahajan/watchlist-notify/internal/auth"
 	"github.com/neilsmahajan/watchlist-notify/internal/database"
+	"github.com/neilsmahajan/watchlist-notify/internal/providers/tmdb"
 )
 
 type Server struct {
 	port int
 	db   database.Service
+	tmdb *tmdb.Client
 }
 
 func NewServer() *http.Server {
 	port, _ := strconv.Atoi(os.Getenv("PORT"))
 
 	auth.Init()
+	tmdbKey := os.Getenv("TMDB_API_KEY")
+	var tmdbClient *tmdb.Client
+	if tmdbKey != "" {
+		if c, err := tmdb.New(tmdbKey); err == nil {
+			tmdbClient = c
+		}
+	}
 	NewServer := &Server{
 		port: port,
 		db:   database.New(),
+		tmdb: tmdbClient,
 	}
 
 	// Declare Server config
