@@ -218,6 +218,7 @@ Implemented:
 - `GET /api/watchlist` – list items
 - `DELETE /api/watchlist/:id`
 - `PUT /api/watchlist/:id` – update metadata / status
+- `GET /api/search` - search titles via TMDb
 
 Near-term planned (TMDb integration):
 
