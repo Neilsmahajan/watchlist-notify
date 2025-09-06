@@ -2,7 +2,7 @@
 
 Track your personal movie & TV show watchlist across streaming platforms and automatically get email alerts when titles become available on the services you already subscribe to.
 
-> Status: Early development (backend in Go + Gin + MongoDB, frontend in Next.js). Expect breaking changes until v0.1.0.
+> Status: Active development. Implementing Go backend (Gin + MongoDB + Google OAuth) and a Next.js frontend. TMDb integration (search + watch providers) planned next. Expect breaking changes until v0.1.0.
 
 ## Table of Contents
 
@@ -36,6 +36,7 @@ Core (in-progress):
 - Manage user profile (email, display name, picture)
 - Persist user watchlist items (title, type, year, external IDs TBD)
 - Persist user streaming service subscriptions (Netflix, Max, Prime Video, etc.)
+- Display availability of watchlist items across the user's streaming subscriptions in the frontend (via TMDb watch providers; WIP)
 - Periodic availability scan (scheduled job) -> email digest
 - User preferences: notification frequency, primary email
 
@@ -71,6 +72,7 @@ Future / Stretch:
 			  │                               │
 			  │                               ▼ (planned)
 			  │                     Availability Providers (APIs)
+			  │                     • TMDb (search + watch/providers) [planned next]
 			  │                               │
 			  │                               ▼
 			  │                        Email Provider (planned)
@@ -91,13 +93,16 @@ Backend:
 
 - Go (Gin web framework)
 - MongoDB (official Go driver)
+- Google OAuth (sign-in)
 - JWT (HMAC) stored in HttpOnly cookie
 - Docker / Docker Compose for local DB
+- TMDb API (planned next: search + watch providers for availability)
 
 Frontend:
 
 - Next.js 15 (App Router, React 19)
 - Tailwind CSS (configured; early)
+- Shows availability for watchlist items based on the user's saved services (WIP)
 
 Infrastructure (planned):
 
@@ -173,6 +178,12 @@ DB_USERNAME=devuser           # optional
 DB_ROOT_PASSWORD=devpassword  # optional
 DB_DATABASE=watchlist_notify
 
+# TMDb (planned next)
+TMDB_API_KEY=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+# Optional defaults (keep or set in code):
+# TMDB_API_BASE=https://api.themoviedb.org/3
+# TMDB_REGION=US
+
 # Email (planned)
 EMAIL_FROM=watchlist@watchlistnotify.com
 EMAIL_PROVIDER_API_KEY=xxx
@@ -198,17 +209,21 @@ Implemented:
 - `GET /health` – service health
 - `GET /auth/google/login` – start OAuth
 - `GET /auth/google/callback` – complete OAuth (returns JSON + sets cookie)
+- `GET /auth/logout` – clear auth cookie
 - `GET /api/me` – authenticated user document
-
-Planned (draft):
-
+- `PATCH /api/me/preferences` – update user preferences (email, name, notification prefs)
+- `GET /api/me/services` – list user streaming services
+- `PATCH /api/me/services` – update user streaming services
 - `POST /api/watchlist` – add item
 - `GET /api/watchlist` – list items
 - `DELETE /api/watchlist/:id`
 - `PUT /api/watchlist/:id` – update metadata / status
-- `GET /api/services` – list supported streaming services
-- `PUT /api/preferences` – update notification preferences
-- `POST /api/logout` – clear auth cookie
+
+Near-term planned (TMDb integration):
+
+- `GET /api/search?query=...&type=movie|tv` – search titles via TMDb
+- `GET /api/availability/:id?type=movie|tv` – get provider availability for a title (scoped to user region and filtered to user's services)
+- `GET /api/me/availability` – aggregate availability for the user's entire watchlist (paginated)
 
 Error Format (current):
 
@@ -334,8 +349,8 @@ Deployment Checklist (API – future):
 
 ## 14. Roadmap / Milestones
 
-- [ ] v0.1.0 MVP: Auth + basic watchlist CRUD + manual availability mock + email stub
-- [ ] v0.2.0 Availability integration (1 real provider API)
+- [ ] v0.1.0 MVP: Auth + basic watchlist CRUD + availability lookups (TMDb) surfaced in UI (manual/partial acceptable) + email stub
+- [ ] v0.2.0 Availability integration (solidify TMDb provider + region support)
 - [ ] v0.3.0 Digest email + preferences
 - [ ] v0.4.0 Multiple providers + region support
 - [ ] v0.5.0 Public beta (stability + docs)
