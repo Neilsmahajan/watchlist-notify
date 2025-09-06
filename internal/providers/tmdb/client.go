@@ -197,3 +197,66 @@ func looksLikeBearer(s string) bool {
 	}
 	return false
 }
+
+// Providers
+type Provider struct {
+	ProviderID      int    `json:"provider_id"`
+	ProviderName    string `json:"provider_name"`
+	LogoPath        string `json:"logo_path"`
+	DisplayPriority int    `json:"display_priority"`
+}
+
+type RegionProviders struct {
+	Link     string     `json:"link"`
+	Flatrate []Provider `json:"flatrate"`
+	Free     []Provider `json:"free"`
+	Ads      []Provider `json:"ads"`
+	Buy      []Provider `json:"buy"`
+	Rent     []Provider `json:"rent"`
+}
+
+type ProvidersResponse struct {
+	ID      int                        `json:"id"`
+	Results map[string]RegionProviders `json:"results"`
+}
+
+func (c *Client) GetMovieProviders(ctx context.Context, id int) (*ProvidersResponse, error) {
+	endpoint := fmt.Sprintf("%s/movie/%d/watch/providers", c.baseURL, id)
+	return c.doProviders(ctx, endpoint)
+}
+
+func (c *Client) GetTVProviders(ctx context.Context, id int) (*ProvidersResponse, error) {
+	endpoint := fmt.Sprintf("%s/tv/%d/watch/providers", c.baseURL, id)
+	return c.doProviders(ctx, endpoint)
+}
+
+func (c *Client) doProviders(ctx context.Context, endpoint string) (*ProvidersResponse, error) {
+	// For providers, TMDb ignores api_key in query when using bearer, but we still attach api_key when present.
+	// If apiKey is set and endpoint has no query, we add it for compatibility.
+	if c.apiKey != "" {
+		if !strings.Contains(endpoint, "?") {
+			endpoint = endpoint + "?api_key=" + url.QueryEscape(c.apiKey)
+		}
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Accept", "application/json")
+	if c.bearer != "" {
+		req.Header.Set("Authorization", "Bearer "+c.bearer)
+	}
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("tmdb providers failed: %d", resp.StatusCode)
+	}
+	var pr ProvidersResponse
+	if err := json.NewDecoder(resp.Body).Decode(&pr); err != nil {
+		return nil, err
+	}
+	return &pr, nil
+}
