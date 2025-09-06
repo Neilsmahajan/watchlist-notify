@@ -3,7 +3,6 @@ package server
 import (
 	"net/http"
 	"strconv"
-	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/neilsmahajan/watchlist-notify/internal/models"
@@ -80,8 +79,4 @@ func validWatchlistType(t string) bool {
 	default:
 		return false
 	}
-}
-
-func normalizeLower(s string) string {
-	return strings.ToLower(strings.TrimSpace(s))
 }

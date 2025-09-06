@@ -1,0 +1,250 @@
+package server
+
+import (
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/gin-gonic/gin"
+	"github.com/neilsmahajan/watchlist-notify/internal/models"
+)
+
+func (s *Server) meHandler(c *gin.Context) {
+	if user, ok := s.getUser(c); ok {
+		c.JSON(http.StatusOK, user)
+	}
+}
+
+func (s *Server) updateUserPreferencesHandler(c *gin.Context) {
+	user, ok := s.getUser(c)
+	if !ok {
+		return
+	}
+
+	var body struct {
+		NotifyEmail      *string `json:"notify_email"`
+		UseAccountEmail  *bool   `json:"use_account_email"`
+		MarketingConsent *bool   `json:"marketing_consent"`
+		DigestConsent    *bool   `json:"digest_consent"`
+		DigestFrequency  *string `json:"digest_frequency"`
+		QuietHoursStart  *int    `json:"quiet_hours_start"`
+		QuietHoursEnd    *int    `json:"quiet_hours_end"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		jsonError(c, http.StatusBadRequest, "invalid body")
+		return
+	}
+
+	// Build updates and validate
+	updates := map[string]any{}
+	if body.NotifyEmail != nil {
+		email := strings.TrimSpace(*body.NotifyEmail)
+		// allow empty if UseAccountEmail will be true
+		if email == "" && (body.UseAccountEmail == nil || !*body.UseAccountEmail) {
+			jsonError(c, http.StatusBadRequest, "notify_email cannot be empty unless use_account_email is true")
+			return
+		}
+		updates["preferences.notify_email"] = email
+	}
+	if body.UseAccountEmail != nil {
+		updates["preferences.use_account_email"] = *body.UseAccountEmail
+		// If switching to account email, we can clear notify_email to avoid confusion (optional)
+		if *body.UseAccountEmail {
+			// Only clear if caller didn’t specify a custom notify_email in same request
+			if body.NotifyEmail == nil {
+				updates["preferences.notify_email"] = ""
+			}
+		}
+	}
+	if body.MarketingConsent != nil {
+		updates["preferences.marketing_consent"] = *body.MarketingConsent
+	}
+	if body.DigestConsent != nil {
+		updates["preferences.digest_consent"] = *body.DigestConsent
+	}
+	if body.DigestFrequency != nil {
+		df := strings.ToLower(strings.TrimSpace(*body.DigestFrequency))
+		switch df {
+		case models.DigestFrequencyDaily, models.DigestFrequencyWeekly, models.DigestFrequencyManual:
+			updates["preferences.digest_frequency"] = df
+		default:
+			jsonError(c, http.StatusBadRequest, "invalid digest_frequency")
+			return
+		}
+	}
+	if body.QuietHoursStart != nil {
+		if *body.QuietHoursStart < 0 || *body.QuietHoursStart > 23 {
+			jsonError(c, http.StatusBadRequest, "quiet_hours_start must be 0-23")
+			return
+		}
+		updates["preferences.quiet_hours_start"] = *body.QuietHoursStart
+	}
+	if body.QuietHoursEnd != nil {
+		if *body.QuietHoursEnd < 0 || *body.QuietHoursEnd > 23 {
+			jsonError(c, http.StatusBadRequest, "quiet_hours_end must be 0-23")
+			return
+		}
+		updates["preferences.quiet_hours_end"] = *body.QuietHoursEnd
+	}
+	if len(updates) == 0 {
+		jsonError(c, http.StatusBadRequest, "no fields to update")
+		return
+	}
+
+	updated, err := s.db.UpdateUserPreferences(c.Request.Context(), user.ID, updates)
+	if err != nil {
+		jsonError(c, http.StatusInternalServerError, "failed to update preferences")
+		return
+	}
+	c.JSON(http.StatusOK, updated)
+}
+
+func (s *Server) listUserServicesHandler(c *gin.Context) {
+	user, ok := s.getUser(c)
+	if !ok {
+		return
+	}
+
+	// Map user's services by normalized code for quick lookup
+	byCode := make(map[string]models.ServiceSubscription, len(user.Services))
+	for _, ssub := range user.Services {
+		byCode[strings.ToLower(ssub.Code)] = ssub
+	}
+
+	// Supported catalog
+	catalog := models.ServiceCatalog
+
+	type serviceOut struct {
+		Code    string     `json:"code"`
+		Name    string     `json:"name"`
+		Active  bool       `json:"active"`
+		AddedAt *time.Time `json:"added_at,omitempty"`
+		Plan    string     `json:"plan,omitempty"`
+	}
+
+	out := make([]serviceOut, 0, len(catalog))
+	for _, def := range catalog {
+		entry, ok := byCode[def.Code]
+		var added *time.Time
+		if ok && !entry.AddedAt.IsZero() {
+			t := entry.AddedAt
+			added = &t
+		}
+		plan := ""
+		if ok && entry.Plan != "" {
+			plan = entry.Plan
+		}
+		out = append(out, serviceOut{
+			Code:    def.Code,
+			Name:    def.Name,
+			Active:  ok && entry.Active,
+			AddedAt: added,
+			Plan:    plan,
+		})
+	}
+
+	c.JSON(http.StatusOK, gin.H{"services": out})
+}
+
+func (s *Server) updateUserServicesHandler(c *gin.Context) {
+	user, ok := s.getUser(c)
+	if !ok {
+		return
+	}
+
+	type toggle struct {
+		Code   string `json:"code" binding:"required"`   // e.g. "netflix"
+		Active bool   `json:"active" binding:"required"` // true to add/activate, false to remove/deactivate
+	}
+
+	var body struct {
+		Add    []string `json:"add"`
+		Remove []string `json:"remove"`
+		Toggle []toggle `json:"toggle"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		jsonError(c, http.StatusBadRequest, "invalid body")
+		return
+	}
+
+	// Validate service codes and normalize intent into add/remove sets
+	validCodes := models.ServiceCodeSet
+	toAdd := map[string]bool{}
+	toRemove := map[string]bool{}
+	for _, code := range body.Add {
+		code = strings.ToLower(code)
+		if !validCodes[code] {
+			jsonError(c, http.StatusBadRequest, "invalid service code in add: "+code)
+			return
+		}
+		toAdd[code] = true
+		delete(toRemove, code)
+	}
+	for _, code := range body.Remove {
+		code = strings.ToLower(code)
+		if !validCodes[code] {
+			jsonError(c, http.StatusBadRequest, "invalid service code in remove: "+code)
+			return
+		}
+		toRemove[code] = true
+		delete(toAdd, code)
+	}
+	for _, t := range body.Toggle {
+		code := strings.ToLower(t.Code)
+		if !validCodes[code] {
+			jsonError(c, http.StatusBadRequest, "invalid service code in toggle: "+code)
+			return
+		}
+		if t.Active {
+			toAdd[code] = true
+			delete(toRemove, code)
+		} else {
+			toRemove[code] = true
+			delete(toAdd, code)
+		}
+	}
+	if len(toAdd) == 0 && len(toRemove) == 0 {
+		jsonError(c, http.StatusBadRequest, "no changes requested")
+		return
+	}
+
+	// Merge with existing services without dropping unchanged entries
+	now := time.Now()
+	existing := map[string]models.ServiceSubscription{}
+	for _, ssub := range user.Services {
+		existing[strings.ToLower(ssub.Code)] = ssub
+	}
+	// Apply additions/activations
+	for code := range toAdd {
+		if es, ok := existing[code]; ok {
+			es.Active = true
+			if es.AddedAt.IsZero() {
+				es.AddedAt = now
+			}
+			es.Code = code
+			existing[code] = es
+		} else {
+			existing[code] = models.ServiceSubscription{Code: code, AddedAt: now, Active: true}
+		}
+	}
+	// Apply removals/deactivations
+	for code := range toRemove {
+		if es, ok := existing[code]; ok {
+			es.Active = false
+			existing[code] = es
+		}
+		// If not already present, no-op; we don't create new inactive entries on remove
+	}
+	// Build slice back preserving all entries
+	newServices := make([]models.ServiceSubscription, 0, len(existing))
+	for _, v := range existing {
+		newServices = append(newServices, v)
+	}
+	user.Services = newServices
+	updatedUser, err := s.db.UpdateServices(c.Request.Context(), user.ID, user.Services)
+	if err != nil {
+		jsonError(c, http.StatusInternalServerError, "failed to update services")
+		return
+	}
+	c.JSON(http.StatusOK, updatedUser)
+}
