@@ -1,0 +1,27 @@
+meta {
+  name: Update Services
+  type: http
+  seq: 5
+}
+
+patch {
+  url: {{base_url}}/api/me/services
+  body: json
+  auth: bearer
+}
+
+auth:bearer {
+  token: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJlbWFpbCI6Im5laWxzbWFoYWphbkBnbWFpbC5jb20iLCJleHAiOjE3NTcyMDYxMzUsImlhdCI6MTc1NzExOTczNX0.1OkLywC7BrtGh0zvJxT5y0u5YC8wpaj1ZssYD7qMvFU
+}
+
+body:json {
+  {
+    "add": [
+      "max"
+    ]
+  }
+}
+
+settings {
+  encodeUrl: true
+}

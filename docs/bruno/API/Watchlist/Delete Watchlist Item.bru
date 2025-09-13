@@ -1,0 +1,19 @@
+meta {
+  name: Delete Watchlist Item
+  type: http
+  seq: 9
+}
+
+delete {
+  url: {{base_url}}/api/watchlist/{{ID}}
+  body: none
+  auth: inherit
+}
+
+vars:pre-request {
+  ID: 68baf8027969c36d2952ba95
+}
+
+settings {
+  encodeUrl: true
+}

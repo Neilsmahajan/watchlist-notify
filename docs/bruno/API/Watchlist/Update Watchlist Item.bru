@@ -1,0 +1,25 @@
+meta {
+  name: Update Watchlist Item
+  type: http
+  seq: 8
+}
+
+patch {
+  url: {{base_url}}/api/watchlist/:id
+  body: json
+  auth: inherit
+}
+
+params:path {
+  id: 68c59e8d4c2c3b2155f4f1a1
+}
+
+body:json {
+  {
+    "tmdb_id": 1396
+  }
+}
+
+settings {
+  encodeUrl: true
+}

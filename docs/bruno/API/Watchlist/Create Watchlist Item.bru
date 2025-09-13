@@ -1,0 +1,26 @@
+meta {
+  name: Create Watchlist Item
+  type: http
+  seq: 7
+}
+
+post {
+  url: {{base_url}}/api/watchlist
+  body: json
+  auth: inherit
+}
+
+headers {
+  Content-Type: application/json
+}
+
+body:json {
+  {
+    "title": "Breaking Bad",
+    "type": "show"
+  }
+}
+
+settings {
+  encodeUrl: false
+}

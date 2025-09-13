@@ -1,0 +1,24 @@
+meta {
+  name: Availability
+  type: http
+  seq: 11
+}
+
+get {
+  url: {{base_url}}/api/availability/:id?type=movie&region=US
+  body: none
+  auth: inherit
+}
+
+params:query {
+  type: movie
+  region: US
+}
+
+params:path {
+  id: 550
+}
+
+settings {
+  encodeUrl: true
+}

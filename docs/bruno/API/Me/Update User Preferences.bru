@@ -1,0 +1,21 @@
+meta {
+  name: Update User Preferences
+  type: http
+  seq: 3
+}
+
+patch {
+  url: {{base_url}}/api/me/preferences
+  body: json
+  auth: inherit
+}
+
+body:json {
+  {
+    "digest_frequency": "daily"
+  }
+}
+
+settings {
+  encodeUrl: true
+}

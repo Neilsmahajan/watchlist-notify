@@ -1,0 +1,22 @@
+meta {
+  name: List Watchlist Items
+  type: http
+  seq: 6
+}
+
+get {
+  url: {{base_url}}/api/watchlist?type=show&sort=title
+  body: none
+  auth: inherit
+}
+
+params:query {
+  type: show
+  sort: title
+  ~limit: 2
+  ~status: planned
+}
+
+settings {
+  encodeUrl: false
+}

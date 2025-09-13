@@ -1,0 +1,24 @@
+meta {
+  name: Search
+  type: http
+  seq: 10
+}
+
+get {
+  url: {{base_url}}/api/search?query=Breaking%20Bad&type=tv&page=1&include_adult=false&language=en-US&region=US
+  body: none
+  auth: inherit
+}
+
+params:query {
+  query: Breaking%20Bad
+  type: tv
+  page: 1
+  include_adult: false
+  language: en-US
+  region: US
+}
+
+settings {
+  encodeUrl: true
+}
