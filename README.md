@@ -280,6 +280,13 @@ make itest
 
 Linting (add later): golangci-lint (planned), frontend ESLint already present.
 
+API requests (Bruno):
+
+- Collection lives at `docs/bruno/`. Open that folder in Bruno to load requests.
+- Use `docs/bruno/environments/local.example.bru` as a template to create `local.bru` (ignored). Set `base_url` (e.g., `http://localhost:8080`) and `token`.
+- Auth is configured at the `API` folder level using `{{token}}`. Get a token via `GET /auth/google/login` -> complete OAuth -> copy `token` from `/auth/google/callback` JSON.
+- All request URLs use `{{base_url}}`; path params can be set as variables (e.g., `{{id}}`).
+
 ## 12. Make Targets Cheat Sheet
 
 | Target           | Description                             |

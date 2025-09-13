@@ -32,3 +32,8 @@ main
 # OS X generated file
 .DS_Store
 
+# Bruno
+docs/bruno/environments/*.bru
+!docs/bruno/environments/*.example.bru
+docs/bruno/vault.json
+docs/bruno/secrets/**
