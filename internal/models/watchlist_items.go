@@ -6,12 +6,6 @@ import (
 	"go.mongodb.org/mongo-driver/bson/primitive"
 )
 
-type ExternalIDs struct {
-	TMDB int    `bson:"tmdb,omitempty" json:"tmdb,omitempty"`
-	IMDB string `bson:"imdb,omitempty" json:"imdb,omitempty"`
-	TVDB int    `bson:"tvdb,omitempty" json:"tvdb,omitempty"`
-}
-
 type AvailabilityMatch struct {
 	ServiceCode string    `bson:"service_code" json:"service_code"`
 	Region      string    `bson:"region" json:"region"`
@@ -26,7 +20,7 @@ type WatchlistItem struct {
 	Title         string              `bson:"title" json:"title"`
 	Type          string              `bson:"type" json:"type"` // enum: movie | show (See constants)
 	Year          int                 `bson:"year,omitempty" json:"year,omitempty"`
-	ExternalIDs   ExternalIDs         `bson:"external_ids,omitempty" json:"external_ids,omitempty"`
+	TMDbID        int                 `bson:"tmdb_id,omitempty" json:"tmdb_id,omitempty"`
 	Tags          []string            `bson:"tags,omitempty" json:"tags,omitempty"`
 	Status        string              `bson:"status" json:"status"` // enum: planned | watching | finished
 	AddedAt       time.Time           `bson:"added_at" json:"added_at"`

@@ -121,6 +121,22 @@ func (s *service) UpdateWatchlistItem(ctx context.Context, userID, itemID primit
 		if res.Err() == mongo.ErrNoDocuments {
 			return nil, ErrWatchlistItemNotFound
 		}
+		// Map duplicate key errors to domain error for nicer 409 handling
+		var we mongo.WriteException
+		if errors.As(res.Err(), &we) {
+			for _, e := range we.WriteErrors {
+				if e.Code == 11000 {
+					return nil, ErrDuplicateWatchlistItem
+				}
+			}
+		}
+		// Some drivers surface duplicate as CommandError
+		var ce mongo.CommandError
+		if errors.As(res.Err(), &ce) {
+			if ce.Code == 11000 {
+				return nil, ErrDuplicateWatchlistItem
+			}
+		}
 		return nil, res.Err()
 	}
 	if err := res.Decode(&updated); err != nil {

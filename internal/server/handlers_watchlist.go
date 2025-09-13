@@ -60,25 +60,25 @@ func (s *Server) createWatchlistItemHandler(c *gin.Context) {
 		}
 	}
 
-	var ext models.ExternalIDs
-	if body.TMDB != nil {
-		ext.TMDB = *body.TMDB
-	}
-	if body.IMDB != "" {
-		ext.IMDB = body.IMDB
+	item := &models.WatchlistItem{
+		ID:        primitive.NilObjectID,
+		UserID:    user.ID,
+		Title:     body.Title,
+		Type:      typeVal,
+		Year:      body.Year,
+		Tags:      body.Tags,
+		Status:    statusVal,
+		AddedAt:   time.Time{}, // set in DB layer
+		UpdatedAt: time.Time{},
 	}
 
-	item := &models.WatchlistItem{
-		ID:          primitive.NilObjectID,
-		UserID:      user.ID,
-		Title:       body.Title,
-		Type:        typeVal,
-		Year:        body.Year,
-		ExternalIDs: ext,
-		Tags:        body.Tags,
-		Status:      statusVal,
-		AddedAt:     time.Time{}, // set in DB layer
-		UpdatedAt:   time.Time{},
+	// Optional association with TMDb ID if provided
+	if body.TMDB != nil {
+		if *body.TMDB <= 0 {
+			jsonError(c, http.StatusBadRequest, "invalid tmdb_id")
+			return
+		}
+		item.TMDbID = *body.TMDB
 	}
 
 	if err := s.db.CreateWatchlistItem(c.Request.Context(), item); err != nil {
@@ -171,6 +171,7 @@ func (s *Server) updateWatchlistItemHandler(c *gin.Context) {
 		Status *string  `json:"status"`
 		Tags   []string `json:"tags"`
 		Year   *int     `json:"year"`
+		TMDB   *int     `json:"tmdb_id"`
 	}
 	if err := c.ShouldBindJSON(&body); err != nil {
 		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
@@ -204,6 +205,13 @@ func (s *Server) updateWatchlistItemHandler(c *gin.Context) {
 		}
 		update["year"] = *body.Year
 	}
+	if body.TMDB != nil {
+		if *body.TMDB <= 0 {
+			c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "invalid tmdb_id"})
+			return
+		}
+		update["tmdb_id"] = *body.TMDB
+	}
 
 	if len(update) == 0 {
 		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "no fields to update"})
@@ -214,6 +222,10 @@ func (s *Server) updateWatchlistItemHandler(c *gin.Context) {
 	if err != nil {
 		if errors.Is(err, database.ErrWatchlistItemNotFound) {
 			c.AbortWithStatusJSON(http.StatusNotFound, gin.H{"error": "not found"})
+			return
+		}
+		if errors.Is(err, database.ErrDuplicateWatchlistItem) {
+			c.AbortWithStatusJSON(http.StatusConflict, gin.H{"error": "duplicate item"})
 			return
 		}
 		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "update failed"})

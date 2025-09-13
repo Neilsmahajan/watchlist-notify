@@ -125,8 +125,9 @@ func ensureIndexes(ctx context.Context, db *mongo.Database) error {
 			Options: options.Index().SetName("user_addedat_idx"),
 		},
 		{
-			Keys:    bson.D{{Key: "user_id", Value: 1}, {Key: "external_ids.tmdb", Value: 1}},
-			Options: options.Index().SetUnique(true).SetPartialFilterExpression(bson.D{{Key: "external_ids.tmdb", Value: bson.D{{Key: "$exists", Value: true}}}}).SetName("uniq_user_tmdb"),
+			// New canonical unique index using flat field tmdb_id as stored in WatchlistItem
+			Keys:    bson.D{{Key: "user_id", Value: 1}, {Key: "tmdb_id", Value: 1}},
+			Options: options.Index().SetUnique(true).SetPartialFilterExpression(bson.D{{Key: "tmdb_id", Value: bson.D{{Key: "$exists", Value: true}}}}).SetName("uniq_user_tmdb_id"),
 		},
 	})
 	return err
