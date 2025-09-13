@@ -171,14 +171,14 @@ GOOGLE_CLIENT_ID=xxxxxxxxxxxxxxxx.apps.googleusercontent.com
 GOOGLE_CLIENT_SECRET=xxxxxxxxxxxxxxxx
 
 # Mongo
-DB_IMAGE=mongo:7
+DB_IMAGE=mongo:8.0.13
 DB_HOST=localhost
 DB_PORT=27017
 DB_USERNAME=devuser           # optional
 DB_ROOT_PASSWORD=devpassword  # optional
 DB_DATABASE=watchlist_notify
 
-# TMDb (planned next)
+# TMDb
 TMDB_API_KEY=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 # Optional defaults (keep or set in code):
 # TMDB_API_BASE=https://api.themoviedb.org/3

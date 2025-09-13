@@ -12,14 +12,12 @@ import (
 	"github.com/neilsmahajan/watchlist-notify/internal/auth"
 	"github.com/neilsmahajan/watchlist-notify/internal/database"
 	"github.com/neilsmahajan/watchlist-notify/internal/providers/tmdb"
-	"github.com/neilsmahajan/watchlist-notify/internal/util"
 )
 
 type Server struct {
-	port  int
-	db    database.Service
-	tmdb  *tmdb.Client
-	cache *util.Cache
+	port int
+	db   database.Service
+	tmdb *tmdb.Client
 }
 
 func NewServer() *http.Server {
@@ -34,10 +32,9 @@ func NewServer() *http.Server {
 		}
 	}
 	NewServer := &Server{
-		port:  port,
-		db:    database.New(),
-		tmdb:  tmdbClient,
-		cache: util.NewCache(),
+		port: port,
+		db:   database.New(),
+		tmdb: tmdbClient,
 	}
 
 	// Declare Server config

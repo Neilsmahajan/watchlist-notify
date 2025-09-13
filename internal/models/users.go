@@ -18,9 +18,7 @@ type Preferences struct {
 	UseAccountEmail  bool       `bson:"use_account_email" json:"use_account_email"`
 	MarketingConsent bool       `bson:"marketing_consent" json:"marketing_consent"`
 	DigestConsent    bool       `bson:"digest_consent" json:"digest_consent"`
-	DigestFrequency  string     `bson:"digest_frequency" json:"digest_frequency"`                       // enum: daily | weekly | manual
-	QuietHoursStart  int        `bson:"quiet_hours_start,omitempty" json:"quiet_hours_start,omitempty"` // 0-23
-	QuietHoursEnd    int        `bson:"quiet_hours_end,omitempty" json:"quiet_hours_end,omitempty"`     // 0-23
+	DigestFrequency  string     `bson:"digest_frequency" json:"digest_frequency"` // enum: daily | weekly | manual
 	LastDigestSentAt *time.Time `bson:"last_digest_sent_at,omitempty" json:"last_digest_sent_at,omitempty"`
 }
 

@@ -27,8 +27,6 @@ func (s *Server) updateUserPreferencesHandler(c *gin.Context) {
 		MarketingConsent *bool   `json:"marketing_consent"`
 		DigestConsent    *bool   `json:"digest_consent"`
 		DigestFrequency  *string `json:"digest_frequency"`
-		QuietHoursStart  *int    `json:"quiet_hours_start"`
-		QuietHoursEnd    *int    `json:"quiet_hours_end"`
 	}
 	if err := c.ShouldBindJSON(&body); err != nil {
 		jsonError(c, http.StatusBadRequest, "invalid body")
@@ -72,20 +70,7 @@ func (s *Server) updateUserPreferencesHandler(c *gin.Context) {
 			return
 		}
 	}
-	if body.QuietHoursStart != nil {
-		if *body.QuietHoursStart < 0 || *body.QuietHoursStart > 23 {
-			jsonError(c, http.StatusBadRequest, "quiet_hours_start must be 0-23")
-			return
-		}
-		updates["preferences.quiet_hours_start"] = *body.QuietHoursStart
-	}
-	if body.QuietHoursEnd != nil {
-		if *body.QuietHoursEnd < 0 || *body.QuietHoursEnd > 23 {
-			jsonError(c, http.StatusBadRequest, "quiet_hours_end must be 0-23")
-			return
-		}
-		updates["preferences.quiet_hours_end"] = *body.QuietHoursEnd
-	}
+
 	if len(updates) == 0 {
 		jsonError(c, http.StatusBadRequest, "no fields to update")
 		return
