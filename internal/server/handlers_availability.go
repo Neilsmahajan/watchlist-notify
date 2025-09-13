@@ -6,7 +6,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/neilsmahajan/watchlist-notify/internal/models"
@@ -55,17 +54,6 @@ func (s *Server) availabilityHandler(c *gin.Context) {
 		return
 	}
 	region := resolveRegion(c, user)
-
-	// Cache key
-	key := typ + ":" + strconv.Itoa(id) + ":" + region
-	if s.cache != nil {
-		if v, ok := s.cache.Get(key); ok {
-			if out, ok2 := v.(gin.H); ok2 {
-				c.JSON(http.StatusOK, out)
-				return
-			}
-		}
-	}
 
 	// Build quick lookup of user's active services
 	active := map[string]bool{}
@@ -161,9 +149,7 @@ func (s *Server) availabilityHandler(c *gin.Context) {
 		"providers":               out,
 		"unmatched_user_services": unmatched,
 	}
-	if s.cache != nil {
-		s.cache.Set(key, payload, 8*time.Hour)
-	}
+
 	c.JSON(http.StatusOK, payload)
 }
 
