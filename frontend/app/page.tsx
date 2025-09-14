@@ -165,7 +165,9 @@ export default function Home() {
         <h1 className="text-3xl font-bold text-gray-900 mb-2">
           Welcome back, {user.name?.split(" ")[0]}!
         </h1>
-        <p className="text-gray-600">Here's what's new with your watchlist</p>
+        <p className="text-gray-600">
+          Here&apos;s what&apos;s new with your watchlist
+        </p>
       </div>
 
       <div className="grid lg:grid-cols-3 gap-8">

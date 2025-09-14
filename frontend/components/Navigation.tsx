@@ -1,6 +1,7 @@
 "use client";
 
 import { useUser } from "@auth0/nextjs-auth0";
+import Image from "next/image";
 import Link from "next/link";
 import { useState } from "react";
 
@@ -57,10 +58,12 @@ export default function Navigation() {
                     onClick={() => setIsMenuOpen(!isMenuOpen)}
                     className="flex items-center space-x-2 text-gray-700 hover:text-blue-600 transition-colors"
                   >
-                    <img
+                    <Image
                       src={user.picture || "/default-avatar.svg"}
                       alt={user.name || "User"}
                       className="w-8 h-8 rounded-full"
+                      width={32}
+                      height={32}
                     />
                     <span className="hidden sm:block">{user.name}</span>
                   </button>

@@ -3,6 +3,7 @@
 import { useUser } from "@auth0/nextjs-auth0";
 import { LoadingSpinner, Button } from "@/components/ui";
 import { redirect } from "next/navigation";
+import Image from "next/image";
 
 export default function Profile() {
   const { user, isLoading } = useUser();
@@ -32,10 +33,12 @@ export default function Profile() {
         {/* Profile Header */}
         <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
           <div className="flex items-center space-x-6">
-            <img
+            <Image
               src={user.picture || "/default-avatar.svg"}
               alt={user.name || "User"}
               className="w-24 h-24 rounded-full"
+              width={96}
+              height={96}
             />
             <div>
               <h2 className="text-2xl font-bold text-gray-900">{user.name}</h2>
