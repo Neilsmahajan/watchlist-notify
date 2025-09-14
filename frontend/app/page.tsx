@@ -1,3 +1,4 @@
+import Link from "next/link";
 export default function Home() {
   const audience = process.env.NEXT_PUBLIC_AUTH0_AUDIENCE;
   return (
@@ -7,10 +8,21 @@ export default function Home() {
           Watchlist Notify
         </h1>
         <div className="flex gap-4">
-          <a className="underline" href={`/api/auth/login${audience ? `?audience=${encodeURIComponent(audience)}` : ''}`}>Log in</a>
-          <a className="underline" href="/api/auth/logout">Log out</a>
-          <a className="underline" href="/api/session">View session</a>
-          <a className="underline" href="/api/me">Call /api/me</a>
+          <Link
+            className="underline"
+            href={`/api/auth/login${audience ? `?audience=${encodeURIComponent(audience)}` : ""}`}
+          >
+            Log in
+          </Link>
+          <Link className="underline" href="/api/auth/logout">
+            Log out
+          </Link>
+          <Link className="underline" href="/api/session">
+            View session
+          </Link>
+          <Link className="underline" href="/api/me">
+            Call /api/me
+          </Link>
         </div>
       </main>
     </div>

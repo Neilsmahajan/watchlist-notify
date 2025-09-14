@@ -3,7 +3,7 @@ import { getAccessToken, withApiAuthRequired } from "@auth0/nextjs-auth0";
 
 export default withApiAuthRequired(async function handler(
   req: NextApiRequest,
-  res: NextApiResponse
+  res: NextApiResponse,
 ) {
   const audience = process.env.AUTH0_AUDIENCE;
   const backend = process.env.BACKEND_URL || "http://localhost:8080";
