@@ -101,10 +101,6 @@ func ensureIndexes(ctx context.Context, db *mongo.Database) error {
 			Options: options.Index().SetUnique(true).SetName("uniq_email"),
 		},
 		{
-			Keys:    bson.D{{Key: "google_id", Value: 1}},
-			Options: options.Index().SetUnique(true).SetName("uniq_google_id"),
-		},
-		{
 			Keys:    bson.D{{Key: "region", Value: 1}}, // helpful for region cohort jobs later
 			Options: options.Index().SetName("region_idx"),
 		},

@@ -16,7 +16,6 @@ func (s *service) UpsertUser(ctx context.Context, u *models.User) error {
 	collection := s.db.Database(databaseName).Collection("users")
 	now := time.Now()
 	setOnInsert := bson.M{
-		"google_id":  u.GoogleID,
 		"created_at": now,
 		"region":     defaultRegion,
 		"services":   bson.A{},
@@ -39,7 +38,7 @@ func (s *service) UpsertUser(ctx context.Context, u *models.User) error {
 	if u.Preferences.DigestFrequency != "" {
 		set["preferences.digest_frequency"] = u.Preferences.DigestFrequency
 	}
-	_, err := collection.UpdateOne(ctx, bson.M{"google_id": u.GoogleID}, bson.M{
+	_, err := collection.UpdateOne(ctx, bson.M{"email": u.Email}, bson.M{
 		"$set":         set,
 		"$setOnInsert": setOnInsert,
 	}, options.Update().SetUpsert(true))

@@ -6,6 +6,7 @@ import (
 
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
+	_ "github.com/joho/godotenv/autoload"
 	"github.com/neilsmahajan/watchlist-notify/internal/middleware"
 )
 
@@ -22,12 +23,10 @@ func (s *Server) RegisterRoutes() http.Handler {
 	}))
 
 	r.GET("/health", s.healthHandler)
-	r.GET("/auth/google/login", s.authLoginHandler)
-	r.GET("/auth/google/callback", s.authCallbackHandler)
-	r.POST("/auth/logout", s.logoutHandler)
 
 	protected := r.Group("/api")
-	protected.Use(middleware.AuthRequired())
+	// Use Auth0 JWT validation middleware for protected routes (native Gin middleware)
+	protected.Use(middleware.EnsureValidToken())
 	protected.GET("/me", s.meHandler)
 	protected.PATCH("/me/preferences", s.updateUserPreferencesHandler)
 	protected.GET("/me/services", s.listUserServicesHandler)

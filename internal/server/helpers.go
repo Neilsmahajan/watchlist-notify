@@ -28,11 +28,42 @@ func (s *Server) getUser(c *gin.Context) (*models.User, bool) {
 	}
 	email, _ := emailVal.(string)
 	user, err := s.db.GetUserByEmail(c.Request.Context(), email)
-	if err != nil || user == nil {
-		jsonError(c, http.StatusUnauthorized, "user not found")
+	if err != nil {
+		jsonError(c, http.StatusInternalServerError, "failed to fetch user")
 		return nil, false
 	}
+	if user == nil {
+		// Auto-provision a minimal user record on first authenticated access
+		name, _ := c.Get("name")
+		picture, _ := c.Get("picture")
+		nu := &models.User{
+			Email:   email,
+			Name:    toString(name),
+			Picture: toString(picture),
+		}
+		if err := s.db.UpsertUser(c.Request.Context(), nu); err != nil {
+			jsonError(c, http.StatusInternalServerError, "failed to create user")
+			return nil, false
+		}
+		// Re-fetch to return full record including ID, defaults, etc.
+		user, err = s.db.GetUserByEmail(c.Request.Context(), email)
+		if err != nil || user == nil {
+			jsonError(c, http.StatusInternalServerError, "failed to load user")
+			return nil, false
+		}
+	}
 	return user, true
+}
+
+// toString safely converts interface{} to string.
+func toString(v any) string {
+	if v == nil {
+		return ""
+	}
+	if s, ok := v.(string); ok {
+		return s
+	}
+	return ""
 }
 
 // parseLimitOffset parses limit/offset with defaults and bounds. On invalid

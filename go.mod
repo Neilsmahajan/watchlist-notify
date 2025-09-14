@@ -3,6 +3,7 @@ module github.com/neilsmahajan/watchlist-notify
 go 1.25.0
 
 require (
+	github.com/auth0/go-jwt-middleware/v2 v2.3.0
 	github.com/gin-contrib/cors v1.7.6
 	github.com/gin-gonic/gin v1.10.1
 	github.com/golang-jwt/jwt/v5 v5.3.0
@@ -97,5 +98,6 @@ require (
 	golang.org/x/text v0.28.0 // indirect
 	google.golang.org/grpc v1.75.0 // indirect
 	google.golang.org/protobuf v1.36.8 // indirect
+	gopkg.in/go-jose/go-jose.v2 v2.6.3 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )

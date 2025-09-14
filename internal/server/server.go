@@ -9,7 +9,6 @@ import (
 
 	_ "github.com/joho/godotenv/autoload"
 
-	"github.com/neilsmahajan/watchlist-notify/internal/auth"
 	"github.com/neilsmahajan/watchlist-notify/internal/database"
 	"github.com/neilsmahajan/watchlist-notify/internal/providers/tmdb"
 )
@@ -23,7 +22,6 @@ type Server struct {
 func NewServer() *http.Server {
 	port, _ := strconv.Atoi(os.Getenv("PORT"))
 
-	auth.Init()
 	tmdbKey := os.Getenv("TMDB_API_KEY")
 	var tmdbClient *tmdb.Client
 	if tmdbKey != "" {
