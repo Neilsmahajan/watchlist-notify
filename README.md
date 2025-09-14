@@ -2,7 +2,7 @@
 
 Track your personal movie & TV show watchlist across streaming platforms and automatically get email alerts when titles become available on the services you already subscribe to.
 
-> Status: Active development. Implementing Go backend (Gin + MongoDB + Google OAuth) and a Next.js frontend. TMDb integration (search + watch providers) planned next. Expect breaking changes until v0.1.0.
+> Status: Active development. Implementing Go backend (Gin + MongoDB + Auth0 authentication) and a Next.js frontend with modern UI. TMDb integration (search + watch providers) implemented. Expect breaking changes until v0.1.0.
 
 ## Table of Contents
 
@@ -11,7 +11,7 @@ Track your personal movie & TV show watchlist across streaming platforms and aut
 3. Tech Stack
 4. Local Development (Backend & Frontend)
 5. Environment Variables
-6. Authentication Flow (Google OAuth + JWT Cookie)
+6. Authentication Flow (Auth0 + JWT Cookie)
 7. API (current + planned)
 8. Data Model
 9. Background Jobs (planned)
@@ -32,11 +32,13 @@ Solution: Centralize your watchlist + subscription list and periodically notify 
 
 Core (in-progress):
 
-- Google OAuth login
+- Auth0 authentication (Google OAuth + username/password login)
+- Modern responsive UI with navigation, dashboard, and user management
 - Manage user profile (email, display name, picture)
-- Persist user watchlist items (title, type, year, external IDs TBD)
+- Persist user watchlist items (title, type, year, external IDs)
 - Persist user streaming service subscriptions (Netflix, Max, Prime Video, etc.)
-- Display availability of watchlist items across the user's streaming subscriptions in the frontend (via TMDb watch providers; WIP)
+- TMDb integration for content search and watch provider data
+- Display availability of watchlist items across the user's streaming subscriptions in the frontend
 - Periodic availability scan (scheduled job) -> email digest
 - User preferences: notification frequency, primary email
 
@@ -93,16 +95,19 @@ Backend:
 
 - Go (Gin web framework)
 - MongoDB (official Go driver)
-- Google OAuth (sign-in)
+- Auth0 (authentication with multiple providers)
 - JWT (HMAC) stored in HttpOnly cookie
 - Docker / Docker Compose for local DB
-- TMDb API (planned next: search + watch providers for availability)
+- TMDb API (search + watch providers for availability)
 
 Frontend:
 
 - Next.js 15 (App Router, React 19)
-- Tailwind CSS (configured; early)
-- Shows availability for watchlist items based on the user's saved services (WIP)
+- Auth0 Next.js SDK for seamless authentication
+- Tailwind CSS 4 with modern responsive design
+- Professional UI with navigation, dashboard, search, and settings pages
+- TypeScript with ESLint configuration
+- Optimized images with Next.js Image component
 
 Infrastructure (planned):
 
@@ -166,9 +171,11 @@ BASE_URL=http://localhost:8080
 FRONTEND_URL=http://localhost:3000
 JWT_SECRET=replace-with-long-random-string
 
-# Google OAuth (from Google Cloud Console OAuth consent screen + credentials)
-GOOGLE_CLIENT_ID=xxxxxxxxxxxxxxxx.apps.googleusercontent.com
-GOOGLE_CLIENT_SECRET=xxxxxxxxxxxxxxxx
+# Auth0 (from Auth0 Dashboard Application settings)
+AUTH0_DOMAIN=your-domain.auth0.com
+AUTH0_CLIENT_ID=your-auth0-client-id
+AUTH0_CLIENT_SECRET=your-auth0-client-secret
+AUTH0_AUDIENCE=https://api.watchlistnotify.com
 
 # Mongo
 DB_IMAGE=mongo:8.0.13
@@ -189,27 +196,50 @@ EMAIL_FROM=watchlist@watchlistnotify.com
 EMAIL_PROVIDER_API_KEY=xxx
 ```
 
-## 6. Authentication Flow
+Frontend environment variables (create `frontend/.env.local`):
 
-1. Frontend calls `GET /auth/google/login` -> redirect to Google OAuth
-2. Google redirects to `/auth/google/callback` with code + state
-3. Backend exchanges code -> userinfo, upserts user, issues signed JWT (HttpOnly `auth_token` cookie)
-4. Frontend can call protected endpoints (e.g. `GET /api/me`)
+```env
+# Auth0 configuration for Next.js
+AUTH0_SECRET='long-random-string-for-session-encryption'
+AUTH0_DOMAIN='https://your-domain.auth0.com'
+AUTH0_CLIENT_ID='your-auth0-client-id'
+AUTH0_CLIENT_SECRET='your-auth0-client-secret'
+AUTH0_AUDIENCE='https://api.watchlistnotify.com'
+AUTH0_SCOPE='openid profile email'
 
-Security Notes (current dev status):
+# Backend API URL for server-side requests
+BACKEND_URL='http://localhost:8080'
+NEXT_PUBLIC_AUTH0_AUDIENCE='https://api.watchlistnotify.com'
+```
 
-- `Secure:false` for cookies in dev — must be `true` (HTTPS) in production
-- CSRF risk minimized by state cookie; consider SameSite=strict + anti-CSRF token for mutating endpoints later
-- Future: refresh tokens & short-lived access tokens if scaling mobile / multi-client
+## 6. Authentication Flow (Auth0 + JWT Cookie)
+
+1. Frontend redirects to Auth0 Universal Login via `/auth/login`
+2. User authenticates with Auth0 (Google OAuth, username/password, etc.)
+3. Auth0 redirects to `/auth/callback` with authorization code
+4. Backend exchanges code for tokens and user info, creates/updates user in MongoDB
+5. Backend issues signed JWT stored in HttpOnly cookie for API access
+6. Frontend can call protected endpoints (e.g. `GET /api/me`) with automatic cookie inclusion
+
+Auth0 Configuration:
+
+- Regular Web Application with server-side token exchange
+- Custom API audience for JWT token validation
+- Post-login Action adds custom claims (email, name, picture) to access tokens
+- Support for multiple identity providers (Google, username/password)
+
+Security Notes:
+
+- HttpOnly cookies prevent XSS token theft
+- Auth0 manages OAuth flows and security best practices
+- Custom claims allow backend to extract user info from JWT without additional API calls
+- CSRF protection via Auth0's state parameter and SameSite cookie attributes
 
 ## 7. API
 
 Implemented:
 
 - `GET /health` – service health
-- `GET /auth/google/login` – start OAuth
-- `GET /auth/google/callback` – complete OAuth (returns JSON + sets cookie)
-- `GET /auth/logout` – clear auth cookie
 - `GET /api/me` – authenticated user document
 - `PATCH /api/me/preferences` – update user preferences (email, name, notification prefs)
 - `GET /api/me/services` – list user streaming services
@@ -218,13 +248,15 @@ Implemented:
 - `GET /api/watchlist` – list items
 - `DELETE /api/watchlist/:id`
 - `PUT /api/watchlist/:id` – update metadata / status
-- `GET /api/search` - search titles via TMDb
+- `GET /api/search` – search titles via TMDb
+- `GET /api/availability` – get availability data for watchlist items
 
-Near-term planned (TMDb integration):
+Near-term planned:
 
-- `GET /api/search?query=...&type=movie|tv` – search titles via TMDb
-- `GET /api/availability/:id?type=movie|tv` – get provider availability for a title (scoped to user region and filtered to user's services)
+- `GET /api/availability/:id?type=movie|tv` – get provider availability for a specific title
 - `GET /api/me/availability` – aggregate availability for the user's entire watchlist (paginated)
+- Background job endpoints for availability scanning
+- Email notification preferences and digest endpoints
 
 Error Format (current):
 
@@ -241,7 +273,7 @@ Will evolve to structured error codes.
 ```json
 {
   "_id": "ObjectId",
-  "google_id": "string",
+  "auth0_id": "string",
   "email": "string",
   "name": "string",
   "picture": "url",
@@ -250,7 +282,23 @@ Will evolve to structured error codes.
 }
 ```
 
-Planned collections: `watchlist_items`, `services`, `availability_cache`, `jobs`.
+`WatchlistItem` (Mongo `watchlist_items` collection):
+
+```json
+{
+  "_id": "ObjectId",
+  "user_id": "ObjectId",
+  "tmdb_id": "number",
+  "title": "string",
+  "type": "movie|tv",
+  "year": "number",
+  "poster_path": "string",
+  "added_at": "ISO8601",
+  "status": "want_to_watch|watching|watched"
+}
+```
+
+Planned collections: `services`, `availability_cache`, `jobs`.
 
 ## 9. Background Jobs (planned)
 
@@ -284,7 +332,7 @@ API requests (Bruno):
 
 - Collection lives at `docs/bruno/`. Open that folder in Bruno to load requests.
 - Use `docs/bruno/environments/local.example.bru` as a template to create `local.bru` (ignored). Set `base_url` (e.g., `http://localhost:8080`) and `token`.
-- Auth is configured at the `API` folder level using `{{token}}`. Get a token via `GET /auth/google/login` -> complete OAuth -> copy `token` from `/auth/google/callback` JSON.
+- Auth is configured at the `API` folder level using `{{token}}`. Get a token via Auth0 login flow or copy from browser dev tools after authentication.
 - All request URLs use `{{base_url}}`; path params can be set as variables (e.g., `{{id}}`).
 
 ## 12. Make Targets Cheat Sheet
@@ -357,10 +405,14 @@ Deployment Checklist (API – future):
 
 ## 14. Roadmap / Milestones
 
-- [ ] v0.1.0 MVP: Auth + basic watchlist CRUD + availability lookups (TMDb) surfaced in UI (manual/partial acceptable) + email stub
-- [ ] v0.2.0 Availability integration (solidify TMDb provider + region support)
-- [ ] v0.3.0 Digest email + preferences
-- [ ] v0.4.0 Multiple providers + region support
+- [x] Auth0 integration with modern UI
+- [x] Basic watchlist CRUD functionality
+- [x] TMDb integration for search and availability
+- [x] Professional frontend with navigation, dashboard, and user management
+- [ ] v0.1.0 MVP: Email notifications + availability scanning job
+- [ ] v0.2.0 Enhanced availability integration (region support + more providers)
+- [ ] v0.3.0 Digest email + advanced preferences
+- [ ] v0.4.0 Multiple notification channels + browser extension
 - [ ] v0.5.0 Public beta (stability + docs)
 
 ## 15. Contributing
