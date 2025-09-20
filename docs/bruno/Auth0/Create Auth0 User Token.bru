@@ -1,0 +1,28 @@
+meta {
+  name: Create Auth0 User Token
+  type: http
+  seq: 1
+}
+
+post {
+  url: https://dev-dpjez628xnoe24zj.us.auth0.com/oauth/token
+  body: json
+  auth: inherit
+}
+
+headers {
+  content-type: application/json
+}
+
+body:json {
+  {
+    "client_id": "{{client_id}}",
+    "client_secret": "{{client_secret}}",
+    "audience": "https://api.watchlistnotify.com",
+    "grant_type": "client_credentials"
+  }
+}
+
+settings {
+  encodeUrl: false
+}

@@ -34,6 +34,7 @@ type service struct {
 }
 
 var (
+	mongoURI             = os.Getenv("MONGODB_URI") // prefer full URI if provided
 	databaseHost         = os.Getenv("DB_HOST")
 	databasePort         = os.Getenv("DB_PORT")
 	databaseUsername     = os.Getenv("DB_USERNAME")
@@ -56,7 +57,9 @@ var (
 
 func New() Service {
 	var uri string
-	if databaseUsername != "" { // use credentials only if provided
+	if mongoURI != "" { // prefer full URI if provided
+		uri = mongoURI
+	} else if databaseUsername != "" { // use credentials only if provided
 		uri = fmt.Sprintf("mongodb://%s:%s@%s:%s", databaseUsername, databaseRootPassword, databaseHost, databasePort)
 	} else {
 		uri = fmt.Sprintf("mongodb://%s:%s", databaseHost, databasePort)
