@@ -349,17 +349,23 @@ API requests (Bruno):
 
 ## 12. Make Targets Cheat Sheet
 
-| Target           | Description                             |
-| ---------------- | --------------------------------------- |
-| make all         | build + test                            |
-| make build       | compile Go binary -> `./main`           |
-| make run         | run API (no reload)                     |
-| make watch       | run with Air live reload (auto-install) |
-| make docker-run  | start Mongo via compose                 |
-| make docker-down | stop Mongo                              |
-| make test        | run all Go tests                        |
-| make itest       | run integration tests (database)        |
-| make clean       | remove binary                           |
+| Target                 | Description                             |
+| ---------------------- | --------------------------------------- |
+| make all               | build + test                            |
+| make build             | compile Go binary -> `./main`           |
+| make run               | run API (no reload)                     |
+| make watch             | run with Air live reload (auto-install) |
+| make docker-run        | start Mongo via compose                 |
+| make docker-down       | stop Mongo                              |
+| make test              | run all Go tests                        |
+| make itest             | run integration tests (database)        |
+| make clean             | remove binary                           |
+| make docker-auth       | configure Docker auth for Artifact Reg. |
+| make docker-build      | build container (linux/amd64)           |
+| make docker-push       | push image to Artifact Registry         |
+| make docker-build-push | build and push in one step              |
+| make run-container     | run the image locally                   |
+| make deploy            | deploy to Cloud Run                     |
 
 Note: The docker targets are optional if you configure MONGODB_URI to use MongoDB Atlas.
 
@@ -457,3 +463,55 @@ SPDX-License-Identifier: MIT
 ---
 
 Questions / suggestions? Open an issue.
+
+## Appendix: Dockerfile, Apple Silicon, and Cloud Run Deployment
+
+This repository includes a production-ready multi-stage `Dockerfile` at the root that builds the Go API from `cmd/api` into a small, distroless image exposing port 8080.
+
+Apple Silicon (M1/M2) note:
+
+- Cloud Run runs linux/amd64 images. On Apple Silicon, use Docker Buildx to build with `--platform linux/amd64`.
+- The Makefile includes convenient targets for building and deploying.
+
+Quick steps
+
+1. Authenticate and set defaults
+
+- gcloud auth login
+- gcloud config set project <PROJECT_ID>
+- make docker-auth PROJECT_ID=<PROJECT_ID> REGION=us-central1
+
+2. Build and push image (Apple Silicon friendly)
+
+- make docker-build-push PROJECT_ID=<PROJECT_ID> REGION=us-central1 REPO=watchlist IMAGE=api
+
+3. Deploy to Cloud Run
+
+- make deploy PROJECT_ID=<PROJECT_ID> REGION=us-central1 REPO=watchlist IMAGE=api SERVICE=watchlist-api
+
+Required environment variables (configure on Cloud Run):
+
+- BASE_URL=https://api.watchlistnotify.com
+- FRONTEND_URL=https://watchlistnotify.com
+- JWT_SECRET=...
+- AUTH0_DOMAIN=...
+- AUTH0_CLIENT_ID=...
+- AUTH0_CLIENT_SECRET=...
+- AUTH0_AUDIENCE=https://api.watchlistnotify.com
+- TMDB_API_KEY=...
+- MONGODB_URI=mongodb+srv://<user>:<pass>@<cluster>/?retryWrites=true&w=majority
+
+Optional: Static egress IP for MongoDB Atlas
+
+- Create a Serverless VPC Connector and Cloud NAT with a reserved static IP.
+- Deploy Cloud Run with that connector and set egress to "all". Allowlist the NAT IP in Atlas.
+
+Local test
+
+- docker buildx build --platform linux/amd64 -t watchlist-api:dev .
+- docker run --rm -p 8080:8080 \
+  -e PORT=8080 \
+  -e MONGODB_URI='...' \
+  -e JWT_SECRET='...' \
+  -e TMDB_API_KEY='...' \
+  watchlist-api:dev
