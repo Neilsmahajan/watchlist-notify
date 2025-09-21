@@ -10,22 +10,34 @@ REPO ?= watchlist
 IMAGE ?= api
 SERVICE ?= watchlist-api
 PLATFORM ?= linux/amd64
+
+# Allow loading a local deployment env file (not committed) for convenience
+# Create a .deploy.env with PROJECT_ID=..., REGION=..., etc.
+ifneq (,$(wildcard .deploy.env))
+include .deploy.env
+export
+endif
+
 REGISTRY := $(REGION)-docker.pkg.dev
 IMAGE_URI := $(REGISTRY)/$(PROJECT_ID)/$(REPO)/$(IMAGE)
+
+# Original TAG fallback (git short sha). We introduce a richer RELEASE_TAG (date+sha) for release target.
 TAG ?= $(shell git rev-parse --short HEAD)
+DATE_UTC := $(shell date -u +%Y%m%d-%H%M%S)
+SHORT_SHA := $(shell git rev-parse --short HEAD)
+RELEASE_TAG := $(DATE_UTC)-$(SHORT_SHA)
 
 # Build the application
 all: build test
 
 build:
 	@echo "Building..."
-	
-	
 	@go build -o main cmd/api/main.go
 
 # Run the application
 run:
 	@go run cmd/api/main.go
+
 # Create DB container
 docker-run:
 	@if docker compose up --build 2>/dev/null; then \
@@ -48,6 +60,7 @@ docker-down:
 test:
 	@echo "Testing..."
 	@go test ./... -v
+
 # Integrations Tests for the application
 itest:
 	@echo "Running integration tests..."
@@ -116,7 +129,7 @@ run-container:
 		-e TMDB_API_KEY="$$TMDB_API_KEY" \
 		$(IMAGE_URI):$(TAG)
 
-# Deploy to Cloud Run
+# Deploy to Cloud Run (env vars assumed already configured from initial deploy in console/CLI)
 deploy:
 	@if [ -z "$(PROJECT_ID)" ]; then echo "PROJECT_ID is required"; exit 1; fi
 	gcloud run deploy $(SERVICE) \
@@ -129,4 +142,17 @@ deploy:
 		--max-instances 3 \
 		--min-instances 0
 
-.PHONY: all build run test clean watch docker-run docker-down itest docker-auth docker-build docker-push docker-build-push run-container deploy
+# Show the fully qualified image reference
+show-image:
+	@if [ -z "$(PROJECT_ID)" ]; then echo "PROJECT_ID is required"; exit 1; fi
+	@echo $(IMAGE_URI):$(TAG)
+
+# One-shot release: auto date+sha tag build+push+deploy
+release:
+	@if [ -z "$(PROJECT_ID)" ]; then echo "PROJECT_ID is required"; exit 1; fi
+	@echo "[release] Using tag $(RELEASE_TAG)"
+	$(MAKE) TAG=$(RELEASE_TAG) docker-build-push
+	$(MAKE) TAG=$(RELEASE_TAG) deploy
+	@echo "[release] Deployed image: $(IMAGE_URI):$(RELEASE_TAG)"
+
+.PHONY: all build run test clean watch docker-run docker-down itest docker-auth docker-build docker-push docker-build-push run-container deploy show-image release

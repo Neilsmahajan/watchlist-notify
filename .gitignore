@@ -24,6 +24,8 @@ tmp/
 
 # .env file
 .env
+# Local deployment convenience file (do not commit secrets here)
+.deploy.env
 
 # Project build
 main
