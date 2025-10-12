@@ -1,4 +1,13 @@
+"use client";
+
 import { ReactNode } from "react";
+import { useTheme } from "@/components/ThemeProvider";
+
+function classNames(
+  ...classes: Array<string | false | null | undefined>
+): string {
+  return classes.filter(Boolean).join(" ");
+}
 
 interface LoadingSpinnerProps {
   size?: "sm" | "md" | "lg";
@@ -50,6 +59,31 @@ export function EmptyState({
       </h3>
       <p className="text-gray-500 mb-6 dark:text-slate-400">{description}</p>
       {action}
+    </div>
+  );
+}
+
+interface ThemedCardProps {
+  children: ReactNode;
+  className?: string;
+}
+
+export function ThemedCard({ children, className = "" }: ThemedCardProps) {
+  const { theme } = useTheme();
+  const themeClasses =
+    theme === "dark"
+      ? "border-slate-700 bg-slate-900 hover:bg-slate-800"
+      : "border-gray-200 bg-white hover:bg-gray-50";
+
+  return (
+    <div
+      className={classNames(
+        "rounded-lg border p-4 transition-colors",
+        themeClasses,
+        className
+      )}
+    >
+      {children}
     </div>
   );
 }

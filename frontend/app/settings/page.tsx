@@ -1,7 +1,7 @@
 "use client";
 
 import { useUser } from "@auth0/nextjs-auth0";
-import { LoadingSpinner, Button } from "@/components/ui";
+import { LoadingSpinner, Button, ThemedCard } from "@/components/ui";
 import { redirect } from "next/navigation";
 import Image from "next/image";
 import { useCallback, useEffect, useState } from "react";
@@ -81,7 +81,7 @@ export default function Settings() {
         }
       }
     },
-    [],
+    []
   );
 
   useEffect(() => {
@@ -128,7 +128,7 @@ export default function Settings() {
       setServicesMessage(
         desiredState
           ? `${service.name} connected successfully.`
-          : `${service.name} disconnected successfully.`,
+          : `${service.name} disconnected successfully.`
       );
     } catch (err) {
       console.error("Services update error", err);
@@ -236,10 +236,7 @@ export default function Settings() {
                 const formattedDate = formatDisplayDate(service.added_at);
 
                 return (
-                  <div
-                    key={service.code}
-                    className="rounded-lg border border-gray-200 p-4 text-center hover:bg-gray-50 transition-colors"
-                  >
+                  <ThemedCard key={service.code} className="text-center">
                     <div className="mb-2 flex justify-center">
                       {logoSrc ? (
                         <Image
@@ -277,7 +274,7 @@ export default function Settings() {
                     >
                       {service.active ? "Connected" : "Connect"}
                     </Button>
-                  </div>
+                  </ThemedCard>
                 );
               })}
             </div>
