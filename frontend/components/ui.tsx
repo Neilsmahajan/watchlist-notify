@@ -56,6 +56,7 @@ interface ButtonProps {
   onClick?: () => void;
   href?: string;
   className?: string;
+  type?: "button" | "submit" | "reset";
 }
 
 export function Button({
@@ -67,6 +68,7 @@ export function Button({
   onClick,
   href,
   className = "",
+  type,
 }: ButtonProps) {
   const baseClasses =
     "inline-flex items-center justify-center font-medium rounded-lg transition-colors focus:outline-none focus:ring-2 focus:ring-offset-2";
@@ -102,6 +104,7 @@ export function Button({
     <button
       onClick={onClick}
       disabled={disabled || loading}
+      type={type}
       className={classes}
     >
       {loading && <LoadingSpinner size="sm" className="mr-2" />}

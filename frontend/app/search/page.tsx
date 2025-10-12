@@ -26,6 +26,17 @@ export default function Search() {
   const [isSearching, setIsSearching] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [hasSearched, setHasSearched] = useState(false);
+  const [addingId, setAddingId] = useState<string | null>(null);
+  const [watchlistStatus, setWatchlistStatus] = useState<
+    Record<string, "added" | "error">
+  >({});
+  const [watchlistError, setWatchlistError] = useState<string | null>(null);
+  const [watchlistMessage, setWatchlistMessage] = useState<string | null>(null);
+
+  const getResultKey = (item: SearchResult) =>
+    item.tmdb_id
+      ? `${item.type}-${item.tmdb_id}`
+      : `${item.type}-${item.title}`;
 
   // Fetch search results from the backend via our Next.js proxy route.
   const handleSearch = async (queryValue: string) => {
@@ -39,6 +50,10 @@ export default function Search() {
     setIsSearching(true);
     setError(null);
     setResults([]);
+    setWatchlistError(null);
+    setWatchlistMessage(null);
+    setWatchlistStatus({});
+    setAddingId(null);
 
     try {
       const params = new URLSearchParams({
@@ -82,6 +97,67 @@ export default function Search() {
     void handleSearch(title);
   };
 
+  const handleAddToWatchlist = async (item: SearchResult) => {
+    const key = getResultKey(item);
+    if (watchlistStatus[key] === "added" || addingId === key) {
+      return;
+    }
+
+    setAddingId(key);
+    setWatchlistError(null);
+    setWatchlistMessage(null);
+
+    try {
+      const typeForWatchlist = item.type === "tv" ? "show" : "movie";
+      const payload: Record<string, unknown> = {
+        title: item.title,
+        type: typeForWatchlist,
+      };
+
+      if (typeof item.year === "number") {
+        payload.year = item.year;
+      }
+
+      if (typeof item.tmdb_id === "number") {
+        payload.tmdb_id = item.tmdb_id;
+      }
+
+      const response = await fetch("/api/watchlist", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(payload),
+      });
+
+      const data = (await response.json().catch(() => null)) as {
+        error?: string;
+      } | null;
+
+      if (!response.ok) {
+        if (response.status === 409) {
+          setWatchlistStatus((prev) => ({ ...prev, [key]: "added" }));
+          setWatchlistMessage(`${item.title} is already in your watchlist.`);
+          return;
+        }
+
+        const message = data?.error || "Failed to add to watchlist.";
+        setWatchlistError(message);
+        setWatchlistStatus((prev) => ({ ...prev, [key]: "error" }));
+        return;
+      }
+
+      setWatchlistStatus((prev) => ({ ...prev, [key]: "added" }));
+      setWatchlistMessage(`${item.title} added to your watchlist.`);
+    } catch (err) {
+      console.error("Add to watchlist error", err);
+      setWatchlistError("Unable to update watchlist. Please retry.");
+      setWatchlistStatus((prev) => ({ ...prev, [key]: "error" }));
+    } finally {
+      setAddingId(null);
+    }
+  };
+
   if (isLoading) {
     return (
       <div className="flex items-center justify-center min-h-screen">
@@ -117,7 +193,11 @@ export default function Search() {
               className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
             />
           </div>
-          <Button disabled={!searchQuery.trim()} loading={isSearching}>
+          <Button
+            disabled={!searchQuery.trim()}
+            loading={isSearching}
+            type="submit"
+          >
             Search
           </Button>
         </form>
@@ -150,6 +230,16 @@ export default function Search() {
 
       {/* Search Results */}
       <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-8">
+        {watchlistMessage && (
+          <div className="mb-4 rounded-md bg-green-50 px-4 py-3 text-sm text-green-700">
+            {watchlistMessage}
+          </div>
+        )}
+        {watchlistError && (
+          <div className="mb-4 rounded-md bg-red-50 px-4 py-3 text-sm text-red-700">
+            {watchlistError}
+          </div>
+        )}
         {(() => {
           if (isSearching) {
             return (
@@ -234,42 +324,60 @@ export default function Search() {
 
           return (
             <ul className="grid gap-6 sm:grid-cols-2 lg:grid-cols-3">
-              {results.map((item) => (
-                <li
-                  key={`${item.type}-${item.tmdb_id}`}
-                  className="flex gap-4 rounded-lg border border-gray-200 p-4 shadow-sm"
-                >
-                  <div className="w-24 flex-shrink-0">
-                    {item.poster_url ? (
-                      <img
-                        src={item.poster_url}
-                        alt={`${item.title} poster`}
-                        className="h-36 w-24 rounded-md object-cover"
-                      />
-                    ) : (
-                      <div className="flex h-36 w-24 items-center justify-center rounded-md bg-gray-100 text-xs font-medium text-gray-500">
-                        No poster
-                      </div>
-                    )}
-                  </div>
-                  <div className="flex flex-1 flex-col">
-                    <h3 className="text-lg font-semibold text-gray-900">
-                      {item.title}
-                    </h3>
-                    <p className="text-sm text-gray-600">
-                      {item.year ? item.year : "Year unknown"}
-                    </p>
-                    <span className="mt-2 inline-flex w-fit items-center rounded-full bg-blue-50 px-2 py-0.5 text-xs font-medium text-blue-700">
-                      {item.type === "movie" ? "Movie" : "TV"}
-                    </span>
-                    <div className="mt-auto pt-4">
-                      <Button variant="outline" disabled className="w-full">
-                        Add to Watchlist
-                      </Button>
+              {results.map((item) => {
+                const key = getResultKey(item);
+                const status = watchlistStatus[key];
+                const isAdding = addingId === key;
+
+                return (
+                  <li
+                    key={key}
+                    className="flex gap-4 rounded-lg border border-gray-200 p-4 shadow-sm"
+                  >
+                    <div className="w-24 flex-shrink-0">
+                      {item.poster_url ? (
+                        <img
+                          src={item.poster_url}
+                          alt={`${item.title} poster`}
+                          className="h-36 w-24 rounded-md object-cover"
+                        />
+                      ) : (
+                        <div className="flex h-36 w-24 items-center justify-center rounded-md bg-gray-100 text-xs font-medium text-gray-500">
+                          No poster
+                        </div>
+                      )}
                     </div>
-                  </div>
-                </li>
-              ))}
+                    <div className="flex flex-1 flex-col">
+                      <h3 className="text-lg font-semibold text-gray-900">
+                        {item.title}
+                      </h3>
+                      <p className="text-sm text-gray-600">
+                        {item.year ? item.year : "Year unknown"}
+                      </p>
+                      <span className="mt-2 inline-flex w-fit items-center rounded-full bg-blue-50 px-2 py-0.5 text-xs font-medium text-blue-700">
+                        {item.type === "movie" ? "Movie" : "TV"}
+                      </span>
+                      <div className="mt-auto pt-4">
+                        <Button
+                          variant="outline"
+                          className="w-full"
+                          type="button"
+                          onClick={() => handleAddToWatchlist(item)}
+                          disabled={status === "added" || isAdding}
+                          loading={isAdding}
+                        >
+                          {status === "added" ? "Added" : "Add to Watchlist"}
+                        </Button>
+                        {status === "error" && (
+                          <p className="mt-2 text-xs text-red-600">
+                            Something went wrong. Try again.
+                          </p>
+                        )}
+                      </div>
+                    </div>
+                  </li>
+                );
+              })}
             </ul>
           );
         })()}
