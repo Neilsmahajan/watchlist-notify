@@ -83,7 +83,7 @@ export default function Settings() {
         }
       }
     },
-    []
+    [],
   );
 
   useEffect(() => {
@@ -130,7 +130,7 @@ export default function Settings() {
       setServicesMessage(
         desiredState
           ? `${service.name} connected successfully.`
-          : `${service.name} disconnected successfully.`
+          : `${service.name} disconnected successfully.`,
       );
     } catch (err) {
       console.error("Services update error", err);

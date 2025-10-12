@@ -44,7 +44,7 @@ const TMDB_IMAGE_BASE = "https://media.themoviedb.org/t/p/original";
 
 function retainByIds<T>(
   record: Record<string, T>,
-  nextItems: WatchlistItem[]
+  nextItems: WatchlistItem[],
 ): Record<string, T> {
   if (Object.keys(record).length === 0) {
     return record;
@@ -144,7 +144,7 @@ export default function Watchlist() {
       try {
         const typeParam = item.type === "show" ? "tv" : "movie";
         const response = await fetch(
-          `/api/availability/${item.tmdb_id}?type=${typeParam}`
+          `/api/availability/${item.tmdb_id}?type=${typeParam}`,
         );
 
         const data = (await response.json().catch(() => null)) as
@@ -193,7 +193,7 @@ export default function Watchlist() {
         }
       }
     },
-    [availability, availabilityLoading]
+    [availability, availabilityLoading],
   );
 
   const fetchAvailabilityForItems = useCallback(
@@ -205,7 +205,7 @@ export default function Watchlist() {
         void requestAvailability(entry);
       }
     },
-    [requestAvailability]
+    [requestAvailability],
   );
 
   const loadWatchlist = useCallback(
@@ -263,7 +263,7 @@ export default function Watchlist() {
         }
       }
     },
-    [filterType, sortOption, fetchAvailabilityForItems]
+    [filterType, sortOption, fetchAvailabilityForItems],
   );
 
   useEffect(() => {
@@ -278,7 +278,7 @@ export default function Watchlist() {
 
   const handleStatusChange = async (
     itemId: string,
-    newStatus: WatchlistStatus
+    newStatus: WatchlistStatus,
   ) => {
     setUpdatingId(itemId);
     setActionError(null);
@@ -310,14 +310,14 @@ export default function Watchlist() {
       if (data && typeof data === "object" && "id" in data) {
         setItems((prev) =>
           prev.map((item) =>
-            item.id === itemId ? { ...item, ...(data as WatchlistItem) } : item
-          )
+            item.id === itemId ? { ...item, ...(data as WatchlistItem) } : item,
+          ),
         );
       } else {
         setItems((prev) =>
           prev.map((item) =>
-            item.id === itemId ? { ...item, status: newStatus } : item
-          )
+            item.id === itemId ? { ...item, status: newStatus } : item,
+          ),
         );
       }
 
@@ -337,7 +337,7 @@ export default function Watchlist() {
     }
 
     const confirmed = window.confirm(
-      `Remove "${item.title}" from your watchlist?`
+      `Remove "${item.title}" from your watchlist?`,
     );
     if (!confirmed) {
       return;
@@ -387,7 +387,7 @@ export default function Watchlist() {
     (item: WatchlistItem) => {
       void requestAvailability(item, { force: true });
     },
-    [requestAvailability]
+    [requestAvailability],
   );
 
   if (isLoading) {
@@ -604,7 +604,7 @@ export default function Watchlist() {
                           onChange={(event) =>
                             handleStatusChange(
                               item.id,
-                              event.target.value as WatchlistStatus
+                              event.target.value as WatchlistStatus,
                             )
                           }
                           disabled={disabling}

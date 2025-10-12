@@ -16,8 +16,11 @@ export function LoadingSpinner({
   };
 
   return (
-    <div
-      className={`animate-spin rounded-full border-2 border-gray-300 border-t-blue-600 ${sizeClasses[size]} ${className}`}
+    <span
+      role="status"
+      aria-live="polite"
+      aria-busy="true"
+      className={`inline-block animate-spin rounded-full border-2 border-gray-300 border-t-blue-600 ${sizeClasses[size]} ${className}`}
     />
   );
 }

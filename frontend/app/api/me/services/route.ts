@@ -2,12 +2,13 @@ import { NextResponse } from "next/server";
 import { auth0 } from "@/lib/auth0";
 
 type AppRouteHandler = (
-  req: Request
+  req: Request,
 ) => void | Response | Promise<void | Response>;
 
 const authedGet = auth0.withApiAuthRequired(async function handler(
-  req: Request
+  _req: Request,
 ) {
+  void _req;
   const backend = process.env.BACKEND_URL || "http://localhost:8080";
   const { token } = await auth0.getAccessToken();
 
@@ -23,7 +24,7 @@ const authedGet = auth0.withApiAuthRequired(async function handler(
 });
 
 const authedPatch = auth0.withApiAuthRequired(async function handler(
-  req: Request
+  req: Request,
 ) {
   const backend = process.env.BACKEND_URL || "http://localhost:8080";
   let body: unknown;

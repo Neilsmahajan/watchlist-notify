@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { auth0 } from "@/lib/auth0";
 
 type AppRouteHandler = (
-  req: Request
+  req: Request,
 ) => void | Response | Promise<void | Response>;
 
 const getIdFromRequest = (req: Request): string | null => {
@@ -16,7 +16,7 @@ const getIdFromRequest = (req: Request): string | null => {
 };
 
 const authedGet = auth0.withApiAuthRequired(async function handler(
-  req: Request
+  req: Request,
 ) {
   const id = getIdFromRequest(req);
   if (!id) {

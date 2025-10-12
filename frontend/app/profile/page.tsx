@@ -42,7 +42,7 @@ export default function Profile() {
 
   const memberSince =
     formatDisplayDate(
-      typeof user?.created_at === "string" ? user.created_at : undefined
+      typeof user?.created_at === "string" ? user.created_at : undefined,
     ) ||
     new Date().toLocaleDateString(undefined, {
       month: "short",
@@ -51,13 +51,13 @@ export default function Profile() {
     });
 
   const watchlistStat = stats.find(
-    (entry) => entry.label === "Watchlist Items"
+    (entry) => entry.label === "Watchlist Items",
   );
   const streamingStat = stats.find(
-    (entry) => entry.label === "Available to Stream"
+    (entry) => entry.label === "Available to Stream",
   );
   const servicesStat = stats.find(
-    (entry) => entry.label === "Services Connected"
+    (entry) => entry.label === "Services Connected",
   );
 
   const summaryStats = [
@@ -124,7 +124,7 @@ export default function Profile() {
                   {stat?.loading ? (
                     <LoadingSpinner size="sm" />
                   ) : (
-                    stat?.value ?? "0"
+                    (stat?.value ?? "0")
                   )}
                 </p>
               </div>

@@ -3,6 +3,7 @@
 import { useUser } from "@auth0/nextjs-auth0";
 import { LoadingSpinner, Button } from "@/components/ui";
 import { redirect } from "next/navigation";
+import Image from "next/image";
 import { FormEvent, useState } from "react";
 
 type SearchResult = {
@@ -316,8 +317,8 @@ export default function Search() {
           if (results.length === 0) {
             return (
               <div className="text-center text-gray-500">
-                No results found for "{searchQuery}". Try checking the spelling
-                or using a different title.
+                No results found for &ldquo;{searchQuery}&rdquo;. Try checking
+                the spelling or using a different title.
               </div>
             );
           }
@@ -336,9 +337,11 @@ export default function Search() {
                   >
                     <div className="w-24 flex-shrink-0">
                       {item.poster_url ? (
-                        <img
+                        <Image
                           src={item.poster_url}
                           alt={`${item.title} poster`}
+                          width={96}
+                          height={144}
                           className="h-36 w-24 rounded-md object-cover"
                         />
                       ) : (

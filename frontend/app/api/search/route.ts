@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { auth0 } from "@/lib/auth0";
 
 type AppRouteHandler = (
-  req: Request
+  req: Request,
 ) => void | Response | Promise<void | Response>;
 
 const authed = auth0.withApiAuthRequired(async function handler(req: Request) {
