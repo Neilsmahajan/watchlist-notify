@@ -2,8 +2,9 @@
 
 import { useUser } from "@auth0/nextjs-auth0";
 import { LoadingSpinner, EmptyState, Button } from "@/components/ui";
+import Image from "next/image";
 import { redirect } from "next/navigation";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 type WatchlistType = "movie" | "show";
 type WatchlistStatus = "planned" | "watching" | "finished";
@@ -24,6 +25,39 @@ type WatchlistResponse = {
   items?: WatchlistItem[];
   error?: string;
 };
+
+type AvailabilityProvider = {
+  code: string;
+  name: string;
+  logo_path?: string;
+  link?: string;
+};
+
+type AvailabilityResponse = {
+  region: string;
+  providers: AvailabilityProvider[];
+  unmatched_user_services?: string[];
+  error?: string;
+};
+
+const TMDB_IMAGE_BASE = "https://media.themoviedb.org/t/p/original";
+
+function retainByIds<T>(
+  record: Record<string, T>,
+  nextItems: WatchlistItem[]
+): Record<string, T> {
+  if (Object.keys(record).length === 0) {
+    return record;
+  }
+  const whitelist = new Set(nextItems.map((entry) => entry.id));
+  const next: Record<string, T> = {};
+  for (const [key, value] of Object.entries(record)) {
+    if (whitelist.has(key)) {
+      next[key] = value;
+    }
+  }
+  return next;
+}
 
 const statusOptions: { value: WatchlistStatus; label: string }[] = [
   { value: "planned", label: "Planned" },
@@ -66,6 +100,113 @@ export default function Watchlist() {
   const [actionError, setActionError] = useState<string | null>(null);
   const [updatingId, setUpdatingId] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [availability, setAvailability] = useState<
+    Record<string, AvailabilityResponse | null>
+  >({});
+  const [availabilityLoading, setAvailabilityLoading] = useState<
+    Record<string, boolean>
+  >({});
+  const [availabilityError, setAvailabilityError] = useState<
+    Record<string, string>
+  >({});
+
+  const isMountedRef = useRef(true);
+
+  useEffect(() => {
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, []);
+
+  const requestAvailability = useCallback(
+    async (item: WatchlistItem, options?: { force?: boolean }) => {
+      if (!item.tmdb_id || !isMountedRef.current) {
+        return;
+      }
+
+      if (
+        !options?.force &&
+        (availability[item.id] || availabilityLoading[item.id])
+      ) {
+        return;
+      }
+
+      setAvailabilityLoading((prev) => ({ ...prev, [item.id]: true }));
+      setAvailabilityError((prev) => {
+        if (!(item.id in prev)) {
+          return prev;
+        }
+        const next = { ...prev };
+        delete next[item.id];
+        return next;
+      });
+
+      try {
+        const typeParam = item.type === "show" ? "tv" : "movie";
+        const response = await fetch(
+          `/api/availability/${item.tmdb_id}?type=${typeParam}`
+        );
+
+        const data = (await response.json().catch(() => null)) as
+          | AvailabilityResponse
+          | { error?: string }
+          | null;
+
+        if (!isMountedRef.current) {
+          return;
+        }
+
+        if (!response.ok || !data || typeof data !== "object") {
+          const message =
+            (data && "error" in data && typeof data.error === "string"
+              ? data.error
+              : null) || "Failed to load availability.";
+          setAvailabilityError((prev) => ({ ...prev, [item.id]: message }));
+          return;
+        }
+
+        if ("error" in data && data.error) {
+          setAvailabilityError((prev) => ({ ...prev, [item.id]: data.error! }));
+          return;
+        }
+
+        const availabilityPayload = data as AvailabilityResponse;
+        setAvailability((prev) => ({
+          ...prev,
+          [item.id]: availabilityPayload,
+        }));
+      } catch (err) {
+        console.error("Availability fetch error", err);
+        if (!isMountedRef.current) {
+          return;
+        }
+        setAvailabilityError((prev) => ({
+          ...prev,
+          [item.id]: "Unable to load availability. Please try again.",
+        }));
+      } finally {
+        if (isMountedRef.current) {
+          setAvailabilityLoading((prev) => ({
+            ...prev,
+            [item.id]: false,
+          }));
+        }
+      }
+    },
+    [availability, availabilityLoading]
+  );
+
+  const fetchAvailabilityForItems = useCallback(
+    async (list: WatchlistItem[]) => {
+      for (const entry of list) {
+        if (!entry.tmdb_id) {
+          continue;
+        }
+        void requestAvailability(entry);
+      }
+    },
+    [requestAvailability]
+  );
 
   const loadWatchlist = useCallback(
     async (signal?: AbortSignal) => {
@@ -105,6 +246,10 @@ export default function Watchlist() {
 
         const fetchedItems = Array.isArray(data?.items) ? data.items : [];
         setItems(fetchedItems);
+        setAvailability((prev) => retainByIds(prev, fetchedItems));
+        setAvailabilityLoading((prev) => retainByIds(prev, fetchedItems));
+        setAvailabilityError((prev) => retainByIds(prev, fetchedItems));
+        void fetchAvailabilityForItems(fetchedItems);
       } catch (err) {
         if ((err as { name?: string }).name === "AbortError") {
           return;
@@ -118,7 +263,7 @@ export default function Watchlist() {
         }
       }
     },
-    [filterType, sortOption]
+    [filterType, sortOption, fetchAvailabilityForItems]
   );
 
   useEffect(() => {
@@ -237,6 +382,13 @@ export default function Watchlist() {
     }
     return date.toLocaleDateString();
   }, []);
+
+  const handleAvailabilityRefresh = useCallback(
+    (item: WatchlistItem) => {
+      void requestAvailability(item, { force: true });
+    },
+    [requestAvailability]
+  );
 
   if (isLoading) {
     return (
@@ -393,6 +545,14 @@ export default function Watchlist() {
                 const updatedDate = formatDate(item.updated_at);
                 const disabling =
                   updatingId === item.id || deletingId === item.id;
+                const availabilityData = availability[item.id];
+                const availabilityIsLoading =
+                  availabilityLoading[item.id] ?? false;
+                const availabilityMessage = availabilityError[item.id];
+                const hasProviders =
+                  availabilityData &&
+                  Array.isArray(availabilityData.providers) &&
+                  availabilityData.providers.length > 0;
 
                 return (
                   <li
@@ -462,6 +622,84 @@ export default function Watchlist() {
                         {addedDate && <p>Added {addedDate}</p>}
                         {updatedDate && <p>Updated {updatedDate}</p>}
                       </div>
+                    </div>
+
+                    <div className="mt-4 rounded-md border border-gray-100 bg-gray-50 p-4">
+                      <div className="mb-2 flex flex-wrap items-center gap-2">
+                        <p className="text-sm font-semibold text-gray-700">
+                          Streaming availability
+                          {availabilityData?.region
+                            ? ` · ${availabilityData.region}`
+                            : ""}
+                        </p>
+                        {item.tmdb_id ? (
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            type="button"
+                            onClick={() => handleAvailabilityRefresh(item)}
+                            loading={availabilityIsLoading}
+                          >
+                            Check again
+                          </Button>
+                        ) : null}
+                      </div>
+                      {!item.tmdb_id ? (
+                        <p className="text-sm text-gray-600">
+                          Link a TMDb entry to check availability.
+                        </p>
+                      ) : availabilityIsLoading &&
+                        !hasProviders &&
+                        !availabilityMessage ? (
+                        <div className="flex items-center gap-2 text-sm text-gray-500">
+                          <LoadingSpinner size="sm" />
+                          <span>Checking your services…</span>
+                        </div>
+                      ) : availabilityMessage ? (
+                        <p className="text-sm text-red-600">
+                          {availabilityMessage}
+                        </p>
+                      ) : hasProviders ? (
+                        <div className="flex flex-wrap items-center gap-3">
+                          {availabilityData.providers.map((provider) => {
+                            const logoSrc = provider.logo_path
+                              ? `${TMDB_IMAGE_BASE}${provider.logo_path}`
+                              : null;
+                            return (
+                              <a
+                                key={`${item.id}-${provider.code}`}
+                                href={provider.link ?? undefined}
+                                target={provider.link ? "_blank" : undefined}
+                                rel={
+                                  provider.link
+                                    ? "noopener noreferrer"
+                                    : undefined
+                                }
+                                className="flex items-center gap-2 rounded-full bg-white px-3 py-1 text-sm text-gray-700 shadow-sm border border-gray-200 hover:border-blue-400"
+                              >
+                                {logoSrc ? (
+                                  <Image
+                                    src={logoSrc}
+                                    alt={provider.name}
+                                    width={28}
+                                    height={28}
+                                    className="h-7 w-7 rounded"
+                                  />
+                                ) : null}
+                                <span>{provider.name}</span>
+                              </a>
+                            );
+                          })}
+                        </div>
+                      ) : availabilityData ? (
+                        <p className="text-sm text-gray-600">
+                          Not currently available on your connected services.
+                        </p>
+                      ) : (
+                        <p className="text-sm text-gray-600">
+                          Availability will appear once checked.
+                        </p>
+                      )}
                     </div>
                   </li>
                 );

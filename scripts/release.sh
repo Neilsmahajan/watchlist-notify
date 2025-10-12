@@ -152,7 +152,11 @@ log "Region       : ${REGION}"
 log "Repository   : ${REPO}"
 log "Image name   : ${IMAGE}"
 log "Service      : ${SERVICE}"
-log "Tag          : ${TAG}${DEPLOY_ONLY:+ (deploy-only)}"
+TAG_NOTE=""
+if [[ ${DEPLOY_ONLY} -eq 1 ]]; then
+  TAG_NOTE=" (deploy-only)"
+fi
+log "Tag          : ${TAG}${TAG_NOTE}"
 log "Platform     : ${PLATFORM}"
 log "Cloud Build  : $([[ ${USE_CLOUD_BUILD} -eq 1 ]] && echo yes || echo no)"
 log "Also latest  : $([[ ${TAG_LATEST} -eq 1 ]] && echo yes || echo no)"
@@ -175,24 +179,14 @@ if [[ ${DEPLOY_ONLY} -eq 0 ]]; then
     CMD=(gcloud auth configure-docker "${REGISTRY}")
     if [[ ${DRY_RUN} -eq 1 ]]; then echo "DRY: ${CMD[*]}"; else "${CMD[@]}" >/dev/null; fi
 
-    log "Local buildx build: ${FULL_IMAGE}"
-    CMD=(docker buildx build --platform "${PLATFORM}" -t "${FULL_IMAGE}" .)
+    log "Local buildx build+push: ${FULL_IMAGE}"
+    CMD=(docker buildx build --platform "${PLATFORM}" -t "${FULL_IMAGE}")
+    if [[ ${TAG_LATEST} -eq 1 ]]; then
+      CMD+=(-t "${LATEST_IMAGE}")
+    fi
+    CMD+=(--push .)
     if [[ ${DRY_RUN} -eq 1 ]]; then echo "DRY: ${CMD[*]}"; else
       if ! "${CMD[@]}"; then err "Local docker build failed"; exit 2; fi
-    fi
-
-    log "Pushing image: ${FULL_IMAGE}"
-    CMD=(docker push "${FULL_IMAGE}")
-    if [[ ${DRY_RUN} -eq 1 ]]; then echo "DRY: ${CMD[*]}"; else
-      if ! "${CMD[@]}"; then err "Push failed"; exit 2; fi
-    fi
-
-    if [[ ${TAG_LATEST} -eq 1 ]]; then
-      log "Tagging latest"
-      CMD=(docker tag "${FULL_IMAGE}" "${LATEST_IMAGE}")
-      if [[ ${DRY_RUN} -eq 1 ]]; then echo "DRY: ${CMD[*]}"; else "${CMD[@]}"; fi
-      CMD=(docker push "${LATEST_IMAGE}")
-      if [[ ${DRY_RUN} -eq 1 ]]; then echo "DRY: ${CMD[*]}"; else "${CMD[@]}" || warn "Failed to push latest"; fi
     fi
   fi
 else
