@@ -19,15 +19,17 @@ type ServicesResponse = {
   error?: string;
 };
 
-const serviceIcons: Record<string, string> = {
-  netflix: "🎬",
-  disney_plus: "🏰",
-  max: "🎭",
-  prime_video: "📦",
-  apple_tv_plus: "🍎",
-  hulu: "🟢",
-  paramount_plus: "⭐",
-  peacock: "🦚",
+const TMDB_LOGO_BASE = "https://media.themoviedb.org/t/p/original";
+
+const serviceAssets: Record<string, { logo?: string; fallback: string }> = {
+  netflix: { logo: "/pbpMk2JmcoNnQwx5JGpXngfoWtp.jpg", fallback: "�" },
+  prime_video: { logo: "/pvske1MyAoymrs5bguRfVqYiM9a.jpg", fallback: "📦" },
+  hulu: { logo: "/bxBlRPEPpMVDc4jMhSrTf2339DW.jpg", fallback: "🟢" },
+  disney_plus: { logo: "/97yvRBw1GzX7fXprcF80er19ot.jpg", fallback: "�" },
+  max: { logo: "/jbe4gVSfRlbPTdESXhEKpornsfu.jpg", fallback: "🎭" },
+  paramount_plus: { logo: "/hExO4PtimLIYn3kBOrzsejNv7cT.jpg", fallback: "⭐" },
+  peacock: { logo: "/2aGrp1xw3qhwCYvNGAJZPdjfeeX.jpg", fallback: "🦚" },
+  apple_tv_plus: { logo: "/2E03IAZsX4ZaUqM7tXlctEPMGWS.jpg", fallback: "🍎" },
 };
 
 export default function Settings() {
@@ -240,7 +242,11 @@ export default function Settings() {
           ) : (
             <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
               {services.map((service) => {
-                const icon = serviceIcons[service.code] || "🎬";
+                const asset = serviceAssets[service.code];
+                const logoSrc = asset?.logo
+                  ? `${TMDB_LOGO_BASE}${asset.logo}`
+                  : null;
+                const fallbackIcon = asset?.fallback ?? "🎬";
                 const isPending = Boolean(pendingServices[service.code]);
                 const formattedDate = formatDate(service.added_at);
 
@@ -249,8 +255,20 @@ export default function Settings() {
                     key={service.code}
                     className="rounded-lg border border-gray-200 p-4 text-center hover:bg-gray-50 transition-colors"
                   >
-                    <div className="text-2xl mb-2" aria-hidden="true">
-                      {icon}
+                    <div className="mb-2 flex justify-center">
+                      {logoSrc ? (
+                        <Image
+                          src={logoSrc}
+                          alt={`${service.name} logo`}
+                          width={64}
+                          height={64}
+                          className="h-16 w-16 object-contain"
+                        />
+                      ) : (
+                        <span className="text-2xl" aria-hidden="true">
+                          {fallbackIcon}
+                        </span>
+                      )}
                     </div>
                     <div className="text-sm font-medium text-gray-900 mb-1">
                       {service.name}

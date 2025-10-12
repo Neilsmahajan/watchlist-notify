@@ -24,6 +24,18 @@ var providerAliases = map[string]string{
 	// Max (formerly HBO Max)
 	"max":    ServiceMax,
 	"hbomax": ServiceMax,
+	// Paramount+
+	"paramount+":    ServiceParamountPlus,
+	"paramountplus": ServiceParamountPlus,
+	"paramount":     ServiceParamountPlus,
+	// Peacock
+	"peacock":            ServicePeacock,
+	"peacockpremium":     ServicePeacock,
+	"peacockpremiumplus": ServicePeacock,
+	// Apple TV+
+	"appletv+":    ServiceAppleTVPlus,
+	"appletvplus": ServiceAppleTVPlus,
+	"appletv":     ServiceAppleTVPlus,
 }
 
 func normalizeProviderName(s string) string {

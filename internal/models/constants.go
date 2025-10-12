@@ -2,11 +2,14 @@ package models
 
 // Supported service codes (phase 1 subset). Use lowercase stable codes.
 const (
-	ServiceNetflix    = "netflix"
-	ServicePrimeVideo = "prime_video"
-	ServiceHulu       = "hulu"
-	ServiceDisneyPlus = "disney_plus"
-	ServiceMax        = "max"
+	ServiceNetflix       = "netflix"
+	ServicePrimeVideo    = "prime_video"
+	ServiceHulu          = "hulu"
+	ServiceDisneyPlus    = "disney_plus"
+	ServiceMax           = "max"
+	ServiceParamountPlus = "paramount_plus"
+	ServicePeacock       = "peacock"
+	ServiceAppleTVPlus   = "apple_tv_plus"
 )
 
 // ServiceInfo describes a streaming service with a stable code and display name.
@@ -22,13 +25,19 @@ var ServiceCatalog = []ServiceInfo{
 	{Code: ServiceHulu, Name: "Hulu"},
 	{Code: ServiceDisneyPlus, Name: "Disney+"},
 	{Code: ServiceMax, Name: "Max"},
+	{Code: ServiceParamountPlus, Name: "Paramount+"},
+	{Code: ServicePeacock, Name: "Peacock"},
+	{Code: ServiceAppleTVPlus, Name: "Apple TV+"},
 }
 
 // ServiceCodeSet provides quick validation for service codes (keys are lowercase codes).
 var ServiceCodeSet = map[string]bool{
-	ServiceNetflix:    true,
-	ServicePrimeVideo: true,
-	ServiceHulu:       true,
-	ServiceDisneyPlus: true,
-	ServiceMax:        true,
+	ServiceNetflix:       true,
+	ServicePrimeVideo:    true,
+	ServiceHulu:          true,
+	ServiceDisneyPlus:    true,
+	ServiceMax:           true,
+	ServiceParamountPlus: true,
+	ServicePeacock:       true,
+	ServiceAppleTVPlus:   true,
 }
