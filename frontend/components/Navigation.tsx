@@ -4,13 +4,17 @@ import { useUser } from "@auth0/nextjs-auth0";
 import Image from "next/image";
 import Link from "next/link";
 import { useState } from "react";
+import { useTheme } from "@/components/ThemeProvider";
 
 export default function Navigation() {
   const { user, isLoading } = useUser();
-  const [isMenuOpen, setIsMenuOpen] = useState(false);
+  const [isProfileMenuOpen, setIsProfileMenuOpen] = useState(false);
+  const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
+  const { theme, toggleTheme } = useTheme();
+  const isDark = theme === "dark";
 
   return (
-    <nav className="bg-white/80 backdrop-blur-md border-b border-gray-200 sticky top-0 z-50">
+    <nav className="sticky top-0 z-50 border-b border-gray-200 bg-white/80 backdrop-blur-md transition-colors duration-200 dark:border-slate-800 dark:bg-slate-900/80">
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
         <div className="flex justify-between h-16">
           <div className="flex items-center">
@@ -22,7 +26,7 @@ export default function Navigation() {
                 height={32}
                 className="w-8 h-8"
               />
-              <span className="text-xl font-bold text-gray-900">
+              <span className="text-xl font-bold text-gray-900 dark:text-slate-100">
                 Watchlist Notify
               </span>
             </Link>
@@ -34,19 +38,19 @@ export default function Navigation() {
               <>
                 <Link
                   href="/dashboard"
-                  className="text-gray-700 hover:text-blue-600 transition-colors"
+                  className="text-gray-700 transition-colors hover:text-blue-600 dark:text-slate-200 dark:hover:text-blue-400"
                 >
                   Dashboard
                 </Link>
                 <Link
                   href="/watchlist"
-                  className="text-gray-700 hover:text-blue-600 transition-colors"
+                  className="text-gray-700 transition-colors hover:text-blue-600 dark:text-slate-200 dark:hover:text-blue-400"
                 >
                   My Watchlist
                 </Link>
                 <Link
                   href="/search"
-                  className="text-gray-700 hover:text-blue-600 transition-colors"
+                  className="text-gray-700 transition-colors hover:text-blue-600 dark:text-slate-200 dark:hover:text-blue-400"
                 >
                   Search
                 </Link>
@@ -54,13 +58,47 @@ export default function Navigation() {
             )}
 
             <div className="flex items-center space-x-4">
+              <button
+                type="button"
+                onClick={toggleTheme}
+                aria-label={`Activate ${isDark ? "light" : "dark"} mode`}
+                className="rounded-full p-2 text-gray-700 transition-colors hover:bg-gray-100 hover:text-blue-600 dark:text-slate-200 dark:hover:bg-slate-800 dark:hover:text-blue-400"
+              >
+                {isDark ? (
+                  <svg
+                    className="h-5 w-5"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth={2}
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  >
+                    <path d="M12 18a6 6 0 0 1-6-6 6 6 0 0 1 7.2-5.9 1 1 0 0 1 .6 1.8A4 4 0 0 0 12 16a4 4 0 0 0 3.1-6.4 1 1 0 0 1 .6-1.8A6 6 0 0 1 12 18Z" />
+                  </svg>
+                ) : (
+                  <svg
+                    className="h-5 w-5"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth={2}
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  >
+                    <circle cx="12" cy="12" r="4" />
+                    <path d="M12 2v2m0 16v2m10-10h-2M4 12H2m17.07 7.07-1.41-1.41M6.34 6.34 4.93 4.93m12.14 0 1.41 1.41M6.34 17.66l-1.41 1.41" />
+                  </svg>
+                )}
+              </button>
+
               {isLoading ? (
-                <div className="w-8 h-8 bg-gray-200 rounded-full animate-pulse"></div>
+                <div className="h-8 w-8 animate-pulse rounded-full bg-gray-200 dark:bg-slate-700"></div>
               ) : user ? (
                 <div className="relative">
                   <button
-                    onClick={() => setIsMenuOpen(!isMenuOpen)}
-                    className="flex items-center space-x-2 text-gray-700 hover:text-blue-600 transition-colors"
+                    onClick={() => setIsProfileMenuOpen((prev) => !prev)}
+                    className="flex items-center space-x-2 text-gray-700 transition-colors hover:text-blue-600 dark:text-slate-200 dark:hover:text-blue-400"
                   >
                     <Image
                       src={user.picture || "/default-avatar.svg"}
@@ -72,30 +110,66 @@ export default function Navigation() {
                     <span className="hidden sm:block">{user.name}</span>
                   </button>
 
-                  {isMenuOpen && (
-                    <div className="absolute right-0 mt-2 w-48 bg-white rounded-md shadow-lg py-1 z-50">
-                      <div className="px-4 py-2 text-sm text-gray-500">
+                  {isProfileMenuOpen && (
+                    <div className="absolute right-0 mt-2 w-56 rounded-md bg-white py-1 shadow-lg ring-1 ring-black/10 z-50 dark:bg-slate-900 dark:ring-white/10">
+                      <div className="px-4 py-2 text-sm text-gray-500 dark:text-slate-400">
                         {user.email}
                       </div>
                       <hr className="my-1" />
                       <Link
                         href="/profile"
-                        className="block px-4 py-2 text-sm text-gray-700 hover:bg-gray-100"
-                        onClick={() => setIsMenuOpen(false)}
+                        className="block px-4 py-2 text-sm text-gray-700 transition-colors hover:bg-gray-100 dark:text-slate-200 dark:hover:bg-slate-800"
+                        onClick={() => setIsProfileMenuOpen(false)}
                       >
                         Profile
                       </Link>
                       <Link
                         href="/settings"
-                        className="block px-4 py-2 text-sm text-gray-700 hover:bg-gray-100"
-                        onClick={() => setIsMenuOpen(false)}
+                        className="block px-4 py-2 text-sm text-gray-700 transition-colors hover:bg-gray-100 dark:text-slate-200 dark:hover:bg-slate-800"
+                        onClick={() => setIsProfileMenuOpen(false)}
                       >
                         Settings
                       </Link>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          toggleTheme();
+                          setIsProfileMenuOpen(false);
+                        }}
+                        className="flex w-full items-center justify-between px-4 py-2 text-sm text-gray-700 transition-colors hover:bg-gray-100 dark:text-slate-200 dark:hover:bg-slate-800"
+                      >
+                        <span>Switch to {isDark ? "light" : "dark"} mode</span>
+                        {isDark ? (
+                          <svg
+                            className="h-4 w-4"
+                            viewBox="0 0 24 24"
+                            fill="none"
+                            stroke="currentColor"
+                            strokeWidth={2}
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                          >
+                            <path d="M12 18a6 6 0 0 1-6-6 6 6 0 0 1 7.2-5.9 1 1 0 0 1 .6 1.8A4 4 0 0 0 12 16a4 4 0 0 0 3.1-6.4 1 1 0 0 1 .6-1.8A6 6 0 0 1 12 18Z" />
+                          </svg>
+                        ) : (
+                          <svg
+                            className="h-4 w-4"
+                            viewBox="0 0 24 24"
+                            fill="none"
+                            stroke="currentColor"
+                            strokeWidth={2}
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                          >
+                            <circle cx="12" cy="12" r="4" />
+                            <path d="M12 2v2m0 16v2m10-10h-2M4 12H2m17.07 7.07-1.41-1.41M6.34 6.34 4.93 4.93m12.14 0 1.41 1.41M6.34 17.66l-1.41 1.41" />
+                          </svg>
+                        )}
+                      </button>
                       <hr className="my-1" />
                       <a
                         href="/auth/logout"
-                        className="block px-4 py-2 text-sm text-gray-700 hover:bg-gray-100"
+                        className="block px-4 py-2 text-sm text-gray-700 transition-colors hover:bg-gray-100 dark:text-slate-200 dark:hover:bg-slate-800"
                       >
                         Sign out
                       </a>
@@ -106,13 +180,13 @@ export default function Navigation() {
                 <div className="flex items-center space-x-4">
                   <a
                     href="/auth/login"
-                    className="text-gray-700 hover:text-blue-600 transition-colors"
+                    className="text-gray-700 transition-colors hover:text-blue-600 dark:text-slate-200 dark:hover:text-blue-400"
                   >
                     Sign in
                   </a>
                   <a
                     href="/auth/login"
-                    className="bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700 transition-colors"
+                    className="rounded-lg bg-blue-600 px-4 py-2 text-white transition-colors hover:bg-blue-700 dark:bg-blue-500 dark:hover:bg-blue-400"
                   >
                     Get Started
                   </a>
@@ -124,8 +198,8 @@ export default function Navigation() {
           {/* Mobile menu button */}
           <div className="md:hidden flex items-center">
             <button
-              onClick={() => setIsMenuOpen(!isMenuOpen)}
-              className="text-gray-700 hover:text-blue-600 transition-colors"
+              onClick={() => setIsMobileMenuOpen((prev) => !prev)}
+              className="text-gray-700 transition-colors hover:text-blue-600 dark:text-slate-200 dark:hover:text-blue-400"
             >
               <svg
                 className="w-6 h-6"
@@ -145,50 +219,60 @@ export default function Navigation() {
         </div>
 
         {/* Mobile menu */}
-        {isMenuOpen && (
+        {isMobileMenuOpen && (
           <div className="md:hidden">
             <div className="px-2 pt-2 pb-3 space-y-1">
+              <button
+                type="button"
+                onClick={() => {
+                  toggleTheme();
+                  setIsMobileMenuOpen(false);
+                }}
+                className="block w-full rounded-md px-3 py-2 text-left text-gray-700 transition-colors hover:bg-gray-100 hover:text-blue-600 dark:text-slate-200 dark:hover:bg-slate-800 dark:hover:text-blue-400"
+              >
+                Switch to {isDark ? "light" : "dark"} mode
+              </button>
               {user && (
                 <>
                   <Link
                     href="/dashboard"
-                    className="block px-3 py-2 text-gray-700 hover:text-blue-600 transition-colors"
-                    onClick={() => setIsMenuOpen(false)}
+                    className="block rounded-md px-3 py-2 text-gray-700 transition-colors hover:bg-gray-100 hover:text-blue-600 dark:text-slate-200 dark:hover:bg-slate-800 dark:hover:text-blue-400"
+                    onClick={() => setIsMobileMenuOpen(false)}
                   >
                     Dashboard
                   </Link>
                   <Link
                     href="/watchlist"
-                    className="block px-3 py-2 text-gray-700 hover:text-blue-600 transition-colors"
-                    onClick={() => setIsMenuOpen(false)}
+                    className="block rounded-md px-3 py-2 text-gray-700 transition-colors hover:bg-gray-100 hover:text-blue-600 dark:text-slate-200 dark:hover:bg-slate-800 dark:hover:text-blue-400"
+                    onClick={() => setIsMobileMenuOpen(false)}
                   >
                     My Watchlist
                   </Link>
                   <Link
                     href="/search"
-                    className="block px-3 py-2 text-gray-700 hover:text-blue-600 transition-colors"
-                    onClick={() => setIsMenuOpen(false)}
+                    className="block rounded-md px-3 py-2 text-gray-700 transition-colors hover:bg-gray-100 hover:text-blue-600 dark:text-slate-200 dark:hover:bg-slate-800 dark:hover:text-blue-400"
+                    onClick={() => setIsMobileMenuOpen(false)}
                   >
                     Search
                   </Link>
                   <hr className="my-2" />
                   <Link
                     href="/profile"
-                    className="block px-3 py-2 text-gray-700 hover:text-blue-600 transition-colors"
-                    onClick={() => setIsMenuOpen(false)}
+                    className="block rounded-md px-3 py-2 text-gray-700 transition-colors hover:bg-gray-100 hover:text-blue-600 dark:text-slate-200 dark:hover:bg-slate-800 dark:hover:text-blue-400"
+                    onClick={() => setIsMobileMenuOpen(false)}
                   >
                     Profile
                   </Link>
                   <Link
                     href="/settings"
-                    className="block px-3 py-2 text-gray-700 hover:text-blue-600 transition-colors"
-                    onClick={() => setIsMenuOpen(false)}
+                    className="block rounded-md px-3 py-2 text-gray-700 transition-colors hover:bg-gray-100 hover:text-blue-600 dark:text-slate-200 dark:hover:bg-slate-800 dark:hover:text-blue-400"
+                    onClick={() => setIsMobileMenuOpen(false)}
                   >
                     Settings
                   </Link>
                   <a
                     href="/auth/logout"
-                    className="block px-3 py-2 text-gray-700 hover:text-blue-600 transition-colors"
+                    className="block rounded-md px-3 py-2 text-gray-700 transition-colors hover:bg-gray-100 hover:text-blue-600 dark:text-slate-200 dark:hover:bg-slate-800 dark:hover:text-blue-400"
                   >
                     Sign out
                   </a>
@@ -197,7 +281,7 @@ export default function Navigation() {
               {!user && !isLoading && (
                 <a
                   href="/auth/login"
-                  className="block px-3 py-2 text-gray-700 hover:text-blue-600 transition-colors"
+                  className="block rounded-md px-3 py-2 text-gray-700 transition-colors hover:bg-gray-100 hover:text-blue-600 dark:text-slate-200 dark:hover:bg-slate-800 dark:hover:text-blue-400"
                 >
                   Sign in
                 </a>
