@@ -283,39 +283,15 @@ export default function Profile() {
             </div>
 
             <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
-              <div className="flex items-center justify-between mb-4">
-                <h2 className="text-xl font-semibold text-gray-900">
-                  Preferences
-                </h2>
-                <Button variant="outline" size="sm" href="/settings">
-                  Edit Preferences
-                </Button>
-              </div>
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                <div>
-                  <h3 className="text-sm font-medium text-gray-900 mb-2">
-                    Favorite Genres
-                  </h3>
-                  <div className="flex flex-wrap gap-2 text-sm text-gray-500">
-                    <span className="rounded-full bg-gray-100 px-3 py-1">
-                      Not set yet
-                    </span>
-                  </div>
-                </div>
-                <div>
-                  <h3 className="text-sm font-medium text-gray-900 mb-2">
-                    Preferred Languages
-                  </h3>
-                  <div className="flex flex-wrap gap-2 text-sm text-gray-500">
-                    <span className="rounded-full bg-gray-100 px-3 py-1">
-                      English
-                    </span>
-                  </div>
-                </div>
-              </div>
-              <p className="mt-4 text-sm text-gray-500">
-                Customize these preferences in settings to unlock smarter search
-                and alerts.
+              <h2 className="text-xl font-semibold text-gray-900 mb-3">
+                Account Notes
+              </h2>
+              <p className="text-sm text-gray-600">
+                You currently have {watchlist?.length ?? 0} titles saved to your
+                watchlist. We&apos;ll alert you as soon as something becomes
+                available on a connected service. Head to settings anytime to
+                update your notification preferences or manage streaming
+                providers.
               </p>
             </div>
           </div>
@@ -431,18 +407,6 @@ export default function Profile() {
               </div>
             </div>
           </div>
-        </div>
-
-        <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
-          <h2 className="text-xl font-semibold text-gray-900 mb-4">
-            Account Notes
-          </h2>
-          <p className="text-sm text-gray-600">
-            You currently have {watchlist.length} titles saved to your
-            watchlist. We&apos;ll alert you as soon as something becomes
-            available on a connected service. Head to settings anytime to update
-            your notification preferences or manage streaming providers.
-          </p>
         </div>
       </div>
     </div>
