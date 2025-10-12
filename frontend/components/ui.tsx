@@ -78,7 +78,7 @@ export function Button({
   type,
 }: ButtonProps) {
   const baseClasses =
-    "inline-flex items-center justify-center font-medium rounded-lg transition-colors focus:outline-none focus:ring-2 focus:ring-offset-2";
+    "inline-flex items-center justify-center font-medium rounded-lg transition-colors focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-offset-white dark:focus:ring-offset-slate-950";
 
   const variantClasses = {
     primary:
@@ -86,7 +86,7 @@ export function Button({
     secondary:
       "bg-gray-200 text-gray-900 hover:bg-gray-300 focus:ring-gray-500 dark:bg-slate-700 dark:text-slate-100 dark:hover:bg-slate-600 dark:focus:ring-slate-500",
     outline:
-      "border border-gray-300 text-gray-700 hover:bg-gray-50 focus:ring-blue-500 dark:border-slate-600 dark:text-slate-100 dark:hover:bg-slate-800",
+      "border border-gray-300 bg-white text-gray-900 hover:bg-gray-100 focus:ring-blue-500 dark:border-slate-600 dark:bg-slate-900 dark:text-slate-100 dark:hover:bg-slate-800",
   };
 
   const sizeClasses = {
