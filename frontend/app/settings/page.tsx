@@ -5,6 +5,7 @@ import { LoadingSpinner, Button } from "@/components/ui";
 import { redirect } from "next/navigation";
 import Image from "next/image";
 import { useCallback, useEffect, useState } from "react";
+import { formatDisplayDate } from "@/lib/hooks/useWatchlistInsights";
 
 type Service = {
   code: string;
@@ -41,17 +42,6 @@ export default function Settings() {
   const [pendingServices, setPendingServices] = useState<
     Record<string, boolean>
   >({});
-
-  const formatDate = useCallback((value?: string) => {
-    if (!value) {
-      return null;
-    }
-    const parsed = new Date(value);
-    if (Number.isNaN(parsed.getTime())) {
-      return null;
-    }
-    return parsed.toLocaleDateString();
-  }, []);
 
   const loadServices = useCallback(
     async (options: { signal?: AbortSignal; silent?: boolean } = {}) => {
@@ -248,7 +238,7 @@ export default function Settings() {
                   : null;
                 const fallbackIcon = asset?.fallback ?? "🎬";
                 const isPending = Boolean(pendingServices[service.code]);
-                const formattedDate = formatDate(service.added_at);
+                const formattedDate = formatDisplayDate(service.added_at);
 
                 return (
                   <div
