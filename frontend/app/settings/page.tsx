@@ -182,7 +182,6 @@ export default function Settings() {
               <p className="text-gray-600">{user.email}</p>
             </div>
           </div>
-          <Button variant="outline">Edit Profile</Button>
         </div>
 
         {/* Streaming Services */}
@@ -339,9 +338,6 @@ export default function Settings() {
         <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
           <h2 className="text-xl font-semibold text-gray-900 mb-4">Account</h2>
           <div className="space-y-4">
-            <Button variant="outline" className="w-full sm:w-auto">
-              Download My Data
-            </Button>
             <div className="border-t pt-4">
               <Button
                 href="/auth/logout"
