@@ -5,6 +5,32 @@ type AppRouteHandler = (
   req: Request
 ) => void | Response | Promise<void | Response>;
 
+const authedGet = auth0.withApiAuthRequired(async function handler(
+  req: Request
+) {
+  const backend = process.env.BACKEND_URL || "http://localhost:8080";
+  const { searchParams } = new URL(req.url);
+
+  const backendUrl = new URL("/api/watchlist", backend);
+  searchParams.forEach((value, key) => {
+    backendUrl.searchParams.append(key, value);
+  });
+
+  const { token } = await auth0.getAccessToken();
+
+  const response = await fetch(backendUrl, {
+    headers: {
+      Authorization: `Bearer ${token}`,
+      Accept: "application/json",
+    },
+  });
+
+  const data = await response.json().catch(() => ({}));
+  return NextResponse.json(data, { status: response.status });
+});
+
+export const GET = authedGet as unknown as AppRouteHandler;
+
 const authedPost = auth0.withApiAuthRequired(async function handler(
   req: Request
 ) {
