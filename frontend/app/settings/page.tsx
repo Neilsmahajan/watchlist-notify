@@ -20,17 +20,15 @@ type ServicesResponse = {
   error?: string;
 };
 
-const TMDB_LOGO_BASE = "https://media.themoviedb.org/t/p/original";
-
-const serviceAssets: Record<string, { logo?: string; fallback: string }> = {
-  netflix: { logo: "/pbpMk2JmcoNnQwx5JGpXngfoWtp.jpg", fallback: "�" },
-  prime_video: { logo: "/pvske1MyAoymrs5bguRfVqYiM9a.jpg", fallback: "📦" },
-  hulu: { logo: "/bxBlRPEPpMVDc4jMhSrTf2339DW.jpg", fallback: "🟢" },
-  disney_plus: { logo: "/97yvRBw1GzX7fXprcF80er19ot.jpg", fallback: "�" },
-  max: { logo: "/jbe4gVSfRlbPTdESXhEKpornsfu.jpg", fallback: "🎭" },
-  paramount_plus: { logo: "/hExO4PtimLIYn3kBOrzsejNv7cT.jpg", fallback: "⭐" },
-  peacock: { logo: "/2aGrp1xw3qhwCYvNGAJZPdjfeeX.jpg", fallback: "🦚" },
-  apple_tv_plus: { logo: "/2E03IAZsX4ZaUqM7tXlctEPMGWS.jpg", fallback: "🍎" },
+const serviceAssets: Record<string, { logo?: string; fallback?: string }> = {
+  netflix: { logo: "/netflix_logo.png" },
+  prime_video: { logo: "/prime_video_logo.png" },
+  hulu: { logo: "/hulu_logo.png" },
+  disney_plus: { logo: "/disney_plus_logo.png" },
+  max: { logo: "/hbo_max_logo.png" },
+  paramount_plus: { logo: "/paramount_plus_logo.png" },
+  peacock: { logo: "/peacock_logo.png" },
+  apple_tv_plus: { logo: "/apple_tv_plus_logo.png" },
 };
 
 export default function Settings() {
@@ -83,7 +81,7 @@ export default function Settings() {
         }
       }
     },
-    [],
+    []
   );
 
   useEffect(() => {
@@ -130,7 +128,7 @@ export default function Settings() {
       setServicesMessage(
         desiredState
           ? `${service.name} connected successfully.`
-          : `${service.name} disconnected successfully.`,
+          : `${service.name} disconnected successfully.`
       );
     } catch (err) {
       console.error("Services update error", err);
@@ -233,10 +231,8 @@ export default function Settings() {
             <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
               {services.map((service) => {
                 const asset = serviceAssets[service.code];
-                const logoSrc = asset?.logo
-                  ? `${TMDB_LOGO_BASE}${asset.logo}`
-                  : null;
-                const fallbackIcon = asset?.fallback ?? "🎬";
+                const logoSrc = asset?.logo ?? null;
+                const fallbackIcon = asset?.fallback ?? "";
                 const isPending = Boolean(pendingServices[service.code]);
                 const formattedDate = formatDisplayDate(service.added_at);
 
@@ -255,8 +251,11 @@ export default function Settings() {
                           className="h-16 w-16 object-contain"
                         />
                       ) : (
-                        <span className="text-2xl" aria-hidden="true">
-                          {fallbackIcon}
+                        <span
+                          className="text-sm font-semibold text-gray-700"
+                          aria-hidden="true"
+                        >
+                          {fallbackIcon || service.name}
                         </span>
                       )}
                     </div>

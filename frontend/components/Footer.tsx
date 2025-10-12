@@ -1,3 +1,5 @@
+import Image from "next/image";
+
 export default function Footer() {
   return (
     <footer className="bg-white border-t border-gray-200 mt-auto">
@@ -5,9 +7,13 @@ export default function Footer() {
         <div className="grid grid-cols-1 md:grid-cols-4 gap-8">
           <div className="md:col-span-2">
             <div className="flex items-center space-x-2 mb-4">
-              <div className="w-6 h-6 bg-gradient-to-br from-blue-600 to-purple-600 rounded-lg flex items-center justify-center">
-                <span className="text-white font-bold text-xs">WN</span>
-              </div>
+              <Image
+                src="/watchlist_notify_icon_no_background.png"
+                alt="Watchlist Notify logo"
+                width={24}
+                height={24}
+                className="w-6 h-6"
+              />
               <span className="text-lg font-bold text-gray-900">
                 Watchlist Notify
               </span>
