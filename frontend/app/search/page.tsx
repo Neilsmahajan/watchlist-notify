@@ -8,6 +8,7 @@ import { useState } from "react";
 export default function Search() {
   const { user, isLoading } = useUser();
   const [searchQuery, setSearchQuery] = useState("");
+  const [searchType, setSearchType] = useState<"movie" | "tv">("movie");
 
   if (isLoading) {
     return (
@@ -46,8 +47,11 @@ export default function Search() {
           </div>
           <Button
             onClick={() => {
-              // TODO: Implement search functionality
-              console.log("Searching for:", searchQuery);
+              // TODO: Wire up search endpoint integration
+              console.log("Searching for:", {
+                query: searchQuery,
+                type: searchType,
+              });
             }}
             disabled={!searchQuery.trim()}
           >
@@ -56,19 +60,28 @@ export default function Search() {
         </div>
 
         {/* Filter Options */}
-        <div className="flex flex-wrap gap-2 mt-4">
-          <button className="px-3 py-1 text-sm bg-blue-100 text-blue-800 rounded-full hover:bg-blue-200 transition-colors">
-            Movies
-          </button>
-          <button className="px-3 py-1 text-sm bg-gray-100 text-gray-700 rounded-full hover:bg-gray-200 transition-colors">
-            TV Shows
-          </button>
-          <button className="px-3 py-1 text-sm bg-gray-100 text-gray-700 rounded-full hover:bg-gray-200 transition-colors">
-            Documentaries
-          </button>
-          <button className="px-3 py-1 text-sm bg-gray-100 text-gray-700 rounded-full hover:bg-gray-200 transition-colors">
-            Trending
-          </button>
+        <div className="flex flex-wrap gap-2 mt-4 items-center">
+          <span className="text-sm font-medium text-gray-700">
+            Search type:
+          </span>
+          {["movie", "tv"].map((type) => {
+            const isActive = searchType === type;
+            return (
+              <button
+                key={type}
+                type="button"
+                onClick={() => setSearchType(type as "movie" | "tv")}
+                className={`px-3 py-1 text-sm rounded-full transition-colors border ${
+                  isActive
+                    ? "bg-blue-100 border-blue-300 text-blue-800"
+                    : "bg-white border-gray-200 text-gray-700 hover:bg-gray-100"
+                }`}
+                aria-pressed={isActive}
+              >
+                {type === "movie" ? "Movies" : "TV"}
+              </button>
+            );
+          })}
         </div>
       </div>
 
