@@ -3,6 +3,7 @@ package database
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -55,7 +56,12 @@ func (s *service) ListWatchlistItems(ctx context.Context, opts models.ListWatchl
 	if err != nil {
 		return nil, err
 	}
-	defer cursor.Close(ctx)
+	defer func(cursor *mongo.Cursor, ctx context.Context) {
+		err := cursor.Close(ctx)
+		if err != nil {
+			fmt.Println("Error closing cursor:", err)
+		}
+	}(cursor, ctx)
 
 	for cursor.Next(ctx) {
 		var item models.WatchlistItem
@@ -118,7 +124,7 @@ func (s *service) UpdateWatchlistItem(ctx context.Context, userID, itemID primit
 	var updated models.WatchlistItem
 	res := coll.FindOneAndUpdate(ctx, bson.M{"_id": itemID, "user_id": userID}, bson.M{"$set": fields}, options.FindOneAndUpdate().SetReturnDocument(options.After))
 	if res.Err() != nil {
-		if res.Err() == mongo.ErrNoDocuments {
+		if errors.Is(res.Err(), mongo.ErrNoDocuments) {
 			return nil, ErrWatchlistItemNotFound
 		}
 		// Map duplicate key errors to domain error for nicer 409 handling

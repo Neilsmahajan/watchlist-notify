@@ -35,7 +35,7 @@ type CustomClaims struct {
 
 // Validate does nothing for this example, but we need
 // it to satisfy validator.CustomClaims interface.
-func (c CustomClaims) Validate(ctx context.Context) error {
+func (c CustomClaims) Validate(_ context.Context) error {
 	return nil
 }
 

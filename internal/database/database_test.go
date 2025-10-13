@@ -2,6 +2,7 @@ package database
 
 import (
 	"context"
+	"errors"
 	"log"
 	"testing"
 
@@ -13,6 +14,9 @@ func mustStartMongoContainer() (func(context.Context, ...testcontainers.Terminat
 	dbContainer, err := mongodb.Run(context.Background(), "mongo:8.0.13")
 	if err != nil {
 		return nil, err
+	}
+	if dbContainer == nil {
+		return nil, errors.New("mongodb container was not created")
 	}
 
 	dbHost, err := dbContainer.Host(context.Background())

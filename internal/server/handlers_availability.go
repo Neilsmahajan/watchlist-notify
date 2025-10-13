@@ -121,7 +121,7 @@ func (s *Server) availabilityHandler(c *gin.Context) {
 		Link     string `json:"link,omitempty"`
 	}
 
-	out := []outProv{}
+	var out []outProv
 	matchedCodes := map[string]bool{}
 	for _, e := range entries {
 		if code, ok := models.MapProviderNameToCode(e.ProviderName); ok && active[code] {
@@ -136,7 +136,7 @@ func (s *Server) availabilityHandler(c *gin.Context) {
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 
 	// Compute unmatched user services (still active but not present for title)
-	unmatched := []string{}
+	var unmatched []string
 	for code, isActive := range active {
 		if isActive && !matchedCodes[code] {
 			unmatched = append(unmatched, code)

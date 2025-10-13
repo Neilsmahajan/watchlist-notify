@@ -50,7 +50,7 @@ func (s *service) GetUserByEmail(ctx context.Context, email string) (*models.Use
 	var user models.User
 	err := collection.FindOne(ctx, bson.M{"email": email}).Decode(&user)
 	if err != nil {
-		if err == mongo.ErrNoDocuments {
+		if errors.Is(err, mongo.ErrNoDocuments) {
 			return nil, nil
 		}
 		return nil, err

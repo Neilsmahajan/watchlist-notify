@@ -92,8 +92,8 @@ func (s *Server) listUserServicesHandler(c *gin.Context) {
 
 	// Map user's services by normalized code for quick lookup
 	byCode := make(map[string]models.ServiceSubscription, len(user.Services))
-	for _, ssub := range user.Services {
-		byCode[strings.ToLower(ssub.Code)] = ssub
+	for _, serviceSubscription := range user.Services {
+		byCode[strings.ToLower(serviceSubscription.Code)] = serviceSubscription
 	}
 
 	// Supported catalog
@@ -196,8 +196,8 @@ func (s *Server) updateUserServicesHandler(c *gin.Context) {
 	// Merge with existing services without dropping unchanged entries
 	now := time.Now()
 	existing := map[string]models.ServiceSubscription{}
-	for _, ssub := range user.Services {
-		existing[strings.ToLower(ssub.Code)] = ssub
+	for _, serviceSubscription := range user.Services {
+		existing[strings.ToLower(serviceSubscription.Code)] = serviceSubscription
 	}
 	// Apply additions/activations
 	for code := range toAdd {

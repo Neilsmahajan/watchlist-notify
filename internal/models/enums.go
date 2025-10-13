@@ -21,7 +21,7 @@ const (
 )
 
 // Notification types (future use but defined early for consistency)
-const (
-	NotificationTypeDigest  = "digest"
-	NotificationTypeInstant = "instant"
-)
+//const (
+//	NotificationTypeDigest  = "digest"
+//	NotificationTypeInstant = "instant"
+//)

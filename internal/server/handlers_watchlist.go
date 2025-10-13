@@ -146,16 +146,8 @@ func (s *Server) listWatchlistItemsHandler(c *gin.Context) {
 }
 
 func (s *Server) updateWatchlistItemHandler(c *gin.Context) {
-	emailVal, ok := c.Get("user_email")
+	user, ok := s.getUser(c)
 	if !ok {
-		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
-		return
-	}
-	email := emailVal.(string)
-
-	user, err := s.db.GetUserByEmail(c.Request.Context(), email)
-	if err != nil || user == nil {
-		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "user not found"})
 		return
 	}
 
@@ -236,16 +228,8 @@ func (s *Server) updateWatchlistItemHandler(c *gin.Context) {
 }
 
 func (s *Server) deleteWatchlistItemHandler(c *gin.Context) {
-	emailVal, ok := c.Get("user_email")
+	user, ok := s.getUser(c)
 	if !ok {
-		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
-		return
-	}
-	email := emailVal.(string)
-
-	user, err := s.db.GetUserByEmail(c.Request.Context(), email)
-	if err != nil || user == nil {
-		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "user not found"})
 		return
 	}
 

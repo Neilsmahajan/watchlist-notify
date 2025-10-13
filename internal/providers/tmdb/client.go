@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"os"
@@ -137,7 +138,12 @@ func (c *Client) doSearch(ctx context.Context, endpoint string, forcedType strin
 	if err != nil {
 		return nil, 0, 0, err
 	}
-	defer resp.Body.Close()
+	defer func(Body io.ReadCloser) {
+		err := Body.Close()
+		if err != nil {
+			fmt.Println("Error closing response body:", err)
+		}
+	}(resp.Body)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, 0, 0, fmt.Errorf("tmdb search failed: %d", resp.StatusCode)
 	}
@@ -198,7 +204,6 @@ func looksLikeBearer(s string) bool {
 	return false
 }
 
-// Providers
 type Provider struct {
 	ProviderID      int    `json:"provider_id"`
 	ProviderName    string `json:"provider_name"`
@@ -250,7 +255,12 @@ func (c *Client) doProviders(ctx context.Context, endpoint string) (*ProvidersRe
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func(Body io.ReadCloser) {
+		err := Body.Close()
+		if err != nil {
+			fmt.Println("Error closing response body:", err)
+		}
+	}(resp.Body)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, fmt.Errorf("tmdb providers failed: %d", resp.StatusCode)
 	}
