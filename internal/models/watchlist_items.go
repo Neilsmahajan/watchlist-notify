@@ -21,6 +21,7 @@ type WatchlistItem struct {
 	Type          string              `bson:"type" json:"type"` // enum: movie | show (See constants)
 	Year          int                 `bson:"year,omitempty" json:"year,omitempty"`
 	TMDbID        int                 `bson:"tmdb_id,omitempty" json:"tmdb_id,omitempty"`
+	IMDbID        string              `bson:"imdb_id,omitempty" json:"imdb_id,omitempty"`
 	Tags          []string            `bson:"tags,omitempty" json:"tags,omitempty"`
 	Status        string              `bson:"status" json:"status"` // enum: planned | watching | finished
 	AddedAt       time.Time           `bson:"added_at" json:"added_at"`

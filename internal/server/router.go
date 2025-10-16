@@ -25,17 +25,23 @@ func (s *Server) RegisterRoutes() http.Handler {
 	r.GET("/health", s.healthHandler)
 
 	protected := r.Group("/api")
+
 	// Use Auth0 JWT validation middleware for protected routes (native Gin middleware)
 	protected.Use(middleware.EnsureValidToken())
+
 	protected.GET("/me", s.meHandler)
 	protected.PATCH("/me/preferences", s.updateUserPreferencesHandler)
 	protected.GET("/me/services", s.listUserServicesHandler)
 	protected.PATCH("/me/services", s.updateUserServicesHandler)
+
 	protected.POST("/watchlist", s.createWatchlistItemHandler)
 	protected.GET("/watchlist", s.listWatchlistItemsHandler)
 	protected.PATCH("/watchlist/:id", s.updateWatchlistItemHandler)
 	protected.DELETE("/watchlist/:id", s.deleteWatchlistItemHandler)
+	protected.POST("/watchlist/import", s.importWatchlistHandler)
+
 	protected.GET("/search", s.searchHandler)
+
 	protected.GET("/availability/:id", s.availabilityHandler)
 	return r
 }

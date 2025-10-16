@@ -1,8 +1,12 @@
 package server
 
 import (
+	"context"
+	"encoding/csv"
 	"errors"
+	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -251,4 +255,196 @@ func (s *Server) deleteWatchlistItemHandler(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"message": "watchlist item deleted"})
+}
+
+func (s *Server) importWatchlistHandler(c *gin.Context) {
+	user, ok := s.getUser(c)
+	if !ok {
+		return
+	}
+
+	fileHeader, err := c.FormFile("file")
+	if err != nil {
+		jsonError(c, http.StatusBadRequest, "file is required")
+		return
+	}
+	if fileHeader.Size == 0 {
+		jsonError(c, http.StatusBadRequest, "file is empty")
+		return
+	}
+	const maxImportSize = int64(10 << 20) // 10 MB
+	if fileHeader.Size > maxImportSize {
+		jsonError(c, http.StatusBadRequest, "file too large (max 10MB)")
+		return
+	}
+
+	file, err := fileHeader.Open()
+	if err != nil {
+		jsonError(c, http.StatusBadRequest, "failed to open file")
+		return
+	}
+	defer func(closer io.ReadCloser) {
+		_ = closer.Close()
+	}(file)
+
+	result, err := s.importWatchlistFromCSV(c.Request.Context(), user.ID, file)
+	if err != nil {
+		jsonError(c, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"imported":   result.Imported,
+		"duplicates": result.Duplicates,
+		"errors":     result.Errors,
+	})
+}
+
+type watchlistImportResult struct {
+	Imported   int                 `json:"imported"`
+	Duplicates int                 `json:"duplicates"`
+	Errors     []watchlistRowError `json:"errors"`
+}
+
+type watchlistRowError struct {
+	Row    int    `json:"row"`
+	Reason string `json:"reason"`
+}
+
+func (s *Server) importWatchlistFromCSV(ctx context.Context, userID primitive.ObjectID, reader io.Reader) (*watchlistImportResult, error) {
+	csvReader := csv.NewReader(reader)
+	csvReader.FieldsPerRecord = -1
+	csvReader.TrimLeadingSpace = true
+	csvReader.LazyQuotes = true
+
+	header, err := csvReader.Read()
+	if err != nil {
+		return nil, err
+	}
+	if len(header) == 0 {
+		return nil, errors.New("missing header row")
+	}
+	// Strip BOM if present on first header column
+	header[0] = strings.TrimPrefix(header[0], "\ufeff")
+
+	colIndex := make(map[string]int, len(header))
+	for i, col := range header {
+		colIndex[col] = i
+	}
+	requiredCols := []string{"Title", "Title Type", "Const"}
+	for _, col := range requiredCols {
+		if _, ok := colIndex[col]; !ok {
+			return nil, errors.New("missing required column: " + col)
+		}
+	}
+
+	result := &watchlistImportResult{}
+	rowNumber := 1 // header already read
+
+	for {
+		record, err := csvReader.Read()
+		if err == io.EOF {
+			break
+		}
+		rowNumber++
+		if err != nil {
+			result.Errors = append(result.Errors, watchlistRowError{Row: rowNumber, Reason: "failed to parse row"})
+			continue
+		}
+		if len(record) == 0 {
+			continue
+		}
+
+		title := strings.TrimSpace(record[colIndex["Title"]])
+		if title == "" {
+			result.Errors = append(result.Errors, watchlistRowError{Row: rowNumber, Reason: "missing title"})
+			continue
+		}
+
+		imdbID := strings.TrimSpace(record[colIndex["Const"]])
+		if imdbID == "" {
+			result.Errors = append(result.Errors, watchlistRowError{Row: rowNumber, Reason: "missing IMDb ID"})
+			continue
+		}
+
+		titleTypeRaw := strings.TrimSpace(record[colIndex["Title Type"]])
+		typeValue, ok := normalizeTitleType(titleTypeRaw)
+		if !ok {
+			result.Errors = append(result.Errors, watchlistRowError{Row: rowNumber, Reason: "unsupported title type: " + titleTypeRaw})
+			continue
+		}
+
+		item := &models.WatchlistItem{
+			UserID: userID,
+			Title:  title,
+			Type:   typeValue,
+			IMDbID: imdbID,
+			Status: models.WatchlistStatusPlanned,
+		}
+
+		if idx, ok := colIndex["Year"]; ok && idx < len(record) {
+			yearStr := strings.TrimSpace(record[idx])
+			if yearStr != "" {
+				year, convErr := strconv.Atoi(yearStr)
+				if convErr != nil {
+					result.Errors = append(result.Errors, watchlistRowError{Row: rowNumber, Reason: "invalid year"})
+					continue
+				}
+				item.Year = year
+			}
+		}
+
+		if idx, ok := colIndex["Genres"]; ok && idx < len(record) {
+			item.Tags = splitCSVList(record[idx])
+		}
+
+		if err := s.db.CreateWatchlistItem(ctx, item); err != nil {
+			if errors.Is(err, database.ErrDuplicateWatchlistItem) {
+				result.Duplicates++
+				continue
+			}
+			result.Errors = append(result.Errors, watchlistRowError{Row: rowNumber, Reason: err.Error()})
+			continue
+		}
+
+		result.Imported++
+	}
+
+	if result.Imported == 0 && result.Duplicates == 0 && len(result.Errors) > 0 {
+		return nil, errors.New("no rows imported")
+	}
+
+	return result, nil
+}
+
+func normalizeTitleType(raw string) (string, bool) {
+	switch strings.ToLower(raw) {
+	case "movie", "tv movie", "short", "video":
+		return models.WatchlistTypeMovie, true
+	case "tv series", "tv mini series", "tv special", "tv short", "tv episode":
+		return models.WatchlistTypeShow, true
+	default:
+		return "", false
+	}
+}
+
+func splitCSVList(raw string) []string {
+	if raw == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	var out []string
+	seen := make(map[string]struct{}, len(parts))
+	for _, part := range parts {
+		trimmed := strings.TrimSpace(part)
+		if trimmed == "" {
+			continue
+		}
+		if _, ok := seen[trimmed]; ok {
+			continue
+		}
+		seen[trimmed] = struct{}{}
+		out = append(out, trimmed)
+	}
+	return out
 }

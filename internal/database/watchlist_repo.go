@@ -16,12 +16,53 @@ import (
 
 func (s *service) CreateWatchlistItem(ctx context.Context, item *models.WatchlistItem) error {
 	coll := s.db.Database(databaseName).Collection("watchlist_items")
-	now := time.Now()
-	item.AddedAt = now
-	item.UpdatedAt = now
+	if item == nil {
+		return errors.New("item is required")
+	}
+	if item.UserID == primitive.NilObjectID {
+		return errors.New("user id is required")
+	}
+	item.Title = strings.TrimSpace(item.Title)
+	if item.Title == "" {
+		return errors.New("title is required")
+	}
+	item.Type = strings.TrimSpace(strings.ToLower(item.Type))
+	if item.Type == "" {
+		item.Type = models.WatchlistTypeMovie
+	}
+	switch item.Type {
+	case models.WatchlistTypeMovie, models.WatchlistTypeShow:
+	default:
+		return errors.New("invalid type")
+	}
 	if item.Status == "" {
 		item.Status = models.WatchlistStatusPlanned
 	}
+	if item.IMDbID != "" {
+		item.IMDbID = strings.TrimSpace(item.IMDbID)
+	}
+	if item.Year < 0 {
+		return errors.New("invalid year")
+	}
+	if len(item.Tags) > 0 {
+		tags := make([]string, 0, len(item.Tags))
+		seen := make(map[string]struct{}, len(item.Tags))
+		for _, tag := range item.Tags {
+			trimmed := strings.TrimSpace(tag)
+			if trimmed == "" {
+				continue
+			}
+			if _, ok := seen[trimmed]; ok {
+				continue
+			}
+			seen[trimmed] = struct{}{}
+			tags = append(tags, trimmed)
+		}
+		item.Tags = tags
+	}
+	now := time.Now()
+	item.AddedAt = now
+	item.UpdatedAt = now
 	res, err := coll.InsertOne(ctx, item)
 	if err != nil {
 		var we mongo.WriteException

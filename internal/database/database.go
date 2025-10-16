@@ -128,6 +128,12 @@ func ensureIndexes(ctx context.Context, db *mongo.Database) error {
 			Keys:    bson.D{{Key: "user_id", Value: 1}, {Key: "tmdb_id", Value: 1}},
 			Options: options.Index().SetUnique(true).SetPartialFilterExpression(bson.D{{Key: "tmdb_id", Value: bson.D{{Key: "$exists", Value: true}}}}).SetName("uniq_user_tmdb_id"),
 		},
+		{
+			Keys: bson.D{{Key: "user_id", Value: 1}, {Key: "imdb_id", Value: 1}},
+			Options: options.Index().SetUnique(true).
+				SetPartialFilterExpression(bson.D{{Key: "imdb_id", Value: bson.D{{Key: "$exists", Value: true}, {Key: "$ne", Value: ""}}}}).
+				SetName("uniq_user_imdb_id"),
+		},
 	})
 	return err
 }
