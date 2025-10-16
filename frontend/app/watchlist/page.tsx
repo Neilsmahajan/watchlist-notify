@@ -4,7 +4,13 @@ import { useUser } from "@auth0/nextjs-auth0";
 import { LoadingSpinner, EmptyState, Button } from "@/components/ui";
 import Image from "next/image";
 import { redirect } from "next/navigation";
-import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type ChangeEvent,
+} from "react";
 
 type WatchlistType = "movie" | "show";
 type WatchlistStatus = "planned" | "watching" | "finished";
@@ -16,6 +22,7 @@ type WatchlistItem = {
   status: WatchlistStatus;
   year?: number;
   tmdb_id?: number;
+  imdb_id?: string;
   tags?: string[];
   added_at?: string;
   updated_at?: string;
@@ -40,11 +47,23 @@ type AvailabilityResponse = {
   error?: string;
 };
 
+type WatchlistImportRowError = {
+  row: number;
+  reason: string;
+};
+
+type WatchlistImportResponse = {
+  imported?: number;
+  duplicates?: number;
+  errors?: WatchlistImportRowError[];
+  error?: string;
+};
+
 const TMDB_IMAGE_BASE = "https://media.themoviedb.org/t/p/original";
 
 function retainByIds<T>(
   record: Record<string, T>,
-  nextItems: WatchlistItem[],
+  nextItems: WatchlistItem[]
 ): Record<string, T> {
   if (Object.keys(record).length === 0) {
     return record;
@@ -109,8 +128,12 @@ export default function Watchlist() {
   const [availabilityError, setAvailabilityError] = useState<
     Record<string, string>
   >({});
+  const [importing, setImporting] = useState(false);
+  const [importResult, setImportResult] =
+    useState<WatchlistImportResponse | null>(null);
 
   const isMountedRef = useRef(true);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
     return () => {
@@ -144,7 +167,7 @@ export default function Watchlist() {
       try {
         const typeParam = item.type === "show" ? "tv" : "movie";
         const response = await fetch(
-          `/api/availability/${item.tmdb_id}?type=${typeParam}`,
+          `/api/availability/${item.tmdb_id}?type=${typeParam}`
         );
 
         const data = (await response.json().catch(() => null)) as
@@ -193,7 +216,7 @@ export default function Watchlist() {
         }
       }
     },
-    [availability, availabilityLoading],
+    [availability, availabilityLoading]
   );
 
   const fetchAvailabilityForItems = useCallback(
@@ -205,7 +228,7 @@ export default function Watchlist() {
         void requestAvailability(entry);
       }
     },
-    [requestAvailability],
+    [requestAvailability]
   );
 
   const loadWatchlist = useCallback(
@@ -263,7 +286,7 @@ export default function Watchlist() {
         }
       }
     },
-    [filterType, sortOption, fetchAvailabilityForItems],
+    [filterType, sortOption, fetchAvailabilityForItems]
   );
 
   useEffect(() => {
@@ -276,9 +299,93 @@ export default function Watchlist() {
     void loadWatchlist();
   };
 
+  const handleImportClick = () => {
+    fileInputRef.current?.click();
+  };
+
+  const handleImportFile = useCallback(
+    async (event: ChangeEvent<HTMLInputElement>) => {
+      const file = event.target.files?.[0];
+      event.target.value = "";
+
+      if (!file) {
+        return;
+      }
+
+      if (!file.name.toLowerCase().endsWith(".csv")) {
+        setActionError("Please upload a CSV file.");
+        return;
+      }
+
+      if (file.size > 10 * 1024 * 1024) {
+        setActionError("File too large. Please upload a file under 10MB.");
+        return;
+      }
+
+      setImporting(true);
+      setActionError(null);
+      setActionMessage(null);
+      setImportResult(null);
+
+      try {
+        const formData = new FormData();
+        formData.set("file", file);
+
+        const response = await fetch("/api/watchlist/import", {
+          method: "POST",
+          body: formData,
+        });
+
+        const data = (await response
+          .json()
+          .catch(() => null)) as WatchlistImportResponse | null;
+
+        if (!response.ok || !data) {
+          const message =
+            (data?.error && typeof data.error === "string"
+              ? data.error
+              : null) || "Failed to import watchlist. Please try again.";
+          setActionError(message);
+          return;
+        }
+
+        setImportResult(data);
+
+        const importedCount = data.imported ?? 0;
+        const duplicateCount = data.duplicates ?? 0;
+        const summaryParts = [
+          `${importedCount} item${importedCount === 1 ? "" : "s"} imported`,
+        ];
+        if (duplicateCount > 0) {
+          summaryParts.push(
+            `${duplicateCount} duplicate${
+              duplicateCount === 1 ? "" : "s"
+            } skipped`
+          );
+        }
+        if (Array.isArray(data.errors) && data.errors.length > 0) {
+          summaryParts.push(
+            `${data.errors.length} row${
+              data.errors.length === 1 ? "" : "s"
+            } had issues`
+          );
+        }
+
+        setActionMessage(summaryParts.join(" · "));
+        await loadWatchlist();
+      } catch (err) {
+        console.error("Watchlist import error", err);
+        setActionError("Unable to import watchlist. Please retry.");
+      } finally {
+        setImporting(false);
+      }
+    },
+    [loadWatchlist]
+  );
+
   const handleStatusChange = async (
     itemId: string,
-    newStatus: WatchlistStatus,
+    newStatus: WatchlistStatus
   ) => {
     setUpdatingId(itemId);
     setActionError(null);
@@ -310,14 +417,14 @@ export default function Watchlist() {
       if (data && typeof data === "object" && "id" in data) {
         setItems((prev) =>
           prev.map((item) =>
-            item.id === itemId ? { ...item, ...(data as WatchlistItem) } : item,
-          ),
+            item.id === itemId ? { ...item, ...(data as WatchlistItem) } : item
+          )
         );
       } else {
         setItems((prev) =>
           prev.map((item) =>
-            item.id === itemId ? { ...item, status: newStatus } : item,
-          ),
+            item.id === itemId ? { ...item, status: newStatus } : item
+          )
         );
       }
 
@@ -337,7 +444,7 @@ export default function Watchlist() {
     }
 
     const confirmed = window.confirm(
-      `Remove "${item.title}" from your watchlist?`,
+      `Remove "${item.title}" from your watchlist?`
     );
     if (!confirmed) {
       return;
@@ -387,7 +494,7 @@ export default function Watchlist() {
     (item: WatchlistItem) => {
       void requestAvailability(item, { force: true });
     },
-    [requestAvailability],
+    [requestAvailability]
   );
 
   if (isLoading) {
@@ -467,8 +574,23 @@ export default function Watchlist() {
             >
               Refresh
             </Button>
+            <Button
+              type="button"
+              onClick={handleImportClick}
+              loading={importing}
+              disabled={importing}
+            >
+              Import IMDb CSV
+            </Button>
             <Button href="/search">Search for Content</Button>
           </div>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".csv,text/csv"
+            className="hidden"
+            onChange={handleImportFile}
+          />
         </div>
 
         {actionMessage && (
@@ -484,6 +606,41 @@ export default function Watchlist() {
         {listError && items.length > 0 && (
           <div className="mb-4 rounded-md bg-yellow-50 px-4 py-3 text-sm text-yellow-800">
             {listError}
+          </div>
+        )}
+        {importResult && (
+          <div className="mb-4 rounded-md bg-blue-50 px-4 py-3 text-sm text-blue-800">
+            <p className="font-medium">
+              Imported {importResult.imported ?? 0} item
+              {importResult.imported === 1 ? "" : "s"} successfully.
+            </p>
+            {importResult.duplicates ? (
+              <p>
+                Skipped {importResult.duplicates} duplicate
+                {importResult.duplicates === 1 ? "" : "s"}.
+              </p>
+            ) : null}
+            {Array.isArray(importResult.errors) &&
+            importResult.errors.length > 0 ? (
+              <div className="mt-2">
+                <p className="text-xs font-semibold uppercase text-blue-700">
+                  Rows with issues
+                </p>
+                <ul className="mt-1 space-y-1 text-xs text-blue-700">
+                  {importResult.errors.slice(0, 5).map(({ row, reason }) => (
+                    <li key={`${row}-${reason}`}>
+                      Row {row}: {reason}
+                    </li>
+                  ))}
+                </ul>
+                {importResult.errors.length > 5 ? (
+                  <p className="mt-1 text-xs text-blue-700">
+                    +{importResult.errors.length - 5} more issue
+                    {importResult.errors.length - 5 === 1 ? "" : "s"}.
+                  </p>
+                ) : null}
+              </div>
+            ) : null}
           </div>
         )}
 
@@ -604,7 +761,7 @@ export default function Watchlist() {
                           onChange={(event) =>
                             handleStatusChange(
                               item.id,
-                              event.target.value as WatchlistStatus,
+                              event.target.value as WatchlistStatus
                             )
                           }
                           disabled={disabling}
