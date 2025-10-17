@@ -17,8 +17,12 @@ import (
 )
 
 const (
-	defaultBaseURL   = "https://api.themoviedb.org/3"
-	defaultImageBase = "https://image.tmdb.org/t/p/w342"
+	defaultBaseURL          = "https://api.themoviedb.org/3"
+	defaultImageBase        = "https://image.tmdb.org/t/p/w342"
+	ExternalSourceIMDbID    = "imdb_id"
+	ExternalSourceTVDBID    = "tvdb_id"
+	ExternalSourceFreebase  = "freebase_id"
+	ExternalSourceFreebaseF = "freebase_mid"
 )
 
 // Client is a minimal TMDb v3 client using api_key query param auth.
@@ -88,6 +92,14 @@ type searchEntry struct {
 	OriginalName  string `json:"original_name"`
 }
 
+type findResp struct {
+	MovieResults     []searchEntry `json:"movie_results"`
+	PersonResults    []searchEntry `json:"person_results"`
+	TVResults        []searchEntry `json:"tv_results"`
+	TVEpisodeResults []searchEntry `json:"tv_episode_results"`
+	TVSeasonResults  []searchEntry `json:"tv_season_results"`
+}
+
 func (c *Client) SearchMovies(ctx context.Context, query string, page int, includeAdult bool, language, region string) ([]Result, int, int, error) {
 	params := url.Values{}
 	if c.apiKey != "" {
@@ -125,6 +137,37 @@ func (c *Client) SearchTV(ctx context.Context, query string, page int, includeAd
 	return c.doSearch(ctx, endpoint, "tv")
 }
 
+func (c *Client) FindByExternalID(ctx context.Context, externalID, source string) (*Result, error) {
+	if externalID == "" {
+		return nil, errors.New("external id is required")
+	}
+	if source == "" {
+		return nil, errors.New("source is required")
+	}
+	params := url.Values{}
+	if c.apiKey != "" {
+		params.Set("api_key", c.apiKey)
+	}
+	params.Set("external_source", source)
+	endpoint := fmt.Sprintf("%s/find/%s?%s", c.baseURL, url.PathEscape(externalID), params.Encode())
+	results, err := c.doFindByExternalID(ctx, endpoint)
+	if err != nil {
+		return nil, err
+	}
+	if len(results) == 0 {
+		return nil, nil
+	}
+	for i := range results {
+		t := strings.ToLower(results[i].Type)
+		if t == "movie" || t == "tv" {
+			res := results[i]
+			return &res, nil
+		}
+	}
+	res := results[0]
+	return &res, nil
+}
+
 func (c *Client) doSearch(ctx context.Context, endpoint string, forcedType string) ([]Result, int, int, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
@@ -153,35 +196,89 @@ func (c *Client) doSearch(ctx context.Context, endpoint string, forcedType strin
 	}
 	out := make([]Result, 0, len(sr.Results))
 	for _, r := range sr.Results {
-		title := r.Title
-		if title == "" {
-			title = r.Name
-		}
-		year := yearFromDate(r.ReleaseDate)
-		if year == 0 {
-			year = yearFromDate(r.FirstAirDate)
-		}
-		mtype := forcedType
-		if mtype == "" {
-			// fall back to media_type if available
-			if r.MediaType == "movie" || r.MediaType == "tv" {
-				mtype = r.MediaType
-			}
-		}
-		posterURL := ""
-		if r.PosterPath != "" {
-			posterURL = defaultImageBase + r.PosterPath
-		}
-		out = append(out, Result{
-			TMDBID:    r.ID,
-			Title:     title,
-			Year:      year,
-			Type:      mtype,
-			PosterURL: posterURL,
-			Poster:    r.PosterPath,
-		})
+		out = append(out, entryToResult(r, forcedType))
 	}
 	return out, sr.Page, sr.TotalPages, nil
+}
+
+func (c *Client) doFindByExternalID(ctx context.Context, endpoint string) ([]Result, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Accept", "application/json")
+	if c.bearer != "" {
+		req.Header.Set("Authorization", "Bearer "+c.bearer)
+	}
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer func(Body io.ReadCloser) {
+		err := Body.Close()
+		if err != nil {
+			fmt.Println("Error closing response body:", err)
+		}
+	}(resp.Body)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("tmdb find by external id failed: %d", resp.StatusCode)
+	}
+	var fr findResp
+	if err := json.NewDecoder(resp.Body).Decode(&fr); err != nil {
+		return nil, err
+	}
+	total := len(fr.MovieResults) + len(fr.TVResults)
+	out := make([]Result, 0, total)
+	for _, r := range fr.MovieResults {
+		out = append(out, entryToResult(r, "movie"))
+	}
+	for _, r := range fr.TVResults {
+		out = append(out, entryToResult(r, "tv"))
+	}
+	return out, nil
+}
+
+func entryToResult(r searchEntry, forcedType string) Result {
+	title := strings.TrimSpace(r.Title)
+	if title == "" {
+		title = strings.TrimSpace(r.Name)
+	}
+	if title == "" {
+		title = strings.TrimSpace(r.OriginalTitle)
+	}
+	if title == "" {
+		title = strings.TrimSpace(r.OriginalName)
+	}
+	year := yearFromDate(r.ReleaseDate)
+	if year == 0 {
+		year = yearFromDate(r.FirstAirDate)
+	}
+	mediaType := forcedType
+	if mediaType == "" {
+		mt := strings.ToLower(strings.TrimSpace(r.MediaType))
+		if mt == "movie" || mt == "tv" {
+			mediaType = mt
+		}
+	}
+	if mediaType == "" {
+		if r.FirstAirDate != "" {
+			mediaType = "tv"
+		} else {
+			mediaType = "movie"
+		}
+	}
+	posterURL := ""
+	if r.PosterPath != "" {
+		posterURL = defaultImageBase + r.PosterPath
+	}
+	return Result{
+		TMDBID:    r.ID,
+		Title:     title,
+		Year:      year,
+		Type:      mediaType,
+		PosterURL: posterURL,
+		Poster:    r.PosterPath,
+	}
 }
 
 func yearFromDate(s string) int {

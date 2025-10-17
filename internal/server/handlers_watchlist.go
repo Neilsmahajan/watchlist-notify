@@ -6,13 +6,13 @@ import (
 	"errors"
 	"io"
 	"net/http"
-	"strconv"
 	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/neilsmahajan/watchlist-notify/internal/database"
 	"github.com/neilsmahajan/watchlist-notify/internal/models"
+	"github.com/neilsmahajan/watchlist-notify/internal/providers/tmdb"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 )
 
@@ -262,6 +262,10 @@ func (s *Server) importWatchlistHandler(c *gin.Context) {
 	if !ok {
 		return
 	}
+	if s.tmdb == nil {
+		jsonError(c, http.StatusServiceUnavailable, "import unavailable")
+		return
+	}
 
 	fileHeader, err := c.FormFile("file")
 	if err != nil {
@@ -312,6 +316,10 @@ type watchlistRowError struct {
 }
 
 func (s *Server) importWatchlistFromCSV(ctx context.Context, userID primitive.ObjectID, reader io.Reader) (*watchlistImportResult, error) {
+	if s.tmdb == nil {
+		return nil, errors.New("tmdb client not configured")
+	}
+
 	csvReader := csv.NewReader(reader)
 	csvReader.FieldsPerRecord = -1
 	csvReader.TrimLeadingSpace = true
@@ -324,22 +332,20 @@ func (s *Server) importWatchlistFromCSV(ctx context.Context, userID primitive.Ob
 	if len(header) == 0 {
 		return nil, errors.New("missing header row")
 	}
-	// Strip BOM if present on first header column
 	header[0] = strings.TrimPrefix(header[0], "\ufeff")
 
 	colIndex := make(map[string]int, len(header))
 	for i, col := range header {
 		colIndex[col] = i
 	}
-	requiredCols := []string{"Title", "Title Type", "Const"}
-	for _, col := range requiredCols {
-		if _, ok := colIndex[col]; !ok {
-			return nil, errors.New("missing required column: " + col)
-		}
+	constIdx, ok := colIndex["Const"]
+	if !ok {
+		return nil, errors.New("missing required column: Const")
 	}
 
 	result := &watchlistImportResult{}
-	rowNumber := 1 // header already read
+	cache := make(map[string]*tmdb.Result)
+	rowNumber := 1
 
 	for {
 		record, err := csvReader.Read()
@@ -351,51 +357,50 @@ func (s *Server) importWatchlistFromCSV(ctx context.Context, userID primitive.Ob
 			result.Errors = append(result.Errors, watchlistRowError{Row: rowNumber, Reason: "failed to parse row"})
 			continue
 		}
-		if len(record) == 0 {
+		if len(record) <= constIdx {
+			result.Errors = append(result.Errors, watchlistRowError{Row: rowNumber, Reason: "missing IMDb ID"})
 			continue
 		}
 
-		title := strings.TrimSpace(record[colIndex["Title"]])
-		if title == "" {
-			result.Errors = append(result.Errors, watchlistRowError{Row: rowNumber, Reason: "missing title"})
-			continue
-		}
-
-		imdbID := strings.TrimSpace(record[colIndex["Const"]])
+		imdbID := strings.TrimSpace(record[constIdx])
 		if imdbID == "" {
 			result.Errors = append(result.Errors, watchlistRowError{Row: rowNumber, Reason: "missing IMDb ID"})
 			continue
 		}
 
-		titleTypeRaw := strings.TrimSpace(record[colIndex["Title Type"]])
-		typeValue, ok := normalizeTitleType(titleTypeRaw)
-		if !ok {
-			result.Errors = append(result.Errors, watchlistRowError{Row: rowNumber, Reason: "unsupported title type: " + titleTypeRaw})
+		tmdbItem, lookupErr := s.lookupTMDbByIMDb(ctx, imdbID, cache)
+		if lookupErr != nil {
+			result.Errors = append(result.Errors, watchlistRowError{Row: rowNumber, Reason: "tmdb lookup failed: " + lookupErr.Error()})
 			continue
+		}
+		if tmdbItem == nil {
+			result.Errors = append(result.Errors, watchlistRowError{Row: rowNumber, Reason: "no tmdb match for imdb id " + imdbID})
+			continue
+		}
+
+		watchlistType, ok := tmdbMediaTypeToWatchlistType(tmdbItem.Type)
+		if !ok {
+			result.Errors = append(result.Errors, watchlistRowError{Row: rowNumber, Reason: "unsupported tmdb media type"})
+			continue
+		}
+
+		title := strings.TrimSpace(tmdbItem.Title)
+		if title == "" {
+			title = imdbID
 		}
 
 		item := &models.WatchlistItem{
 			UserID: userID,
 			Title:  title,
-			Type:   typeValue,
+			Type:   watchlistType,
 			IMDbID: imdbID,
 			Status: models.WatchlistStatusPlanned,
 		}
-
-		if idx, ok := colIndex["Year"]; ok && idx < len(record) {
-			yearStr := strings.TrimSpace(record[idx])
-			if yearStr != "" {
-				year, convErr := strconv.Atoi(yearStr)
-				if convErr != nil {
-					result.Errors = append(result.Errors, watchlistRowError{Row: rowNumber, Reason: "invalid year"})
-					continue
-				}
-				item.Year = year
-			}
+		if tmdbItem.TMDBID > 0 {
+			item.TMDbID = tmdbItem.TMDBID
 		}
-
-		if idx, ok := colIndex["Genres"]; ok && idx < len(record) {
-			item.Tags = splitCSVList(record[idx])
+		if tmdbItem.Year > 0 {
+			item.Year = tmdbItem.Year
 		}
 
 		if err := s.db.CreateWatchlistItem(ctx, item); err != nil {
@@ -417,34 +422,30 @@ func (s *Server) importWatchlistFromCSV(ctx context.Context, userID primitive.Ob
 	return result, nil
 }
 
-func normalizeTitleType(raw string) (string, bool) {
-	switch strings.ToLower(raw) {
-	case "movie", "tv movie", "short", "video":
+func (s *Server) lookupTMDbByIMDb(ctx context.Context, imdbID string, cache map[string]*tmdb.Result) (*tmdb.Result, error) {
+	if cached, seen := cache[imdbID]; seen {
+		return cached, nil
+	}
+	res, err := s.tmdb.FindByExternalID(ctx, imdbID, tmdb.ExternalSourceIMDbID)
+	if err != nil {
+		return nil, err
+	}
+	if res == nil {
+		cache[imdbID] = nil
+		return nil, nil
+	}
+	copy := *res
+	cache[imdbID] = &copy
+	return cache[imdbID], nil
+}
+
+func tmdbMediaTypeToWatchlistType(mediaType string) (string, bool) {
+	switch strings.ToLower(mediaType) {
+	case "movie":
 		return models.WatchlistTypeMovie, true
-	case "tv series", "tv mini series", "tv special", "tv short", "tv episode":
+	case "tv":
 		return models.WatchlistTypeShow, true
 	default:
 		return "", false
 	}
-}
-
-func splitCSVList(raw string) []string {
-	if raw == "" {
-		return nil
-	}
-	parts := strings.Split(raw, ",")
-	var out []string
-	seen := make(map[string]struct{}, len(parts))
-	for _, part := range parts {
-		trimmed := strings.TrimSpace(part)
-		if trimmed == "" {
-			continue
-		}
-		if _, ok := seen[trimmed]; ok {
-			continue
-		}
-		seen[trimmed] = struct{}{}
-		out = append(out, trimmed)
-	}
-	return out
 }
