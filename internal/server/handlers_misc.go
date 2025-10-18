@@ -1,12 +1,16 @@
 package server
 
 import (
+	"errors"
+	"log"
 	"net/http"
 	"os"
 	"strconv"
 	"strings"
 
 	"github.com/gin-gonic/gin"
+	"github.com/neilsmahajan/watchlist-notify/internal/cache"
+	"github.com/neilsmahajan/watchlist-notify/internal/providers/tmdb"
 )
 
 func (s *Server) healthHandler(c *gin.Context) {
@@ -35,7 +39,7 @@ func (s *Server) searchHandler(c *gin.Context) {
 	}
 	page := 1
 	if v := c.Query("page"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 1000 { // TMDb hard cap is high; keep sane
+		if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 1000 {
 			page = n
 		} else {
 			jsonError(c, http.StatusBadRequest, "invalid page")
@@ -53,23 +57,44 @@ func (s *Server) searchHandler(c *gin.Context) {
 			region = def
 		}
 	}
+	var (
+		results    []tmdb.Result
+		pageNow    int
+		totalPages int
+	)
 
-	results, pageNow, totalPages, err := s.cache.GetSearchWatchlistItemsCache(c.Request.Context(), q, page, includeAdult, language, region, typ)
-	if err != nil {
-		jsonError(c, http.StatusBadGateway, "cache lookup failed")
-		return
+	key := cache.SearchKey{
+		Query:        q,
+		Page:         page,
+		IncludeAdult: includeAdult,
+		Language:     language,
+		Region:       region,
+		Type:         typ,
 	}
-	if results == nil {
-		var bodyString string
-		results, pageNow, totalPages, bodyString, err = s.tmdb.SearchTMDb(c.Request.Context(), q, page, includeAdult, language, region, typ)
+
+	cacheEntry, err := s.cache.GetSearchResults(c.Request.Context(), key)
+	switch {
+	case err == nil && cacheEntry != nil:
+		results = cacheEntry.Results
+		pageNow = cacheEntry.Page
+		totalPages = cacheEntry.TotalPages
+	case errors.Is(err, cache.ErrMiss):
+		fallthrough
+	default:
+		if err != nil && !errors.Is(err, cache.ErrMiss) {
+			log.Printf("cache: search lookup failed: %v", err)
+		}
+		results, pageNow, totalPages, err = s.tmdb.SearchTMDb(c.Request.Context(), q, page, includeAdult, language, region, typ)
 		if err != nil {
 			jsonError(c, http.StatusBadGateway, "upstream search failed")
 			return
 		}
-		if err = s.cache.SetSearchWatchlistItemsCache(c.Request.Context(), q, page, includeAdult, language, region, typ, bodyString); err != nil {
-			jsonError(c, http.StatusBadGateway, "cache set failed")
-			return
-
+		if cacheErr := s.cache.SetSearchResults(c.Request.Context(), key, cache.SearchValue{
+			Results:    results,
+			Page:       pageNow,
+			TotalPages: totalPages,
+		}); cacheErr != nil {
+			log.Printf("cache: search store failed: %v", cacheErr)
 		}
 	}
 

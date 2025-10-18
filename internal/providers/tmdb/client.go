@@ -97,7 +97,7 @@ type findResp struct {
 	TVSeasonResults  []SearchEntry `json:"tv_season_results"`
 }
 
-func (c *Client) SearchTMDb(ctx context.Context, query string, page int, includeAdult bool, language, region, forcedType string) ([]Result, int, int, string, error) {
+func (c *Client) SearchTMDb(ctx context.Context, query string, page int, includeAdult bool, language, region, forcedType string) ([]Result, int, int, error) {
 	params := url.Values{}
 	if c.apiKey != "" {
 		params.Set("api_key", c.apiKey)
@@ -151,10 +151,10 @@ func (c *Client) FindByExternalID(ctx context.Context, externalID, source string
 	return &res, nil
 }
 
-func (c *Client) doSearch(ctx context.Context, endpoint, forcedType string) ([]Result, int, int, string, error) {
+func (c *Client) doSearch(ctx context.Context, endpoint, forcedType string) ([]Result, int, int, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
-		return nil, 0, 0, "", err
+		return nil, 0, 0, err
 	}
 	req.Header.Set("Accept", "application/json")
 	if c.bearer != "" {
@@ -162,33 +162,26 @@ func (c *Client) doSearch(ctx context.Context, endpoint, forcedType string) ([]R
 	}
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return nil, 0, 0, "", err
+		return nil, 0, 0, err
 	}
-	data, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, 0, 0, "", err
-	}
-	bodyString := string(data)
-	resp.Body = io.NopCloser(strings.NewReader(bodyString))
-
 	defer func(Body io.ReadCloser) {
-		err := Body.Close()
-		if err != nil {
+		if err := Body.Close(); err != nil {
 			fmt.Println("Error closing response body:", err)
+			return
 		}
 	}(resp.Body)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, 0, 0, "", fmt.Errorf("tmdb search failed: %d", resp.StatusCode)
+		return nil, 0, 0, fmt.Errorf("tmdb search failed: %d", resp.StatusCode)
 	}
 	var sr SearchResp
 	if err := json.NewDecoder(resp.Body).Decode(&sr); err != nil {
-		return nil, 0, 0, "", err
+		return nil, 0, 0, err
 	}
 	out := make([]Result, 0, len(sr.Results))
 	for _, r := range sr.Results {
 		out = append(out, entryToResult(r, forcedType))
 	}
-	return out, sr.Page, sr.TotalPages, bodyString, nil
+	return out, sr.Page, sr.TotalPages, nil
 }
 
 func (c *Client) doFindByExternalID(ctx context.Context, endpoint string) ([]Result, error) {
@@ -205,9 +198,9 @@ func (c *Client) doFindByExternalID(ctx context.Context, endpoint string) ([]Res
 		return nil, err
 	}
 	defer func(Body io.ReadCloser) {
-		err := Body.Close()
-		if err != nil {
+		if err := Body.Close(); err != nil {
 			fmt.Println("Error closing response body:", err)
+			return
 		}
 	}(resp.Body)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
@@ -335,9 +328,9 @@ func (c *Client) GetProviders(ctx context.Context, id int, forcedType string) (*
 		return nil, err
 	}
 	defer func(Body io.ReadCloser) {
-		err := Body.Close()
-		if err != nil {
+		if err := Body.Close(); err != nil {
 			fmt.Println("Error closing response body:", err)
+			return
 		}
 	}(resp.Body)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
