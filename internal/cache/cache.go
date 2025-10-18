@@ -19,7 +19,7 @@ const (
 	defaultRedisAddr  = "redis://localhost:6379"
 	searchKeyPrefix   = "search:v1"
 	providerKeyPrifix = "providers:v1"
-	searchTTL         = 30 * time.Minute
+	searchTTL         = 30 * 24 * time.Hour
 )
 
 var ErrMiss = errors.New("cache miss")
