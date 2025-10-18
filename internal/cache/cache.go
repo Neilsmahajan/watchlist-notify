@@ -161,11 +161,11 @@ func (s *service) SetProvidersResults(ctx context.Context, key ProvidersKey, val
 	return s.client.Set(ctx, key.String(), data, s.ttl).Err()
 }
 
-func (noopService) GetProvidersResults(ctx context.Context, key ProvidersKey) (*ProvidersValue, error) {
+func (noopService) GetProvidersResults(context.Context, ProvidersKey) (*ProvidersValue, error) {
 	return nil, ErrMiss
 }
 
-func (noopService) SetProvidersResults(ctx context.Context, key ProvidersKey, value ProvidersValue) error {
+func (noopService) SetProvidersResults(context.Context, ProvidersKey, ProvidersValue) error {
 	return nil
 }
 
