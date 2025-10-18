@@ -114,8 +114,10 @@ func (s *Server) availabilityHandler(c *gin.Context) {
 		}
 	}
 	collect(rp.Flatrate)
-	collect(rp.Buy)
-	collect(rp.Rent)
+	//collect(rp.Buy)
+	//collect(rp.Rent)
+	collect(rp.Free)
+	collect(rp.Ads)
 
 	// Map to our service codes and intersect with user-active
 	type outProv struct {

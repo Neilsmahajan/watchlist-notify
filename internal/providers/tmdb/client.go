@@ -296,6 +296,8 @@ type RegionProviders struct {
 	Flatrate []Provider `json:"flatrate"`
 	Buy      []Provider `json:"buy"`
 	Rent     []Provider `json:"rent"`
+	Free     []Provider `json:"free"`
+	Ads      []Provider `json:"ads"`
 }
 
 type ProvidersResponse struct {
