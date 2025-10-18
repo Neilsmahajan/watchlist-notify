@@ -128,6 +128,8 @@ export default function Watchlist() {
 
   const isMountedRef = useRef(true);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const availabilityRef = useRef(availability);
+  const availabilityLoadingRef = useRef(availabilityLoading);
 
   useEffect(() => {
     return () => {
@@ -135,20 +137,35 @@ export default function Watchlist() {
     };
   }, []);
 
+  useEffect(() => {
+    availabilityRef.current = availability;
+  }, [availability]);
+
+  useEffect(() => {
+    availabilityLoadingRef.current = availabilityLoading;
+  }, [availabilityLoading]);
+
   const requestAvailability = useCallback(
     async (item: WatchlistItem, options?: { force?: boolean }) => {
       if (!item.tmdb_id || !isMountedRef.current) {
         return;
       }
 
+      const currentAvailability = availabilityRef.current;
+      const currentLoading = availabilityLoadingRef.current;
+
       if (
         !options?.force &&
-        (availability[item.id] || availabilityLoading[item.id])
+        (currentAvailability[item.id] || currentLoading[item.id])
       ) {
         return;
       }
 
-      setAvailabilityLoading((prev) => ({ ...prev, [item.id]: true }));
+      setAvailabilityLoading((prev) => {
+        const next = { ...prev, [item.id]: true };
+        availabilityLoadingRef.current = next;
+        return next;
+      });
       setAvailabilityError((prev) => {
         if (!(item.id in prev)) {
           return prev;
@@ -188,10 +205,14 @@ export default function Watchlist() {
         }
 
         const availabilityPayload = data as AvailabilityResponse;
-        setAvailability((prev) => ({
-          ...prev,
-          [item.id]: availabilityPayload,
-        }));
+        setAvailability((prev) => {
+          const next = {
+            ...prev,
+            [item.id]: availabilityPayload,
+          };
+          availabilityRef.current = next;
+          return next;
+        });
       } catch (err) {
         console.error("Availability fetch error", err);
         if (!isMountedRef.current) {
@@ -203,14 +224,18 @@ export default function Watchlist() {
         }));
       } finally {
         if (isMountedRef.current) {
-          setAvailabilityLoading((prev) => ({
-            ...prev,
-            [item.id]: false,
-          }));
+          setAvailabilityLoading((prev) => {
+            const next = {
+              ...prev,
+              [item.id]: false,
+            };
+            availabilityLoadingRef.current = next;
+            return next;
+          });
         }
       }
     },
-    [availability, availabilityLoading],
+    [],
   );
 
   const fetchAvailabilityForItems = useCallback(
@@ -263,8 +288,16 @@ export default function Watchlist() {
 
         const fetchedItems = Array.isArray(data?.items) ? data.items : [];
         setItems(fetchedItems);
-        setAvailability((prev) => retainByIds(prev, fetchedItems));
-        setAvailabilityLoading((prev) => retainByIds(prev, fetchedItems));
+        setAvailability((prev) => {
+          const next = retainByIds(prev, fetchedItems);
+          availabilityRef.current = next;
+          return next;
+        });
+        setAvailabilityLoading((prev) => {
+          const next = retainByIds(prev, fetchedItems);
+          availabilityLoadingRef.current = next;
+          return next;
+        });
         setAvailabilityError((prev) => retainByIds(prev, fetchedItems));
         void fetchAvailabilityForItems(fetchedItems);
       } catch (err) {
