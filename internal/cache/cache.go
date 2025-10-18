@@ -16,9 +16,10 @@ import (
 )
 
 const (
-	defaultRedisAddr = "redis://localhost:6379"
-	searchKeyPrefix  = "search:v1"
-	searchTTL        = 30 * time.Minute
+	defaultRedisAddr  = "redis://localhost:6379"
+	searchKeyPrefix   = "search:v1"
+	providerKeyPrifix = "providers:v1"
+	searchTTL         = 30 * time.Minute
 )
 
 var ErrMiss = errors.New("cache miss")
@@ -26,6 +27,8 @@ var ErrMiss = errors.New("cache miss")
 type Service interface {
 	GetSearchResults(ctx context.Context, key SearchKey) (*SearchValue, error)
 	SetSearchResults(ctx context.Context, key SearchKey, value SearchValue) error
+	GetProvidersResults(ctx context.Context, key ProvidersKey) (*ProvidersValue, error)
+	SetProvidersResults(ctx context.Context, key ProvidersKey, value ProvidersValue) error
 }
 
 type service struct {
@@ -48,6 +51,16 @@ type SearchValue struct {
 	Results    []tmdb.Result `json:"results"`
 	Page       int           `json:"page"`
 	TotalPages int           `json:"total_pages"`
+}
+
+type ProvidersKey struct {
+	ID   int
+	Type string
+}
+
+type ProvidersValue struct {
+	ID      int                             `json:"id"`
+	Results map[string]tmdb.RegionProviders `json:"results"`
 }
 
 func New() Service {
@@ -124,6 +137,38 @@ func (noopService) SetSearchResults(context.Context, SearchKey, SearchValue) err
 	return nil
 }
 
+func (s *service) GetProvidersResults(ctx context.Context, key ProvidersKey) (*ProvidersValue, error) {
+	raw, err := s.client.Get(ctx, key.String()).Bytes()
+	if errors.Is(err, redis.Nil) {
+		return nil, ErrMiss
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	var payload ProvidersValue
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		return nil, err
+	}
+	return &payload, nil
+}
+
+func (s *service) SetProvidersResults(ctx context.Context, key ProvidersKey, value ProvidersValue) error {
+	data, err := json.Marshal(value)
+	if err != nil {
+		return err
+	}
+	return s.client.Set(ctx, key.String(), data, s.ttl).Err()
+}
+
+func (noopService) GetProvidersResults(ctx context.Context, key ProvidersKey) (*ProvidersValue, error) {
+	return nil, ErrMiss
+}
+
+func (noopService) SetProvidersResults(ctx context.Context, key ProvidersKey, value ProvidersValue) error {
+	return nil
+}
+
 func (k SearchKey) String() string {
 	query := strings.ToLower(strings.TrimSpace(k.Query))
 	language := strings.ToLower(strings.TrimSpace(k.Language))
@@ -152,5 +197,21 @@ func (k SearchKey) String() string {
 	b.WriteString(region)
 	b.WriteString(":type=")
 	b.WriteString(mediaType)
+	return b.String()
+}
+
+func (k ProvidersKey) String() string {
+	typ := strings.ToLower(strings.TrimSpace(k.Type))
+	if typ != "movie" && typ != "tv" {
+		typ = "movie"
+	}
+	id := strconv.Itoa(k.ID)
+	var b strings.Builder
+	b.Grow(len(typ) + len(id) + 32)
+	b.WriteString(providerKeyPrifix)
+	b.WriteString(":type=")
+	b.WriteString(typ)
+	b.WriteString(":id=")
+	b.WriteString(id)
 	return b.String()
 }

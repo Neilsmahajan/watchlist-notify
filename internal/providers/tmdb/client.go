@@ -97,7 +97,7 @@ type findResp struct {
 	TVSeasonResults  []SearchEntry `json:"tv_season_results"`
 }
 
-func (c *Client) SearchTMDb(ctx context.Context, query string, page int, includeAdult bool, language, region, forcedType string) ([]Result, int, int, error) {
+func (c *Client) SearchTMDb(ctx context.Context, query string, page int, includeAdult bool, language, region, typ string) ([]Result, int, int, error) {
 	params := url.Values{}
 	if c.apiKey != "" {
 		params.Set("api_key", c.apiKey)
@@ -113,11 +113,11 @@ func (c *Client) SearchTMDb(ctx context.Context, query string, page int, include
 	if region != "" {
 		params.Set("region", region)
 	}
-	if forcedType != "movie" && forcedType != "tv" {
-		forcedType = "movie"
+	if typ != "movie" && typ != "tv" {
+		typ = "movie"
 	}
-	endpoint := fmt.Sprintf("%s/search/%s?%s", c.baseURL, forcedType, params.Encode())
-	return c.doSearch(ctx, endpoint, forcedType)
+	endpoint := fmt.Sprintf("%s/search/%s?%s", c.baseURL, typ, params.Encode())
+	return c.doSearch(ctx, endpoint, typ)
 }
 
 func (c *Client) FindByExternalID(ctx context.Context, externalID, source string) (*Result, error) {
@@ -151,7 +151,7 @@ func (c *Client) FindByExternalID(ctx context.Context, externalID, source string
 	return &res, nil
 }
 
-func (c *Client) doSearch(ctx context.Context, endpoint, forcedType string) ([]Result, int, int, error) {
+func (c *Client) doSearch(ctx context.Context, endpoint, typ string) ([]Result, int, int, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return nil, 0, 0, err
@@ -179,7 +179,7 @@ func (c *Client) doSearch(ctx context.Context, endpoint, forcedType string) ([]R
 	}
 	out := make([]Result, 0, len(sr.Results))
 	for _, r := range sr.Results {
-		out = append(out, entryToResult(r, forcedType))
+		out = append(out, entryToResult(r, typ))
 	}
 	return out, sr.Page, sr.TotalPages, nil
 }
@@ -221,7 +221,7 @@ func (c *Client) doFindByExternalID(ctx context.Context, endpoint string) ([]Res
 	return out, nil
 }
 
-func entryToResult(r SearchEntry, forcedType string) Result {
+func entryToResult(r SearchEntry, typ string) Result {
 	title := strings.TrimSpace(r.Title)
 	if title == "" {
 		title = strings.TrimSpace(r.Name)
@@ -236,7 +236,7 @@ func entryToResult(r SearchEntry, forcedType string) Result {
 	if year == 0 {
 		year = yearFromDate(r.FirstAirDate)
 	}
-	mediaType := forcedType
+	mediaType := typ
 	if mediaType == "" {
 		mt := strings.ToLower(strings.TrimSpace(r.MediaType))
 		if mt == "movie" || mt == "tv" {
@@ -294,8 +294,6 @@ type Provider struct {
 type RegionProviders struct {
 	Link     string     `json:"link"`
 	Flatrate []Provider `json:"flatrate"`
-	Free     []Provider `json:"free"`
-	Ads      []Provider `json:"ads"`
 	Buy      []Provider `json:"buy"`
 	Rent     []Provider `json:"rent"`
 }
@@ -305,8 +303,8 @@ type ProvidersResponse struct {
 	Results map[string]RegionProviders `json:"results"`
 }
 
-func (c *Client) GetProviders(ctx context.Context, id int, forcedType string) (*ProvidersResponse, error) {
-	endpoint := fmt.Sprintf("%s/%s/%d/watch/providers", c.baseURL, forcedType, id)
+func (c *Client) GetProviders(ctx context.Context, id int, typ string) (*ProvidersResponse, error) {
+	endpoint := fmt.Sprintf("%s/%s/%d/watch/providers", c.baseURL, typ, id)
 
 	// For providers, TMDb ignores api_key in query when using bearer, but we still attach api_key when present.
 	// If apiKey is set and endpoint has no query, we add it for compatibility.

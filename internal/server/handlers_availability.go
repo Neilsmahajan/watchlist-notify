@@ -1,6 +1,8 @@
 package server
 
 import (
+	"errors"
+	"log"
 	"net/http"
 	"os"
 	"sort"
@@ -8,7 +10,9 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
+	"github.com/neilsmahajan/watchlist-notify/internal/cache"
 	"github.com/neilsmahajan/watchlist-notify/internal/models"
+	"github.com/neilsmahajan/watchlist-notify/internal/providers/tmdb"
 )
 
 // resolveRegion applies fallback: query > user.Region > TMDB_REGION > DEFAULT_REGION > "US"
@@ -67,26 +71,46 @@ func (s *Server) availabilityHandler(c *gin.Context) {
 	// Use the typed response and then select region
 	var providerLink string
 	var entries []struct{ ProviderName, LogoPath string }
-	resp, e := s.tmdb.GetProviders(c.Request.Context(), id, typ)
-	if e != nil {
-		jsonError(c, http.StatusBadGateway, "upstream providers failed")
-		return
+	var results map[string]tmdb.RegionProviders
+
+	key := cache.ProvidersKey{
+		ID:   id,
+		Type: typ,
 	}
-	rp, ok := resp.Results[region]
+	cacheEntry, err := s.cache.GetProvidersResults(c.Request.Context(), key)
+	switch {
+	case err == nil && cacheEntry != nil:
+		id = cacheEntry.ID
+		results = cacheEntry.Results
+	case errors.Is(err, cache.ErrMiss):
+		fallthrough
+	default:
+		if err != nil && !errors.Is(err, cache.ErrMiss) {
+			log.Printf("cache: search lookup failed: %v", err)
+		}
+		resp, err := s.tmdb.GetProviders(c.Request.Context(), id, typ)
+		if err != nil {
+			jsonError(c, http.StatusBadGateway, "upstream providers failed")
+			return
+		}
+		id = resp.ID
+		results = resp.Results
+		if err := s.cache.SetProvidersResults(c.Request.Context(), key, cache.ProvidersValue{
+			ID:      id,
+			Results: results,
+		}); err != nil {
+			log.Printf("cache: providers set failed: %v", err)
+		}
+	}
+
+	rp, ok := results[region]
 	if !ok {
 		// No providers for region
 		c.JSON(http.StatusOK, gin.H{"region": region, "providers": []any{}, "unmatched_user_services": codesFromMap(active)})
 		return
 	}
 	providerLink = rp.Link
-	// Prefer flatrate, but include free and ads as well for visibility
 	for _, p := range rp.Flatrate {
-		entries = append(entries, struct{ ProviderName, LogoPath string }{p.ProviderName, p.LogoPath})
-	}
-	for _, p := range rp.Free {
-		entries = append(entries, struct{ ProviderName, LogoPath string }{p.ProviderName, p.LogoPath})
-	}
-	for _, p := range rp.Ads {
 		entries = append(entries, struct{ ProviderName, LogoPath string }{p.ProviderName, p.LogoPath})
 	}
 
