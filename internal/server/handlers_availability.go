@@ -80,23 +80,21 @@ func (s *Server) availabilityHandler(c *gin.Context) {
 	cacheEntry, err := s.cache.GetProvidersResults(c.Request.Context(), key)
 	switch {
 	case err == nil && cacheEntry != nil:
-		id = cacheEntry.ID
 		results = cacheEntry.Results
 	case errors.Is(err, cache.ErrMiss):
 		fallthrough
 	default:
 		if err != nil && !errors.Is(err, cache.ErrMiss) {
-			log.Printf("cache: search lookup failed: %v", err)
+			log.Printf("cache: providers lookup failed: %v", err)
 		}
 		resp, err := s.tmdb.GetProviders(c.Request.Context(), id, typ)
 		if err != nil {
 			jsonError(c, http.StatusBadGateway, "upstream providers failed")
 			return
 		}
-		id = resp.ID
 		results = resp.Results
 		if err := s.cache.SetProvidersResults(c.Request.Context(), key, cache.ProvidersValue{
-			ID:      id,
+			ID:      resp.ID,
 			Results: results,
 		}); err != nil {
 			log.Printf("cache: providers set failed: %v", err)
@@ -110,9 +108,14 @@ func (s *Server) availabilityHandler(c *gin.Context) {
 		return
 	}
 	providerLink = rp.Link
-	for _, p := range rp.Flatrate {
-		entries = append(entries, struct{ ProviderName, LogoPath string }{p.ProviderName, p.LogoPath})
+	collect := func(list []tmdb.Provider) {
+		for _, p := range list {
+			entries = append(entries, struct{ ProviderName, LogoPath string }{p.ProviderName, p.LogoPath})
+		}
 	}
+	collect(rp.Flatrate)
+	collect(rp.Buy)
+	collect(rp.Rent)
 
 	// Map to our service codes and intersect with user-active
 	type outProv struct {

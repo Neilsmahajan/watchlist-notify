@@ -16,10 +16,11 @@ import (
 )
 
 const (
-	defaultRedisAddr  = "redis://localhost:6379"
-	searchKeyPrefix   = "search:v1"
-	providerKeyPrifix = "providers:v1"
-	searchTTL         = 30 * 24 * time.Hour
+	defaultRedisAddr   = "redis://localhost:6379"
+	searchKeyPrefix    = "search:v1"
+	providerKeyPrefix  = "providers:v1"
+	defaultSearchTTL   = 30 * time.Minute
+	defaultProviderTTL = 12 * time.Hour
 )
 
 var ErrMiss = errors.New("cache miss")
@@ -32,8 +33,9 @@ type Service interface {
 }
 
 type service struct {
-	client redis.UniversalClient
-	ttl    time.Duration
+	client      redis.UniversalClient
+	searchTTL   time.Duration
+	providerTTL time.Duration
 }
 
 type noopService struct{}
@@ -87,7 +89,11 @@ func New() Service {
 		return noopService{}
 	}
 
-	return &service{client: client, ttl: searchTTL}
+	return &service{
+		client:      client,
+		searchTTL:   defaultSearchTTL,
+		providerTTL: defaultProviderTTL,
+	}
 }
 
 func configureRedis(addr string) (redis.UniversalClient, error) {
@@ -126,7 +132,7 @@ func (s *service) SetSearchResults(ctx context.Context, key SearchKey, value Sea
 	if err != nil {
 		return err
 	}
-	return s.client.Set(ctx, key.String(), data, s.ttl).Err()
+	return s.client.Set(ctx, key.String(), data, s.searchTTL).Err()
 }
 
 func (noopService) GetSearchResults(context.Context, SearchKey) (*SearchValue, error) {
@@ -158,7 +164,7 @@ func (s *service) SetProvidersResults(ctx context.Context, key ProvidersKey, val
 	if err != nil {
 		return err
 	}
-	return s.client.Set(ctx, key.String(), data, s.ttl).Err()
+	return s.client.Set(ctx, key.String(), data, s.providerTTL).Err()
 }
 
 func (noopService) GetProvidersResults(context.Context, ProvidersKey) (*ProvidersValue, error) {
@@ -208,7 +214,7 @@ func (k ProvidersKey) String() string {
 	id := strconv.Itoa(k.ID)
 	var b strings.Builder
 	b.Grow(len(typ) + len(id) + 32)
-	b.WriteString(providerKeyPrifix)
+	b.WriteString(providerKeyPrefix)
 	b.WriteString(":type=")
 	b.WriteString(typ)
 	b.WriteString(":id=")
