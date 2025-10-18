@@ -434,8 +434,8 @@ func (s *Server) lookupTMDbByIMDb(ctx context.Context, imdbID string, cache map[
 		cache[imdbID] = nil
 		return nil, nil
 	}
-	copy := *res
-	cache[imdbID] = &copy
+	cpy := *res
+	cache[imdbID] = &cpy
 	return cache[imdbID], nil
 }
 

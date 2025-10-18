@@ -9,14 +9,16 @@ import (
 
 	_ "github.com/joho/godotenv/autoload"
 
+	"github.com/neilsmahajan/watchlist-notify/internal/cache"
 	"github.com/neilsmahajan/watchlist-notify/internal/database"
 	"github.com/neilsmahajan/watchlist-notify/internal/providers/tmdb"
 )
 
 type Server struct {
-	port int
-	db   database.Service
-	tmdb *tmdb.Client
+	port  int
+	db    database.Service
+	cache cache.Service
+	tmdb  *tmdb.Client
 }
 
 func NewServer() *http.Server {
@@ -30,9 +32,10 @@ func NewServer() *http.Server {
 		}
 	}
 	NewServer := &Server{
-		port: port,
-		db:   database.New(),
-		tmdb: tmdbClient,
+		port:  port,
+		db:    database.New(),
+		cache: cache.New(),
+		tmdb:  tmdbClient,
 	}
 
 	// Declare Server config

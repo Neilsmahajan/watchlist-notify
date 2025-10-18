@@ -17,12 +17,9 @@ import (
 )
 
 const (
-	defaultBaseURL          = "https://api.themoviedb.org/3"
-	defaultImageBase        = "https://image.tmdb.org/t/p/w342"
-	ExternalSourceIMDbID    = "imdb_id"
-	ExternalSourceTVDBID    = "tvdb_id"
-	ExternalSourceFreebase  = "freebase_id"
-	ExternalSourceFreebaseF = "freebase_mid"
+	defaultBaseURL       = "https://api.themoviedb.org/3"
+	defaultImageBase     = "https://image.tmdb.org/t/p/w342"
+	ExternalSourceIMDbID = "imdb_id"
 )
 
 // Client is a minimal TMDb v3 client using api_key query param auth.
@@ -73,14 +70,14 @@ type Result struct {
 	Poster    string `json:"poster_path,omitempty"`
 }
 
-type searchResp struct {
+type SearchResp struct {
 	Page         int           `json:"page"`
 	TotalPages   int           `json:"total_pages"`
 	TotalResults int           `json:"total_results"`
-	Results      []searchEntry `json:"results"`
+	Results      []SearchEntry `json:"results"`
 }
 
-type searchEntry struct {
+type SearchEntry struct {
 	ID            int    `json:"id"`
 	Title         string `json:"title"`
 	Name          string `json:"name"`
@@ -93,14 +90,14 @@ type searchEntry struct {
 }
 
 type findResp struct {
-	MovieResults     []searchEntry `json:"movie_results"`
-	PersonResults    []searchEntry `json:"person_results"`
-	TVResults        []searchEntry `json:"tv_results"`
-	TVEpisodeResults []searchEntry `json:"tv_episode_results"`
-	TVSeasonResults  []searchEntry `json:"tv_season_results"`
+	MovieResults     []SearchEntry `json:"movie_results"`
+	PersonResults    []SearchEntry `json:"person_results"`
+	TVResults        []SearchEntry `json:"tv_results"`
+	TVEpisodeResults []SearchEntry `json:"tv_episode_results"`
+	TVSeasonResults  []SearchEntry `json:"tv_season_results"`
 }
 
-func (c *Client) SearchMovies(ctx context.Context, query string, page int, includeAdult bool, language, region string) ([]Result, int, int, error) {
+func (c *Client) SearchTMDb(ctx context.Context, query string, page int, includeAdult bool, language, region, forcedType string) ([]Result, int, int, string, error) {
 	params := url.Values{}
 	if c.apiKey != "" {
 		params.Set("api_key", c.apiKey)
@@ -116,25 +113,11 @@ func (c *Client) SearchMovies(ctx context.Context, query string, page int, inclu
 	if region != "" {
 		params.Set("region", region)
 	}
-	endpoint := fmt.Sprintf("%s/search/movie?%s", c.baseURL, params.Encode())
-	return c.doSearch(ctx, endpoint, "movie")
-}
-
-func (c *Client) SearchTV(ctx context.Context, query string, page int, includeAdult bool, language string) ([]Result, int, int, error) {
-	params := url.Values{}
-	if c.apiKey != "" {
-		params.Set("api_key", c.apiKey)
+	if forcedType != "movie" && forcedType != "tv" {
+		forcedType = "movie"
 	}
-	params.Set("query", query)
-	params.Set("include_adult", strconv.FormatBool(includeAdult))
-	if page > 0 {
-		params.Set("page", strconv.Itoa(page))
-	}
-	if language != "" {
-		params.Set("language", language)
-	}
-	endpoint := fmt.Sprintf("%s/search/tv?%s", c.baseURL, params.Encode())
-	return c.doSearch(ctx, endpoint, "tv")
+	endpoint := fmt.Sprintf("%s/search/%s?%s", c.baseURL, forcedType, params.Encode())
+	return c.doSearch(ctx, endpoint, forcedType)
 }
 
 func (c *Client) FindByExternalID(ctx context.Context, externalID, source string) (*Result, error) {
@@ -168,10 +151,10 @@ func (c *Client) FindByExternalID(ctx context.Context, externalID, source string
 	return &res, nil
 }
 
-func (c *Client) doSearch(ctx context.Context, endpoint string, forcedType string) ([]Result, int, int, error) {
+func (c *Client) doSearch(ctx context.Context, endpoint, forcedType string) ([]Result, int, int, string, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
-		return nil, 0, 0, err
+		return nil, 0, 0, "", err
 	}
 	req.Header.Set("Accept", "application/json")
 	if c.bearer != "" {
@@ -179,8 +162,15 @@ func (c *Client) doSearch(ctx context.Context, endpoint string, forcedType strin
 	}
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return nil, 0, 0, err
+		return nil, 0, 0, "", err
 	}
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, 0, 0, "", err
+	}
+	bodyString := string(data)
+	resp.Body = io.NopCloser(strings.NewReader(bodyString))
+
 	defer func(Body io.ReadCloser) {
 		err := Body.Close()
 		if err != nil {
@@ -188,17 +178,17 @@ func (c *Client) doSearch(ctx context.Context, endpoint string, forcedType strin
 		}
 	}(resp.Body)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, 0, 0, fmt.Errorf("tmdb search failed: %d", resp.StatusCode)
+		return nil, 0, 0, "", fmt.Errorf("tmdb search failed: %d", resp.StatusCode)
 	}
-	var sr searchResp
+	var sr SearchResp
 	if err := json.NewDecoder(resp.Body).Decode(&sr); err != nil {
-		return nil, 0, 0, err
+		return nil, 0, 0, "", err
 	}
 	out := make([]Result, 0, len(sr.Results))
 	for _, r := range sr.Results {
 		out = append(out, entryToResult(r, forcedType))
 	}
-	return out, sr.Page, sr.TotalPages, nil
+	return out, sr.Page, sr.TotalPages, bodyString, nil
 }
 
 func (c *Client) doFindByExternalID(ctx context.Context, endpoint string) ([]Result, error) {
@@ -238,7 +228,7 @@ func (c *Client) doFindByExternalID(ctx context.Context, endpoint string) ([]Res
 	return out, nil
 }
 
-func entryToResult(r searchEntry, forcedType string) Result {
+func entryToResult(r SearchEntry, forcedType string) Result {
 	title := strings.TrimSpace(r.Title)
 	if title == "" {
 		title = strings.TrimSpace(r.Name)

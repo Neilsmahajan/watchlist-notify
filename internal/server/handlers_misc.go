@@ -54,34 +54,25 @@ func (s *Server) searchHandler(c *gin.Context) {
 		}
 	}
 
-	var (
-		results             []interface{}
-		err                 error
-		pageNow, totalPages int
-	)
-	if typ == "movie" {
-		r, pg, tp, e := s.tmdb.SearchMovies(c.Request.Context(), q, page, includeAdult, language, region)
-		err = e
-		pageNow, totalPages = pg, tp
-		// convert to []interface{} to avoid re-defining struct here; marshal identical
-		results = make([]interface{}, len(r))
-		for i := range r {
-			results[i] = r[i]
-		}
-	} else {
-		r, pg, tp, e := s.tmdb.SearchTV(c.Request.Context(), q, page, includeAdult, language)
-		err = e
-		pageNow, totalPages = pg, tp
-		results = make([]interface{}, len(r))
-		for i := range r {
-			results[i] = r[i]
-		}
-	}
+	results, pageNow, totalPages, err := s.cache.GetSearchWatchlistItemsCache(c.Request.Context(), q, page, includeAdult, language, region, typ)
 	if err != nil {
-		// Hide upstream details
-		jsonError(c, http.StatusBadGateway, "upstream search failed")
+		jsonError(c, http.StatusBadGateway, "cache lookup failed")
 		return
 	}
+	if results == nil {
+		var bodyString string
+		results, pageNow, totalPages, bodyString, err = s.tmdb.SearchTMDb(c.Request.Context(), q, page, includeAdult, language, region, typ)
+		if err != nil {
+			jsonError(c, http.StatusBadGateway, "upstream search failed")
+			return
+		}
+		if err = s.cache.SetSearchWatchlistItemsCache(c.Request.Context(), q, page, includeAdult, language, region, typ, bodyString); err != nil {
+			jsonError(c, http.StatusBadGateway, "cache set failed")
+			return
+
+		}
+	}
+
 	c.JSON(http.StatusOK, gin.H{
 		"results":       results,
 		"page":          pageNow,
