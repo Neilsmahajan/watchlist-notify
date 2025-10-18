@@ -19,11 +19,47 @@ export type WatchlistResponse = {
   error?: string;
 };
 
+export type AvailabilityAccess = "subscription" | "free" | "ads";
+
+export const AVAILABILITY_ACCESS_ORDER: AvailabilityAccess[] = [
+  "subscription",
+  "free",
+  "ads",
+];
+
+export const AVAILABILITY_ACCESS_META: Record<
+  AvailabilityAccess,
+  { label: string; description: string; chipClass: string; badgeClass: string }
+> = {
+  subscription: {
+    label: "Subscription",
+    description: "Included with your paid plan",
+    chipClass:
+      "bg-emerald-50 text-emerald-700 border border-emerald-100 hover:border-emerald-200",
+    badgeClass: "bg-emerald-100 text-emerald-800",
+  },
+  free: {
+    label: "Free",
+    description: "Free to stream",
+    chipClass:
+      "bg-sky-50 text-sky-700 border border-sky-100 hover:border-sky-200",
+    badgeClass: "bg-sky-100 text-sky-800",
+  },
+  ads: {
+    label: "Free with ads",
+    description: "Ad-supported access",
+    chipClass:
+      "bg-amber-50 text-amber-700 border border-amber-100 hover:border-amber-200",
+    badgeClass: "bg-amber-100 text-amber-800",
+  },
+};
+
 export type AvailabilityProvider = {
   code: string;
   name: string;
   logo_path?: string;
   link?: string;
+  access?: AvailabilityAccess[];
 };
 
 export type AvailabilityResponse = {
@@ -33,11 +69,14 @@ export type AvailabilityResponse = {
   error?: string;
 };
 
+export type ServiceAccess = AvailabilityAccess;
+
 export type UserService = {
   code: string;
   name: string;
   active: boolean;
   added_at?: string;
+  access?: ServiceAccess;
 };
 
 export type ServiceResponse = {
@@ -71,6 +110,21 @@ export function formatDisplayDate(value?: string): string | null {
     year: "numeric",
   });
 }
+
+const DEFAULT_AVAILABILITY_ACCESS: AvailabilityAccess = "subscription";
+
+export const getPrimaryAccess = (
+  provider: AvailabilityProvider,
+): AvailabilityAccess => {
+  const [first] = provider.access ?? [];
+  return first ?? DEFAULT_AVAILABILITY_ACCESS;
+};
+
+const getAccessRank = (provider: AvailabilityProvider): number => {
+  const primary = getPrimaryAccess(provider);
+  const idx = AVAILABILITY_ACCESS_ORDER.indexOf(primary);
+  return idx === -1 ? AVAILABILITY_ACCESS_ORDER.length : idx;
+};
 
 type UseWatchlistInsightsOptions = {
   enabled?: boolean;
@@ -390,12 +444,29 @@ export function useWatchlistInsights(
       if (!availability || !Array.isArray(availability.providers)) {
         continue;
       }
-      const providers = availability.providers.filter((provider) =>
+      const deduped = new Map<string, AvailabilityProvider>();
+      for (const provider of availability.providers) {
+        if (!provider || !provider.code) {
+          continue;
+        }
+        if (!deduped.has(provider.code)) {
+          deduped.set(provider.code, provider);
+        }
+      }
+      const providers = Array.from(deduped.values()).filter((provider) =>
         activeServiceCodes.has(provider.code),
       );
-      if (providers.length) {
-        matches.push({ item, providers });
+      if (!providers.length) {
+        continue;
       }
+      providers.sort((a, b) => {
+        const rankDelta = getAccessRank(a) - getAccessRank(b);
+        if (rankDelta !== 0) {
+          return rankDelta;
+        }
+        return (a.name || a.code).localeCompare(b.name || b.code);
+      });
+      matches.push({ item, providers });
     }
 
     return matches;

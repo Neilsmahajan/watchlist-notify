@@ -102,6 +102,7 @@ func (s *Server) listUserServicesHandler(c *gin.Context) {
 	type serviceOut struct {
 		Code    string     `json:"code"`
 		Name    string     `json:"name"`
+		Access  string     `json:"access,omitempty"`
 		Active  bool       `json:"active"`
 		AddedAt *time.Time `json:"added_at,omitempty"`
 		Plan    string     `json:"plan,omitempty"`
@@ -122,6 +123,7 @@ func (s *Server) listUserServicesHandler(c *gin.Context) {
 		out = append(out, serviceOut{
 			Code:    def.Code,
 			Name:    def.Name,
+			Access:  def.Access,
 			Active:  ok && entry.Active,
 			AddedAt: added,
 			Plan:    plan,

@@ -5,11 +5,15 @@ import { LoadingSpinner, Button, ThemedCard } from "@/components/ui";
 import { redirect } from "next/navigation";
 import Image from "next/image";
 import { useCallback, useEffect, useState } from "react";
-import { formatDisplayDate } from "@/lib/hooks/useWatchlistInsights";
+import {
+  formatDisplayDate,
+  AVAILABILITY_ACCESS_META,
+} from "@/lib/hooks/useWatchlistInsights";
 
 type Service = {
   code: string;
   name: string;
+  access?: "subscription" | "free" | "ads";
   active: boolean;
   added_at?: string;
   plan?: string;
@@ -29,6 +33,16 @@ const serviceAssets: Record<string, { logo?: string; fallback?: string }> = {
   paramount_plus: { logo: "/paramount_plus_logo.png" },
   peacock: { logo: "/peacock_logo.png" },
   apple_tv_plus: { logo: "/apple_tv_plus_logo.png" },
+  pluto_tv: { logo: "/pluto_tv_logo.png" },
+  tubi: { logo: "/tubi_logo.png" },
+  roku_channel: { logo: "/the_roku_channel_logo.png" },
+  plex: { logo: "/plex_logo.png" },
+  mgm_plus: { logo: "/mgm_plus_logo.png" },
+  crunchyroll: { logo: "/crunchyroll_logo.png" },
+  starz: { logo: "/starz_logo.png" },
+  amc_plus: { logo: "/amc_plus_logo.png" },
+  espn_plus: { logo: "/espn_plus_logo.png" },
+  discovery_plus: { logo: "/discovery_plus_logo.png" },
 };
 
 export default function Settings() {
@@ -81,7 +95,7 @@ export default function Settings() {
         }
       }
     },
-    []
+    [],
   );
 
   useEffect(() => {
@@ -128,7 +142,7 @@ export default function Settings() {
       setServicesMessage(
         desiredState
           ? `${service.name} connected successfully.`
-          : `${service.name} disconnected successfully.`
+          : `${service.name} disconnected successfully.`,
       );
     } catch (err) {
       console.error("Services update error", err);
@@ -227,13 +241,16 @@ export default function Settings() {
               No services available yet.
             </div>
           ) : (
-            <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
+            <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">
               {services.map((service) => {
                 const asset = serviceAssets[service.code];
                 const logoSrc = asset?.logo ?? null;
                 const fallbackIcon = asset?.fallback ?? "";
                 const isPending = Boolean(pendingServices[service.code]);
                 const formattedDate = formatDisplayDate(service.added_at);
+                const badge = service.access
+                  ? AVAILABILITY_ACCESS_META[service.access]
+                  : null;
 
                 return (
                   <ThemedCard key={service.code} className="text-center">
@@ -258,6 +275,13 @@ export default function Settings() {
                     <div className="text-sm font-medium text-gray-900 mb-1">
                       {service.name}
                     </div>
+                    {badge ? (
+                      <span
+                        className={`inline-flex items-center justify-center rounded-full px-2 py-0.5 text-[11px] font-medium ${badge.badgeClass}`}
+                      >
+                        {badge.label}
+                      </span>
+                    ) : null}
                     {formattedDate && (
                       <div className="text-xs text-gray-500 mb-2">
                         Added {formattedDate}

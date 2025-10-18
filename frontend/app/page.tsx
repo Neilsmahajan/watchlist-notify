@@ -6,6 +6,8 @@ import {
   typeLabels,
   formatDisplayDate,
   useWatchlistInsights,
+  getPrimaryAccess,
+  AVAILABILITY_ACCESS_META,
 } from "@/lib/hooks/useWatchlistInsights";
 
 export default function Home() {
@@ -291,14 +293,20 @@ export default function Home() {
                         Watch on
                       </p>
                       <div className="flex flex-wrap gap-2">
-                        {providers.slice(0, 3).map((provider) => (
-                          <span
-                            key={provider.code}
-                            className="rounded-full bg-green-50 px-2.5 py-1 text-xs font-medium text-green-700"
-                          >
-                            {provider.name}
-                          </span>
-                        ))}
+                        {providers.slice(0, 3).map((provider) => {
+                          const meta =
+                            AVAILABILITY_ACCESS_META[
+                              getPrimaryAccess(provider)
+                            ];
+                          return (
+                            <span
+                              key={provider.code}
+                              className={`rounded-full px-2.5 py-1 text-xs font-medium border border-transparent ${meta.badgeClass}`}
+                            >
+                              {provider.name}
+                            </span>
+                          );
+                        })}
                         {providers.length > 3 && (
                           <span className="rounded-full bg-gray-100 px-2.5 py-1 text-xs font-medium text-gray-600">
                             +{providers.length - 3} more

@@ -70,7 +70,13 @@ func (s *Server) availabilityHandler(c *gin.Context) {
 	// Call TMDb providers
 	// Use the typed response and then select region
 	var providerLink string
-	var entries []struct{ ProviderName, LogoPath string }
+	type providerMatch struct {
+		Code     string
+		Name     string
+		LogoPath string
+		Access   map[string]bool
+	}
+	matches := map[string]*providerMatch{}
 	var results map[string]tmdb.RegionProviders
 
 	key := cache.ProvidersKey{
@@ -108,35 +114,70 @@ func (s *Server) availabilityHandler(c *gin.Context) {
 		return
 	}
 	providerLink = rp.Link
-	collect := func(list []tmdb.Provider) {
+	const (
+		accessSubscription = models.ServiceAccessSubscription
+		accessFree         = models.ServiceAccessFree
+		accessAds          = models.ServiceAccessAds
+	)
+	collect := func(access string, list []tmdb.Provider) {
 		for _, p := range list {
-			entries = append(entries, struct{ ProviderName, LogoPath string }{p.ProviderName, p.LogoPath})
+			code, ok := models.MapProviderNameToCode(p.ProviderName)
+			if !ok {
+				continue
+			}
+			code = strings.ToLower(code)
+			if !active[code] {
+				continue
+			}
+			match, exists := matches[code]
+			if !exists {
+				match = &providerMatch{
+					Code:     code,
+					Name:     displayNameForCode(code),
+					LogoPath: p.LogoPath,
+					Access:   map[string]bool{access: true},
+				}
+				matches[code] = match
+				continue
+			}
+			if match.LogoPath == "" {
+				match.LogoPath = p.LogoPath
+			}
+			match.Access[access] = true
 		}
 	}
-	collect(rp.Flatrate)
-	//collect(rp.Buy)
-	//collect(rp.Rent)
-	collect(rp.Free)
-	collect(rp.Ads)
+	collect(accessSubscription, rp.Flatrate)
+	collect(accessFree, rp.Free)
+	collect(accessAds, rp.Ads)
 
 	// Map to our service codes and intersect with user-active
 	type outProv struct {
-		Code     string `json:"code"`
-		Name     string `json:"name"`
-		LogoPath string `json:"logo_path,omitempty"`
-		Link     string `json:"link,omitempty"`
+		Code     string   `json:"code"`
+		Name     string   `json:"name"`
+		LogoPath string   `json:"logo_path,omitempty"`
+		Link     string   `json:"link,omitempty"`
+		Access   []string `json:"access"`
 	}
 
+	accessOrder := []string{accessSubscription, accessFree, accessAds}
 	var out []outProv
-	matchedCodes := map[string]bool{}
-	for _, e := range entries {
-		if code, ok := models.MapProviderNameToCode(e.ProviderName); ok && active[code] {
-			if !matchedCodes[code] { // de-duplicate
-				matchedCodes[code] = true
-				name := displayNameForCode(code)
-				out = append(out, outProv{Code: code, Name: name, LogoPath: e.LogoPath, Link: providerLink})
+	for _, match := range matches {
+		var ordered []string
+		for _, key := range accessOrder {
+			if match.Access[key] {
+				ordered = append(ordered, key)
 			}
 		}
+		if len(ordered) == 0 {
+			ordered = append(ordered, accessSubscription)
+		}
+		out = append(out, outProv{
+			Code:     match.Code,
+			Name:     match.Name,
+			LogoPath: match.LogoPath,
+			Link:     providerLink,
+			Access:   ordered,
+		})
 	}
 	// Sort by display name for stability
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
@@ -144,7 +185,7 @@ func (s *Server) availabilityHandler(c *gin.Context) {
 	// Compute unmatched user services (still active but not present for title)
 	var unmatched []string
 	for code, isActive := range active {
-		if isActive && !matchedCodes[code] {
+		if isActive && matches[code] == nil {
 			unmatched = append(unmatched, code)
 		}
 	}

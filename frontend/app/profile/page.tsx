@@ -8,6 +8,8 @@ import {
   formatDisplayDate,
   typeLabels,
   useWatchlistInsights,
+  getPrimaryAccess,
+  AVAILABILITY_ACCESS_META,
 } from "@/lib/hooks/useWatchlistInsights";
 
 export default function Profile() {
@@ -255,14 +257,20 @@ export default function Profile() {
                           Watch on
                         </p>
                         <div className="flex flex-wrap gap-2">
-                          {providers.slice(0, 3).map((provider) => (
-                            <span
-                              key={provider.code}
-                              className="rounded-full bg-green-50 px-2.5 py-1 text-xs font-medium text-green-700"
-                            >
-                              {provider.name}
-                            </span>
-                          ))}
+                          {providers.slice(0, 3).map((provider) => {
+                            const meta =
+                              AVAILABILITY_ACCESS_META[
+                                getPrimaryAccess(provider)
+                              ];
+                            return (
+                              <span
+                                key={provider.code}
+                                className={`rounded-full px-2.5 py-1 text-xs font-medium border border-transparent ${meta.badgeClass}`}
+                              >
+                                {provider.name}
+                              </span>
+                            );
+                          })}
                           {providers.length > 3 && (
                             <span className="rounded-full bg-gray-100 px-2.5 py-1 text-xs font-medium text-gray-600">
                               +{providers.length - 3} more
@@ -327,6 +335,9 @@ export default function Profile() {
                   <ul className="space-y-3">
                     {sortedServices.map((service) => {
                       const connectedOn = formatDisplayDate(service.added_at);
+                      const accessMeta = service.access
+                        ? AVAILABILITY_ACCESS_META[service.access]
+                        : null;
                       return (
                         <li
                           key={service.code}
@@ -336,6 +347,13 @@ export default function Profile() {
                             <p className="font-medium text-gray-900">
                               {service.name}
                             </p>
+                            {accessMeta ? (
+                              <span
+                                className={`mt-1 inline-flex rounded-full px-2 py-0.5 text-[11px] font-medium border border-transparent ${accessMeta.badgeClass}`}
+                              >
+                                {accessMeta.label}
+                              </span>
+                            ) : null}
                             <p className="text-xs text-gray-500">
                               {service.active
                                 ? connectedOn

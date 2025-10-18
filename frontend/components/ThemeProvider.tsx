@@ -102,7 +102,7 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
       setTheme,
       toggleTheme,
     }),
-    [setTheme, systemTheme, theme, toggleTheme]
+    [setTheme, systemTheme, theme, toggleTheme],
   );
 
   return (

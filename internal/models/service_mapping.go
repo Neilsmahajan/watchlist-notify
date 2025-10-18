@@ -18,14 +18,12 @@ var providerAliases = map[string]string{
 	// Hulu
 	"hulu": ServiceHulu,
 	// Disney+
-	"disney+":    ServiceDisneyPlus,
 	"disneyplus": ServiceDisneyPlus,
 	"disney":     ServiceDisneyPlus, // occasionally used
 	// Max (formerly HBO Max)
 	"max":    ServiceMax,
 	"hbomax": ServiceMax,
 	// Paramount+
-	"paramount+":    ServiceParamountPlus,
 	"paramountplus": ServiceParamountPlus,
 	"paramount":     ServiceParamountPlus,
 	// Peacock
@@ -33,14 +31,49 @@ var providerAliases = map[string]string{
 	"peacockpremium":     ServicePeacock,
 	"peacockpremiumplus": ServicePeacock,
 	// Apple TV+
-	"appletv+":    ServiceAppleTVPlus,
 	"appletvplus": ServiceAppleTVPlus,
 	"appletv":     ServiceAppleTVPlus,
+	// Pluto TV
+	"plutotv": ServicePlutoTV,
+	"pluto":   ServicePlutoTV,
+	// Tubi
+	"tubi":   ServiceTubi,
+	"tubitv": ServiceTubi,
+	// The Roku Channel
+	"therokuchannel": ServiceRokuChannel,
+	"rokuchannel":    ServiceRokuChannel,
+	"roku":           ServiceRokuChannel,
+	// Plex
+	"plex": ServicePlex,
+	// MGM+
+	"mgmplus": ServiceMGMPlus,
+	"mgm":     ServiceMGMPlus,
+	// Crunchyroll
+	"crunchyroll": ServiceCrunchyroll,
+	// Starz
+	"starz": ServiceStarz,
+	// AMC+
+	"amcplus": ServiceAMCPlus,
+	"amc":     ServiceAMCPlus,
+	// ESPN+
+	"espnplus": ServiceESPNPlus,
+	"espn":     ServiceESPNPlus,
+	// Discovery+
+	"discoveryplus": ServiceDiscoveryPlus,
+	"discovery":     ServiceDiscoveryPlus,
 }
 
 func normalizeProviderName(s string) string {
 	s = strings.ToLower(strings.TrimSpace(s))
-	// Keep a fast path for common names with '+' in them
+	if s == "" {
+		return s
+	}
+	// Normalise common punctuation before stripping non-alphanumerics so "HBO+" -> "hboplus".
+	replacer := strings.NewReplacer(
+		"+", "plus",
+		"&", "and",
+	)
+	s = replacer.Replace(s)
 	s = strings.ReplaceAll(s, " ", "")
 	// For any remaining punctuation, strip to alphanum
 	s = nonAlphaNum.ReplaceAllString(s, "")

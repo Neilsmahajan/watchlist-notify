@@ -5,6 +5,14 @@ import { LoadingSpinner, EmptyState, Button } from "@/components/ui";
 import Image from "next/image";
 import { redirect } from "next/navigation";
 import {
+  AVAILABILITY_ACCESS_META,
+  AVAILABILITY_ACCESS_ORDER,
+  getPrimaryAccess,
+  type AvailabilityAccess,
+  type AvailabilityProvider,
+  type AvailabilityResponse,
+} from "@/lib/hooks/useWatchlistInsights";
+import {
   useCallback,
   useEffect,
   useRef,
@@ -33,20 +41,6 @@ type WatchlistResponse = {
   error?: string;
 };
 
-type AvailabilityProvider = {
-  code: string;
-  name: string;
-  logo_path?: string;
-  link?: string;
-};
-
-type AvailabilityResponse = {
-  region: string;
-  providers: AvailabilityProvider[];
-  unmatched_user_services?: string[];
-  error?: string;
-};
-
 type WatchlistImportRowError = {
   row: number;
   reason: string;
@@ -63,7 +57,7 @@ const TMDB_IMAGE_BASE = "https://media.themoviedb.org/t/p/original";
 
 function retainByIds<T>(
   record: Record<string, T>,
-  nextItems: WatchlistItem[]
+  nextItems: WatchlistItem[],
 ): Record<string, T> {
   if (Object.keys(record).length === 0) {
     return record;
@@ -167,7 +161,7 @@ export default function Watchlist() {
       try {
         const typeParam = item.type === "show" ? "tv" : "movie";
         const response = await fetch(
-          `/api/availability/${item.tmdb_id}?type=${typeParam}`
+          `/api/availability/${item.tmdb_id}?type=${typeParam}`,
         );
 
         const data = (await response.json().catch(() => null)) as
@@ -216,7 +210,7 @@ export default function Watchlist() {
         }
       }
     },
-    [availability, availabilityLoading]
+    [availability, availabilityLoading],
   );
 
   const fetchAvailabilityForItems = useCallback(
@@ -228,7 +222,7 @@ export default function Watchlist() {
         void requestAvailability(entry);
       }
     },
-    [requestAvailability]
+    [requestAvailability],
   );
 
   const loadWatchlist = useCallback(
@@ -286,7 +280,7 @@ export default function Watchlist() {
         }
       }
     },
-    [filterType, sortOption, fetchAvailabilityForItems]
+    [filterType, sortOption, fetchAvailabilityForItems],
   );
 
   useEffect(() => {
@@ -360,14 +354,14 @@ export default function Watchlist() {
           summaryParts.push(
             `${duplicateCount} duplicate${
               duplicateCount === 1 ? "" : "s"
-            } skipped`
+            } skipped`,
           );
         }
         if (Array.isArray(data.errors) && data.errors.length > 0) {
           summaryParts.push(
             `${data.errors.length} row${
               data.errors.length === 1 ? "" : "s"
-            } had issues`
+            } had issues`,
           );
         }
 
@@ -380,12 +374,12 @@ export default function Watchlist() {
         setImporting(false);
       }
     },
-    [loadWatchlist]
+    [loadWatchlist],
   );
 
   const handleStatusChange = async (
     itemId: string,
-    newStatus: WatchlistStatus
+    newStatus: WatchlistStatus,
   ) => {
     setUpdatingId(itemId);
     setActionError(null);
@@ -417,14 +411,14 @@ export default function Watchlist() {
       if (data && typeof data === "object" && "id" in data) {
         setItems((prev) =>
           prev.map((item) =>
-            item.id === itemId ? { ...item, ...(data as WatchlistItem) } : item
-          )
+            item.id === itemId ? { ...item, ...(data as WatchlistItem) } : item,
+          ),
         );
       } else {
         setItems((prev) =>
           prev.map((item) =>
-            item.id === itemId ? { ...item, status: newStatus } : item
-          )
+            item.id === itemId ? { ...item, status: newStatus } : item,
+          ),
         );
       }
 
@@ -444,7 +438,7 @@ export default function Watchlist() {
     }
 
     const confirmed = window.confirm(
-      `Remove "${item.title}" from your watchlist?`
+      `Remove "${item.title}" from your watchlist?`,
     );
     if (!confirmed) {
       return;
@@ -494,7 +488,7 @@ export default function Watchlist() {
     (item: WatchlistItem) => {
       void requestAvailability(item, { force: true });
     },
-    [requestAvailability]
+    [requestAvailability],
   );
 
   if (isLoading) {
@@ -706,10 +700,52 @@ export default function Watchlist() {
                 const availabilityIsLoading =
                   availabilityLoading[item.id] ?? false;
                 const availabilityMessage = availabilityError[item.id];
-                const hasProviders =
+                const groupedProviders: Record<
+                  AvailabilityAccess,
+                  AvailabilityProvider[]
+                > = {
+                  subscription: [],
+                  free: [],
+                  ads: [],
+                };
+                const seenByCategory: Record<
+                  AvailabilityAccess,
+                  Set<string>
+                > = {
+                  subscription: new Set(),
+                  free: new Set(),
+                  ads: new Set(),
+                };
+                if (
                   availabilityData &&
-                  Array.isArray(availabilityData.providers) &&
-                  availabilityData.providers.length > 0;
+                  Array.isArray(availabilityData.providers)
+                ) {
+                  for (const provider of availabilityData.providers) {
+                    if (!provider) {
+                      continue;
+                    }
+                    const accessList =
+                      provider.access && provider.access.length
+                        ? Array.from(new Set(provider.access))
+                        : [getPrimaryAccess(provider)];
+                    for (const access of accessList) {
+                      const set = seenByCategory[access];
+                      if (!set || set.has(provider.code)) {
+                        continue;
+                      }
+                      set.add(provider.code);
+                      groupedProviders[access].push(provider);
+                    }
+                  }
+                  for (const access of AVAILABILITY_ACCESS_ORDER) {
+                    groupedProviders[access].sort((a, b) =>
+                      (a.name || a.code).localeCompare(b.name || b.code),
+                    );
+                  }
+                }
+                const hasProviders = AVAILABILITY_ACCESS_ORDER.some(
+                  (access) => groupedProviders[access].length > 0,
+                );
 
                 return (
                   <li
@@ -761,7 +797,7 @@ export default function Watchlist() {
                           onChange={(event) =>
                             handleStatusChange(
                               item.id,
-                              event.target.value as WatchlistStatus
+                              event.target.value as WatchlistStatus,
                             )
                           }
                           disabled={disabling}
@@ -817,41 +853,82 @@ export default function Watchlist() {
                           {availabilityMessage}
                         </p>
                       ) : hasProviders ? (
-                        <div className="flex flex-wrap items-center gap-3">
-                          {availabilityData.providers.map((provider) => {
-                            const logoSrc = provider.logo_path
-                              ? `${TMDB_IMAGE_BASE}${provider.logo_path}`
-                              : null;
+                        <div className="space-y-3">
+                          {AVAILABILITY_ACCESS_ORDER.map((access) => {
+                            const providersForAccess = groupedProviders[access];
+                            if (!providersForAccess.length) {
+                              return null;
+                            }
+                            const meta = AVAILABILITY_ACCESS_META[access];
                             return (
-                              <a
-                                key={`${item.id}-${provider.code}`}
-                                href={provider.link ?? undefined}
-                                target={provider.link ? "_blank" : undefined}
-                                rel={
-                                  provider.link
-                                    ? "noopener noreferrer"
-                                    : undefined
-                                }
-                                className="flex items-center gap-2 rounded-full bg-white px-3 py-1 text-sm text-gray-700 shadow-sm border border-gray-200 hover:border-blue-400"
+                              <div
+                                key={`${item.id}-${access}`}
+                                className="space-y-2"
                               >
-                                {logoSrc ? (
-                                  <Image
-                                    src={logoSrc}
-                                    alt={provider.name}
-                                    width={28}
-                                    height={28}
-                                    className="h-7 w-7 rounded"
-                                  />
-                                ) : null}
-                                <span>{provider.name}</span>
-                              </a>
+                                <p className="text-xs font-semibold uppercase text-gray-500">
+                                  {meta.label}
+                                </p>
+                                <div className="flex flex-wrap items-center gap-3">
+                                  {providersForAccess.map((provider) => {
+                                    const logoSrc = provider.logo_path
+                                      ? `${TMDB_IMAGE_BASE}${provider.logo_path}`
+                                      : null;
+                                    return (
+                                      <a
+                                        key={`${item.id}-${access}-${provider.code}`}
+                                        href={provider.link ?? undefined}
+                                        target={
+                                          provider.link ? "_blank" : undefined
+                                        }
+                                        rel={
+                                          provider.link
+                                            ? "noopener noreferrer"
+                                            : undefined
+                                        }
+                                        className={`flex items-center gap-2 rounded-full px-3 py-1 text-sm font-medium shadow-sm transition-colors ${meta.chipClass}`}
+                                      >
+                                        {logoSrc ? (
+                                          <Image
+                                            src={logoSrc}
+                                            alt={provider.name}
+                                            width={28}
+                                            height={28}
+                                            className="h-7 w-7 rounded"
+                                          />
+                                        ) : null}
+                                        <span>{provider.name}</span>
+                                      </a>
+                                    );
+                                  })}
+                                </div>
+                              </div>
                             );
                           })}
+                          {availabilityData?.unmatched_user_services &&
+                          availabilityData.unmatched_user_services.length ? (
+                            <p className="text-xs text-gray-500">
+                              Not seeing:{" "}
+                              {availabilityData.unmatched_user_services.join(
+                                ", ",
+                              )}
+                            </p>
+                          ) : null}
                         </div>
                       ) : availabilityData ? (
-                        <p className="text-sm text-gray-600">
-                          Not currently available on your connected services.
-                        </p>
+                        <div className="space-y-2 text-sm text-gray-600">
+                          <p>
+                            Not currently available on your connected services.
+                          </p>
+                          {availabilityData.unmatched_user_services &&
+                          availabilityData.unmatched_user_services.length ? (
+                            <p className="text-xs text-gray-500">
+                              Still missing:{" "}
+                              {availabilityData.unmatched_user_services.join(
+                                ", ",
+                              )}
+                            </p>
+                          ) : null}
+                        </div>
                       ) : (
                         <p className="text-sm text-gray-600">
                           Availability will appear once checked.

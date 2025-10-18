@@ -80,7 +80,7 @@ export function ThemedCard({ children, className = "" }: ThemedCardProps) {
       className={classNames(
         "rounded-lg border p-4 transition-colors",
         themeClasses,
-        className
+        className,
       )}
     >
       {children}
