@@ -312,17 +312,9 @@ type ProvidersResponse struct {
 	Results map[string]RegionProviders `json:"results"`
 }
 
-func (c *Client) GetMovieProviders(ctx context.Context, id int) (*ProvidersResponse, error) {
-	endpoint := fmt.Sprintf("%s/movie/%d/watch/providers", c.baseURL, id)
-	return c.doProviders(ctx, endpoint)
-}
+func (c *Client) GetProviders(ctx context.Context, id int, forcedType string) (*ProvidersResponse, error) {
+	endpoint := fmt.Sprintf("%s/%s/%d/watch/providers", c.baseURL, forcedType, id)
 
-func (c *Client) GetTVProviders(ctx context.Context, id int) (*ProvidersResponse, error) {
-	endpoint := fmt.Sprintf("%s/tv/%d/watch/providers", c.baseURL, id)
-	return c.doProviders(ctx, endpoint)
-}
-
-func (c *Client) doProviders(ctx context.Context, endpoint string) (*ProvidersResponse, error) {
 	// For providers, TMDb ignores api_key in query when using bearer, but we still attach api_key when present.
 	// If apiKey is set and endpoint has no query, we add it for compatibility.
 	if c.apiKey != "" {

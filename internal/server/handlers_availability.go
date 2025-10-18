@@ -67,50 +67,27 @@ func (s *Server) availabilityHandler(c *gin.Context) {
 	// Use the typed response and then select region
 	var providerLink string
 	var entries []struct{ ProviderName, LogoPath string }
-	if typ == "movie" {
-		resp, e := s.tmdb.GetMovieProviders(c.Request.Context(), id)
-		if e != nil {
-			jsonError(c, http.StatusBadGateway, "upstream providers failed")
-			return
-		}
-		rp, ok := resp.Results[region]
-		if !ok {
-			// No providers for region
-			c.JSON(http.StatusOK, gin.H{"region": region, "providers": []any{}, "unmatched_user_services": codesFromMap(active)})
-			return
-		}
-		providerLink = rp.Link
-		// Prefer flatrate, but include free and ads as well for visibility
-		for _, p := range rp.Flatrate {
-			entries = append(entries, struct{ ProviderName, LogoPath string }{p.ProviderName, p.LogoPath})
-		}
-		for _, p := range rp.Free {
-			entries = append(entries, struct{ ProviderName, LogoPath string }{p.ProviderName, p.LogoPath})
-		}
-		for _, p := range rp.Ads {
-			entries = append(entries, struct{ ProviderName, LogoPath string }{p.ProviderName, p.LogoPath})
-		}
-	} else {
-		resp, e := s.tmdb.GetTVProviders(c.Request.Context(), id)
-		if e != nil {
-			jsonError(c, http.StatusBadGateway, "upstream providers failed")
-			return
-		}
-		rp, ok := resp.Results[region]
-		if !ok {
-			c.JSON(http.StatusOK, gin.H{"region": region, "providers": []any{}, "unmatched_user_services": codesFromMap(active)})
-			return
-		}
-		providerLink = rp.Link
-		for _, p := range rp.Flatrate {
-			entries = append(entries, struct{ ProviderName, LogoPath string }{p.ProviderName, p.LogoPath})
-		}
-		for _, p := range rp.Free {
-			entries = append(entries, struct{ ProviderName, LogoPath string }{p.ProviderName, p.LogoPath})
-		}
-		for _, p := range rp.Ads {
-			entries = append(entries, struct{ ProviderName, LogoPath string }{p.ProviderName, p.LogoPath})
-		}
+	resp, e := s.tmdb.GetProviders(c.Request.Context(), id, typ)
+	if e != nil {
+		jsonError(c, http.StatusBadGateway, "upstream providers failed")
+		return
+	}
+	rp, ok := resp.Results[region]
+	if !ok {
+		// No providers for region
+		c.JSON(http.StatusOK, gin.H{"region": region, "providers": []any{}, "unmatched_user_services": codesFromMap(active)})
+		return
+	}
+	providerLink = rp.Link
+	// Prefer flatrate, but include free and ads as well for visibility
+	for _, p := range rp.Flatrate {
+		entries = append(entries, struct{ ProviderName, LogoPath string }{p.ProviderName, p.LogoPath})
+	}
+	for _, p := range rp.Free {
+		entries = append(entries, struct{ ProviderName, LogoPath string }{p.ProviderName, p.LogoPath})
+	}
+	for _, p := range rp.Ads {
+		entries = append(entries, struct{ ProviderName, LogoPath string }{p.ProviderName, p.LogoPath})
 	}
 
 	// Map to our service codes and intersect with user-active
