@@ -113,7 +113,7 @@ export const TMDB_IMAGE_BASE = "https://media.themoviedb.org/t/p/original";
 export const DEFAULT_AVAILABILITY_ACCESS: AvailabilityAccess = "subscription";
 
 export const getPrimaryAccess = (
-  provider: AvailabilityProvider
+  provider: AvailabilityProvider,
 ): AvailabilityAccess => {
   const [first] = provider.access ?? [];
   return first ?? DEFAULT_AVAILABILITY_ACCESS;

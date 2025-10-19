@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import {
-  AVAILABILITY_ACCESS_META,
   AVAILABILITY_ACCESS_ORDER,
   AvailabilityProvider,
   AvailabilityResponse,
@@ -10,7 +9,6 @@ import {
   UserService,
   WatchlistItem,
   WatchlistResponse,
-  typeLabels,
   getPrimaryAccess,
 } from "@/lib/watchlist/types";
 
@@ -74,7 +72,7 @@ type UseWatchlistInsightsResult = {
 };
 
 export function useWatchlistInsights(
-  options: UseWatchlistInsightsOptions = {}
+  options: UseWatchlistInsightsOptions = {},
 ): UseWatchlistInsightsResult {
   const {
     enabled = true,
@@ -144,7 +142,7 @@ export function useWatchlistInsights(
             try {
               const typeParam = item.type === "show" ? "tv" : "movie";
               const response = await fetch(
-                `/api/availability/${item.tmdb_id}?type=${typeParam}`
+                `/api/availability/${item.tmdb_id}?type=${typeParam}`,
               );
 
               if (!response.ok) {
@@ -168,7 +166,7 @@ export function useWatchlistInsights(
               console.error("Availability fetch error", err);
               return { id: item.id, data: null };
             }
-          })
+          }),
         );
 
         if (!isMountedRef.current) {
@@ -193,7 +191,7 @@ export function useWatchlistInsights(
         }
       }
     },
-    [availabilityLimit, enabled]
+    [availabilityLimit, enabled],
   );
 
   const loadWatchlist = useCallback(
@@ -250,7 +248,7 @@ export function useWatchlistInsights(
         }
       }
     },
-    [enabled, loadAvailability]
+    [enabled, loadAvailability],
   );
 
   const loadServices = useCallback(
@@ -304,7 +302,7 @@ export function useWatchlistInsights(
         }
       }
     },
-    [enabled]
+    [enabled],
   );
 
   useEffect(() => {
@@ -337,7 +335,7 @@ export function useWatchlistInsights(
 
   const activeServices = useMemo(
     () => services.filter((service) => service.active),
-    [services]
+    [services],
   );
 
   const activeServiceCodes = useMemo(() => {
@@ -370,7 +368,7 @@ export function useWatchlistInsights(
         }
       }
       const providers = Array.from(deduped.values()).filter((provider) =>
-        activeServiceCodes.has(provider.code)
+        activeServiceCodes.has(provider.code),
       );
       if (!providers.length) {
         continue;
@@ -390,17 +388,17 @@ export function useWatchlistInsights(
 
   const nowStreaming = useMemo(
     () => availableForYou.slice(0, maxStreamingItems),
-    [availableForYou, maxStreamingItems]
+    [availableForYou, maxStreamingItems],
   );
 
   const watchingCount = useMemo(
     () => watchlist.filter((item) => item.status === "watching").length,
-    [watchlist]
+    [watchlist],
   );
 
   const finishedCount = useMemo(
     () => watchlist.filter((item) => item.status === "finished").length,
-    [watchlist]
+    [watchlist],
   );
 
   const stats = useMemo<StatSummary[]>(
@@ -445,12 +443,12 @@ export function useWatchlistInsights(
       watchlistLoading,
       watchingCount,
       availabilityLoading,
-    ]
+    ],
   );
 
   const availableSectionLoading = useMemo(
     () => watchlistLoading || servicesLoading || availabilityLoading,
-    [availabilityLoading, servicesLoading, watchlistLoading]
+    [availabilityLoading, servicesLoading, watchlistLoading],
   );
 
   const sortedServices = useMemo(() => {

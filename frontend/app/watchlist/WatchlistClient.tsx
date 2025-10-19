@@ -27,7 +27,7 @@ import {
 
 function retainByIds<T>(
   record: Record<string, T>,
-  nextItems: WatchlistItem[]
+  nextItems: WatchlistItem[],
 ): Record<string, T> {
   if (Object.keys(record).length === 0) {
     return record;
@@ -43,7 +43,7 @@ function retainByIds<T>(
 }
 
 function createAvailabilityLoadingMap(
-  items: WatchlistItem[]
+  items: WatchlistItem[],
 ): Record<string, boolean> {
   if (!items.length) {
     return {};
@@ -121,7 +121,7 @@ export default function WatchlistClient({
     ...initialAvailability,
   });
   const availabilityLoadingRef = useRef<Record<string, boolean>>(
-    createAvailabilityLoadingMap(initialItems)
+    createAvailabilityLoadingMap(initialItems),
   );
   const initialLoadSkippedRef = useRef(false);
 
@@ -172,7 +172,7 @@ export default function WatchlistClient({
       try {
         const typeParam = item.type === "show" ? "tv" : "movie";
         const response = await fetch(
-          `/api/availability/${item.tmdb_id}?type=${typeParam}`
+          `/api/availability/${item.tmdb_id}?type=${typeParam}`,
         );
 
         const data = (await response.json().catch(() => null)) as
@@ -229,7 +229,7 @@ export default function WatchlistClient({
         }
       }
     },
-    []
+    [],
   );
 
   const fetchAvailabilityForItems = useCallback(
@@ -241,7 +241,7 @@ export default function WatchlistClient({
         void requestAvailability(entry);
       }
     },
-    [requestAvailability]
+    [requestAvailability],
   );
 
   const loadWatchlist = useCallback(
@@ -307,7 +307,7 @@ export default function WatchlistClient({
         }
       }
     },
-    [filterType, sortOption, fetchAvailabilityForItems]
+    [filterType, sortOption, fetchAvailabilityForItems],
   );
 
   useEffect(() => {
@@ -385,14 +385,14 @@ export default function WatchlistClient({
           summaryParts.push(
             `${duplicateCount} duplicate${
               duplicateCount === 1 ? "" : "s"
-            } skipped`
+            } skipped`,
           );
         }
         if (Array.isArray(data.errors) && data.errors.length > 0) {
           summaryParts.push(
             `${data.errors.length} row${
               data.errors.length === 1 ? "" : "s"
-            } had issues`
+            } had issues`,
           );
         }
 
@@ -405,12 +405,12 @@ export default function WatchlistClient({
         setImporting(false);
       }
     },
-    [loadWatchlist]
+    [loadWatchlist],
   );
 
   const handleStatusChange = async (
     itemId: string,
-    newStatus: WatchlistStatus
+    newStatus: WatchlistStatus,
   ) => {
     setUpdatingId(itemId);
     setActionError(null);
@@ -442,14 +442,14 @@ export default function WatchlistClient({
       if (data && typeof data === "object" && "id" in data) {
         setItems((prev) =>
           prev.map((item) =>
-            item.id === itemId ? { ...item, ...(data as WatchlistItem) } : item
-          )
+            item.id === itemId ? { ...item, ...(data as WatchlistItem) } : item,
+          ),
         );
       } else {
         setItems((prev) =>
           prev.map((item) =>
-            item.id === itemId ? { ...item, status: newStatus } : item
-          )
+            item.id === itemId ? { ...item, status: newStatus } : item,
+          ),
         );
       }
 
@@ -469,7 +469,7 @@ export default function WatchlistClient({
     }
 
     const confirmed = window.confirm(
-      `Remove "${item.title}" from your watchlist?`
+      `Remove "${item.title}" from your watchlist?`,
     );
     if (!confirmed) {
       return;
@@ -519,7 +519,7 @@ export default function WatchlistClient({
     (item: WatchlistItem) => {
       void requestAvailability(item, { force: true });
     },
-    [requestAvailability]
+    [requestAvailability],
   );
 
   return (
@@ -758,12 +758,12 @@ export default function WatchlistClient({
                   }
                   for (const access of AVAILABILITY_ACCESS_ORDER) {
                     groupedProviders[access].sort((a, b) =>
-                      (a.name || a.code).localeCompare(b.name || b.code)
+                      (a.name || a.code).localeCompare(b.name || b.code),
                     );
                   }
                 }
                 const hasProviders = AVAILABILITY_ACCESS_ORDER.some(
-                  (access) => groupedProviders[access].length > 0
+                  (access) => groupedProviders[access].length > 0,
                 );
 
                 return (
@@ -816,7 +816,7 @@ export default function WatchlistClient({
                           onChange={(event) =>
                             handleStatusChange(
                               item.id,
-                              event.target.value as WatchlistStatus
+                              event.target.value as WatchlistStatus,
                             )
                           }
                           disabled={disabling}
@@ -928,7 +928,7 @@ export default function WatchlistClient({
                             <p className="text-xs text-gray-500">
                               Not seeing:{" "}
                               {availabilityData.unmatched_user_services.join(
-                                ", "
+                                ", ",
                               )}
                             </p>
                           ) : null}
@@ -943,7 +943,7 @@ export default function WatchlistClient({
                             <p className="text-xs text-gray-500">
                               Still missing:{" "}
                               {availabilityData.unmatched_user_services.join(
-                                ", "
+                                ", ",
                               )}
                             </p>
                           ) : null}

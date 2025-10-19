@@ -106,7 +106,7 @@ async function bootstrapWatchlist(token: string): Promise<BootstrapResult> {
         availabilityErrors[item.id] =
           "Unable to load availability. Please try again.";
       }
-    })
+    }),
   );
 
   for (const item of items) {

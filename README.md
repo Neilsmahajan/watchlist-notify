@@ -3,6 +3,8 @@
 Track your personal movie & TV show watchlist across streaming platforms and automatically get email alerts when titles become available on the services you already subscribe to.
 
 > Status: Active development. Implementing Go backend (Gin + MongoDB + Auth0 authentication) and a Next.js frontend with modern UI. TMDb integration (search + watch providers) implemented. Expect breaking changes until v0.1.0.
+>
+> Email notifications are still in progress: the backend plumbing is being wired up, but the delivery provider and template system have not been finalized yet.
 
 ## Table of Contents
 
@@ -88,6 +90,7 @@ Current Hosting:
 - Domain & TLS termination proxied by Cloudflare (Vercel also manages certs for the connected domain; Cloudflare in proxy mode supplies edge caching & security).
 - Backend (Go API) currently local / in development; will receive a subdomain (e.g. `api.watchlistnotify.com`) or path-based routing through Cloudflare once deployed.
 - Database: MongoDB Atlas (multi-region/backups). Local Docker can be used for offline development.
+- Cache: Upstash Redis (managed) stores TMDb search and availability responses; the backend gracefully falls back to a no-op cache if Redis is unavailable.
 
 ## 3. Tech Stack
 
@@ -95,6 +98,7 @@ Backend:
 
 - Go (Gin web framework)
 - MongoDB (official Go driver)
+- Redis (Upstash managed) cache via go-redis client
 - Auth0 (authentication with multiple providers)
 - JWT (HMAC) stored in HttpOnly cookie
 - MongoDB Atlas for dev/prod (preferred) — Docker Compose optional for local DB
@@ -109,8 +113,9 @@ Frontend:
 - TypeScript with ESLint configuration
 - Optimized images with Next.js Image component
 
-Infrastructure (planned):
+Infrastructure (current + planned):
 
+- Upstash Redis (managed cache for TMDb search/providers)
 - Reverse proxy (e.g. Caddy / Nginx / Cloudflare)
 - Background worker (Go) or cron (Cloud Scheduler / GitHub Actions)
 - Email provider (e.g. SendGrid / Postmark / AWS SES)
@@ -196,6 +201,10 @@ DB_PORT=27017
 DB_USERNAME=devuser            # optional
 DB_ROOT_PASSWORD=devpassword   # optional
 DB_DATABASE=watchlistnotify
+
+# Cache
+REDIS_URL=rediss://default:examplepassword@your-upstash-endpoint:6379
+# Set to "disabled" to bypass Redis during local development
 
 # TMDb
 TMDB_API_KEY=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
@@ -317,12 +326,14 @@ Planned collections: `services`, `availability_cache`, `jobs`.
 - Nightly availability scan per user service set
 - Deduplicate API lookups by batching unique title/provider queries
 - Store availability snapshot to avoid redundant external calls
+- Warm Redis cache with popular searches / upcoming releases to reduce cold-start latency
 
 ## 10. Email Delivery (planned)
 
 - Digest summarizing new items available since last notification
 - Optional per-item immediate alert
 - Template engine (Go text/template or MJML via build)
+- Delivery provider TBD (evaluating Postmark, Resend, and AWS SES)
 
 ## 11. Testing & Tooling
 
@@ -411,17 +422,18 @@ Security / Observability Roadmap:
 
 Scaling Considerations:
 
-- Cache external provider responses (Redis or in-memory with TTL) to reduce API costs.
+- Cache external provider responses (Upstash Redis) to reduce TMDb API churn; falls back to no-op cache if Redis is unreachable.
 - Batch availability lookups via job scheduler (cron + queue) to flatten burst load.
 
 Deployment Checklist (API – future):
 
 1. Build image & push (tag with git SHA)
-2. Apply infra config (secrets, env, DB URL)
+2. Apply infra config (secrets, env, DB URL, REDIS_URL, Auth0 credentials)
 3. Run migrations / ensure indexes (script TBD)
 4. Smoke test `/health` via Cloudflare
 5. Flip DNS for `api.watchlistnotify.com` (low TTL) or enable route in Cloudflare
 6. Monitor logs & metrics for 24h
+7. Prime cache and execute an internal notification dry run once email delivery ships
 
 ## 14. Roadmap / Milestones
 
