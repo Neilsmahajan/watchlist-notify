@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { auth0 } from "@/lib/auth0";
+import { getAccessTokenOrResponse } from "@/lib/auth/api-token";
 
 type AppRouteHandler = (
   req: Request,
@@ -32,7 +33,11 @@ const authedGet = auth0.withApiAuthRequired(async function handler(
   }
   const region = searchParams.get("region");
 
-  const { token } = await auth0.getAccessToken();
+  const access = await getAccessTokenOrResponse();
+  if (!access.ok) {
+    return access.response;
+  }
+  const { token } = access;
 
   const backendUrl = new URL(`/api/availability/${id}`, backend);
   backendUrl.searchParams.set("type", type);

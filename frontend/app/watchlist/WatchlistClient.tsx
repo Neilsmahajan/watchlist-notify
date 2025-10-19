@@ -17,6 +17,7 @@ import {
   getPrimaryAccess,
   typeLabels,
 } from "@/lib/watchlist/types";
+import { redirectToLogin } from "@/lib/auth/client";
 import {
   useCallback,
   useEffect,
@@ -125,6 +126,14 @@ export default function WatchlistClient({
   );
   const initialLoadSkippedRef = useRef(false);
 
+  const handleUnauthorized = useCallback((response: Response) => {
+    if (response.status !== 401) {
+      return false;
+    }
+    redirectToLogin();
+    return true;
+  }, []);
+
   useEffect(() => {
     return () => {
       isMountedRef.current = false;
@@ -174,6 +183,10 @@ export default function WatchlistClient({
         const response = await fetch(
           `/api/availability/${item.tmdb_id}?type=${typeParam}`,
         );
+
+        if (handleUnauthorized(response)) {
+          return;
+        }
 
         const data = (await response.json().catch(() => null)) as
           | AvailabilityResponse
@@ -229,7 +242,7 @@ export default function WatchlistClient({
         }
       }
     },
-    [],
+    [handleUnauthorized],
   );
 
   const fetchAvailabilityForItems = useCallback(
@@ -265,6 +278,11 @@ export default function WatchlistClient({
           : "/api/watchlist";
 
         const response = await fetch(url, { signal });
+
+        if (handleUnauthorized(response)) {
+          return;
+        }
+
         const data = (await response
           .json()
           .catch(() => null)) as WatchlistResponse | null;
@@ -307,7 +325,7 @@ export default function WatchlistClient({
         }
       }
     },
-    [filterType, sortOption, fetchAvailabilityForItems],
+    [filterType, sortOption, fetchAvailabilityForItems, handleUnauthorized],
   );
 
   useEffect(() => {
@@ -361,6 +379,10 @@ export default function WatchlistClient({
           body: formData,
         });
 
+        if (handleUnauthorized(response)) {
+          return;
+        }
+
         const data = (await response
           .json()
           .catch(() => null)) as WatchlistImportResponse | null;
@@ -405,7 +427,7 @@ export default function WatchlistClient({
         setImporting(false);
       }
     },
-    [loadWatchlist],
+    [loadWatchlist, handleUnauthorized],
   );
 
   const handleStatusChange = async (
@@ -424,6 +446,10 @@ export default function WatchlistClient({
         },
         body: JSON.stringify({ status: newStatus }),
       });
+
+      if (handleUnauthorized(response)) {
+        return;
+      }
 
       const data = (await response.json().catch(() => null)) as
         | (WatchlistItem & { error?: string })
@@ -483,6 +509,10 @@ export default function WatchlistClient({
       const response = await fetch(`/api/watchlist/${itemId}`, {
         method: "DELETE",
       });
+
+      if (handleUnauthorized(response)) {
+        return;
+      }
 
       const data = (await response.json().catch(() => null)) as {
         error?: string;

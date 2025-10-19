@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { auth0 } from "@/lib/auth0";
+import { getAccessTokenOrResponse } from "@/lib/auth/api-token";
 
 type AppRouteHandler = (
   req: Request,
@@ -10,7 +11,11 @@ const authedGet = auth0.withApiAuthRequired(async function handler(
 ) {
   void _req;
   const backend = process.env.BACKEND_URL || "http://localhost:8080";
-  const { token } = await auth0.getAccessToken();
+  const access = await getAccessTokenOrResponse();
+  if (!access.ok) {
+    return access.response;
+  }
+  const { token } = access;
 
   const response = await fetch(`${backend}/api/me/services`, {
     headers: {
@@ -39,7 +44,11 @@ const authedPatch = auth0.withApiAuthRequired(async function handler(
     return NextResponse.json({ error: "invalid body" }, { status: 400 });
   }
 
-  const { token } = await auth0.getAccessToken();
+  const access = await getAccessTokenOrResponse();
+  if (!access.ok) {
+    return access.response;
+  }
+  const { token } = access;
 
   const response = await fetch(`${backend}/api/me/services`, {
     method: "PATCH",

@@ -1,9 +1,10 @@
 "use client";
 
 import Image from "next/image";
-import { FormEvent, useState } from "react";
+import { FormEvent, useCallback, useState } from "react";
 import { Button, LoadingSpinner } from "@/components/ui";
 import type { SessionUser } from "@/lib/auth/types";
+import { redirectToLogin } from "@/lib/auth/client";
 
 type SearchResult = {
   tmdb_id: number;
@@ -40,6 +41,14 @@ export default function SearchClient({ user }: SearchClientProps) {
     item.tmdb_id
       ? `${item.type}-${item.tmdb_id}`
       : `${item.type}-${item.title}`;
+
+  const handleUnauthorized = useCallback((response: Response) => {
+    if (response.status !== 401) {
+      return false;
+    }
+    redirectToLogin();
+    return true;
+  }, []);
 
   if (!user) {
     return (
@@ -79,6 +88,10 @@ export default function SearchClient({ user }: SearchClientProps) {
       });
 
       const response = await fetch(`/api/search?${params.toString()}`);
+
+      if (handleUnauthorized(response)) {
+        return;
+      }
       const data = (await response
         .json()
         .catch(() => null)) as SearchResponse | null;
@@ -146,6 +159,10 @@ export default function SearchClient({ user }: SearchClientProps) {
         },
         body: JSON.stringify(payload),
       });
+
+      if (handleUnauthorized(response)) {
+        return;
+      }
 
       const data = (await response.json().catch(() => null)) as {
         error?: string;

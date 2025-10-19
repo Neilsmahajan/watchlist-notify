@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { auth0 } from "@/lib/auth0";
+import { getAccessTokenOrResponse } from "@/lib/auth/api-token";
 
 type AppRouteHandler = (
   req: Request,
@@ -35,7 +36,11 @@ const authedPatch = auth0.withApiAuthRequired(async function handler(
   }
 
   const backend = process.env.BACKEND_URL || "http://localhost:8080";
-  const { token } = await auth0.getAccessToken();
+  const access = await getAccessTokenOrResponse();
+  if (!access.ok) {
+    return access.response;
+  }
+  const { token } = access;
 
   const response = await fetch(`${backend}/api/watchlist/${id}`, {
     method: "PATCH",
@@ -60,7 +65,11 @@ const authedDelete = auth0.withApiAuthRequired(async function handler(
   }
 
   const backend = process.env.BACKEND_URL || "http://localhost:8080";
-  const { token } = await auth0.getAccessToken();
+  const access = await getAccessTokenOrResponse();
+  if (!access.ok) {
+    return access.response;
+  }
+  const { token } = access;
 
   const response = await fetch(`${backend}/api/watchlist/${id}`, {
     method: "DELETE",

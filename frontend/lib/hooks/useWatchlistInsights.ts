@@ -11,6 +11,7 @@ import {
   WatchlistResponse,
   getPrimaryAccess,
 } from "@/lib/watchlist/types";
+import { redirectToLogin } from "@/lib/auth/client";
 
 export {
   AVAILABILITY_ACCESS_META,
@@ -95,6 +96,14 @@ export function useWatchlistInsights(
 
   const isMountedRef = useRef(false);
 
+  const handleUnauthorized = useCallback((response: Response) => {
+    if (response.status !== 401) {
+      return false;
+    }
+    redirectToLogin();
+    return true;
+  }, []);
+
   useEffect(() => {
     isMountedRef.current = true;
     return () => {
@@ -145,6 +154,10 @@ export function useWatchlistInsights(
                 `/api/availability/${item.tmdb_id}?type=${typeParam}`,
               );
 
+              if (handleUnauthorized(response)) {
+                return { id: item.id, data: null };
+              }
+
               if (!response.ok) {
                 return { id: item.id, data: null };
               }
@@ -191,7 +204,7 @@ export function useWatchlistInsights(
         }
       }
     },
-    [availabilityLimit, enabled],
+    [availabilityLimit, enabled, handleUnauthorized],
   );
 
   const loadWatchlist = useCallback(
@@ -212,6 +225,10 @@ export function useWatchlistInsights(
         const response = await fetch("/api/watchlist?sort=-added_at", {
           signal,
         });
+
+        if (handleUnauthorized(response)) {
+          return;
+        }
 
         const data = (await response
           .json()
@@ -248,7 +265,7 @@ export function useWatchlistInsights(
         }
       }
     },
-    [enabled, loadAvailability],
+    [enabled, handleUnauthorized, loadAvailability],
   );
 
   const loadServices = useCallback(
@@ -267,6 +284,10 @@ export function useWatchlistInsights(
 
       try {
         const response = await fetch("/api/me/services", { signal });
+
+        if (handleUnauthorized(response)) {
+          return;
+        }
 
         const data = (await response
           .json()
@@ -302,7 +323,7 @@ export function useWatchlistInsights(
         }
       }
     },
-    [enabled],
+    [enabled, handleUnauthorized],
   );
 
   useEffect(() => {

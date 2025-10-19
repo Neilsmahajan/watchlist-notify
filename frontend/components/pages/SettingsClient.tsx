@@ -8,6 +8,7 @@ import {
   formatDisplayDate,
 } from "@/lib/hooks/useWatchlistInsights";
 import type { SessionUser } from "@/lib/auth/types";
+import { redirectToLogin } from "@/lib/auth/client";
 
 export type Service = {
   code: string;
@@ -57,6 +58,14 @@ export default function SettingsClient({ user }: SettingsClientProps) {
     Record<string, boolean>
   >({});
 
+  const handleUnauthorized = useCallback((response: Response) => {
+    if (response.status !== 401) {
+      return false;
+    }
+    redirectToLogin();
+    return true;
+  }, []);
+
   const loadServices = useCallback(
     async (options: { signal?: AbortSignal; silent?: boolean } = {}) => {
       const { signal, silent } = options;
@@ -67,6 +76,9 @@ export default function SettingsClient({ user }: SettingsClientProps) {
 
       try {
         const response = await fetch("/api/me/services", { signal });
+        if (handleUnauthorized(response)) {
+          return;
+        }
         const data = (await response
           .json()
           .catch(() => null)) as ServicesResponse | null;
@@ -97,7 +109,7 @@ export default function SettingsClient({ user }: SettingsClientProps) {
         }
       }
     },
-    [],
+    [handleUnauthorized],
   );
 
   useEffect(() => {
@@ -132,6 +144,9 @@ export default function SettingsClient({ user }: SettingsClientProps) {
           toggle: [{ code, active: desiredState }],
         }),
       });
+      if (handleUnauthorized(response)) {
+        return;
+      }
 
       const data = (await response.json().catch(() => null)) as {
         error?: string;
