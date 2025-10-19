@@ -1,0 +1,388 @@
+"use client";
+
+import Image from "next/image";
+import { FormEvent, useState } from "react";
+import { Button, LoadingSpinner } from "@/components/ui";
+import type { SessionUser } from "@/lib/auth/types";
+
+type SearchResult = {
+  tmdb_id: number;
+  title: string;
+  year?: number;
+  type: "movie" | "tv";
+  poster_url?: string;
+};
+
+type SearchResponse = {
+  results?: SearchResult[];
+  error?: string;
+};
+
+interface SearchClientProps {
+  user: SessionUser | null;
+}
+
+export default function SearchClient({ user }: SearchClientProps) {
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchType, setSearchType] = useState<"movie" | "tv">("movie");
+  const [results, setResults] = useState<SearchResult[]>([]);
+  const [isSearching, setIsSearching] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [hasSearched, setHasSearched] = useState(false);
+  const [addingId, setAddingId] = useState<string | null>(null);
+  const [watchlistStatus, setWatchlistStatus] = useState<
+    Record<string, "added" | "error">
+  >({});
+  const [watchlistError, setWatchlistError] = useState<string | null>(null);
+  const [watchlistMessage, setWatchlistMessage] = useState<string | null>(null);
+
+  const getResultKey = (item: SearchResult) =>
+    item.tmdb_id
+      ? `${item.type}-${item.tmdb_id}`
+      : `${item.type}-${item.title}`;
+
+  if (!user) {
+    return (
+      <div className="flex min-h-[50vh] flex-col items-center justify-center gap-3 text-center">
+        <h1 className="text-2xl font-semibold text-gray-900">
+          Sign in to search the catalog
+        </h1>
+        <p className="text-gray-600">
+          Create an account or log in to find titles and save them to your
+          watchlist.
+        </p>
+        <Button href="/auth/login">Sign in</Button>
+      </div>
+    );
+  }
+
+  const handleSearch = async (queryValue: string) => {
+    const trimmed = queryValue.trim();
+    if (!trimmed) {
+      return;
+    }
+
+    setSearchQuery(trimmed);
+    setHasSearched(true);
+    setIsSearching(true);
+    setError(null);
+    setResults([]);
+    setWatchlistError(null);
+    setWatchlistMessage(null);
+    setWatchlistStatus({});
+    setAddingId(null);
+
+    try {
+      const params = new URLSearchParams({
+        query: trimmed,
+        type: searchType,
+      });
+
+      const response = await fetch(`/api/search?${params.toString()}`);
+      const data = (await response
+        .json()
+        .catch(() => null)) as SearchResponse | null;
+
+      if (!response.ok) {
+        const message = data?.error || "Search failed. Please try again.";
+        setError(message);
+        setResults([]);
+        return;
+      }
+
+      const items = data?.results;
+      if (Array.isArray(items)) {
+        setResults(items);
+      } else {
+        setResults([]);
+      }
+    } catch (err) {
+      console.error("Search error", err);
+      setError("Unable to reach search service. Please retry in a moment.");
+    } finally {
+      setIsSearching(false);
+    }
+  };
+
+  const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    void handleSearch(searchQuery);
+  };
+
+  const handleSuggestionClick = (title: string) => {
+    setSearchQuery(title);
+    void handleSearch(title);
+  };
+
+  const handleAddToWatchlist = async (item: SearchResult) => {
+    const key = getResultKey(item);
+    if (watchlistStatus[key] === "added" || addingId === key) {
+      return;
+    }
+
+    setAddingId(key);
+    setWatchlistError(null);
+    setWatchlistMessage(null);
+
+    try {
+      const typeForWatchlist = item.type === "tv" ? "show" : "movie";
+      const payload: Record<string, unknown> = {
+        title: item.title,
+        type: typeForWatchlist,
+      };
+
+      if (typeof item.year === "number") {
+        payload.year = item.year;
+      }
+
+      if (typeof item.tmdb_id === "number") {
+        payload.tmdb_id = item.tmdb_id;
+      }
+
+      const response = await fetch("/api/watchlist", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(payload),
+      });
+
+      const data = (await response.json().catch(() => null)) as {
+        error?: string;
+      } | null;
+
+      if (!response.ok) {
+        if (response.status === 409) {
+          setWatchlistStatus((prev) => ({ ...prev, [key]: "added" }));
+          setWatchlistMessage(`${item.title} is already in your watchlist.`);
+          return;
+        }
+
+        const message = data?.error || "Failed to add to watchlist.";
+        setWatchlistError(message);
+        setWatchlistStatus((prev) => ({ ...prev, [key]: "error" }));
+        return;
+      }
+
+      setWatchlistStatus((prev) => ({ ...prev, [key]: "added" }));
+      setWatchlistMessage(`${item.title} added to your watchlist.`);
+    } catch (err) {
+      console.error("Add to watchlist error", err);
+      setWatchlistError("Unable to update watchlist. Please retry.");
+      setWatchlistStatus((prev) => ({ ...prev, [key]: "error" }));
+    } finally {
+      setAddingId(null);
+    }
+  };
+
+  return (
+    <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+      <div className="mb-8">
+        <h1 className="text-3xl font-bold text-gray-900 mb-2">
+          Search Content
+        </h1>
+        <p className="text-gray-600">
+          Find movies and TV shows to add to your watchlist
+        </p>
+      </div>
+
+      <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6 mb-8">
+        <form onSubmit={handleSubmit} className="flex gap-4">
+          <div className="flex-1">
+            <input
+              type="text"
+              placeholder="Search for movies, TV shows, actors, or directors..."
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+            />
+          </div>
+          <Button
+            disabled={!searchQuery.trim()}
+            loading={isSearching}
+            type="submit"
+          >
+            Search
+          </Button>
+        </form>
+
+        <div className="flex flex-wrap gap-2 mt-4 items-center">
+          <span className="text-sm font-medium text-gray-700">
+            Search type:
+          </span>
+          {["movie", "tv"].map((type) => {
+            const isActive = searchType === type;
+            return (
+              <button
+                key={type}
+                type="button"
+                onClick={() => setSearchType(type as "movie" | "tv")}
+                className={`px-3 py-1 text-sm rounded-full transition-colors border ${
+                  isActive
+                    ? "bg-blue-100 border-blue-300 text-blue-800"
+                    : "bg-white border-gray-200 text-gray-700 hover:bg-gray-100"
+                }`}
+                aria-pressed={isActive}
+              >
+                {type === "movie" ? "Movies" : "TV"}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-8">
+        {watchlistMessage && (
+          <div className="mb-4 rounded-md bg-green-50 px-4 py-3 text-sm text-green-700">
+            {watchlistMessage}
+          </div>
+        )}
+        {watchlistError && (
+          <div className="mb-4 rounded-md bg-red-50 px-4 py-3 text-sm text-red-700">
+            {watchlistError}
+          </div>
+        )}
+        {(() => {
+          if (isSearching) {
+            return (
+              <div className="flex flex-col items-center gap-4 text-gray-500">
+                <LoadingSpinner size="lg" />
+                <p>
+                  Searching {searchType === "movie" ? "movies" : "TV shows"}...
+                </p>
+              </div>
+            );
+          }
+
+          if (error) {
+            return (
+              <div className="text-center text-red-600" role="alert">
+                {error}
+              </div>
+            );
+          }
+
+          if (!hasSearched) {
+            return (
+              <div className="text-center text-gray-500">
+                <svg
+                  className="w-16 h-16 mx-auto mb-4 text-gray-400"
+                  fill="none"
+                  stroke="currentColor"
+                  viewBox="0 0 24 24"
+                >
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    strokeWidth={2}
+                    d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"
+                  />
+                </svg>
+                <h3 className="text-lg font-medium text-gray-900 mb-2">
+                  Start your search
+                </h3>
+                <p className="text-gray-500 mb-6">
+                  Enter a movie or TV show title above to begin searching
+                </p>
+                <div className="max-w-md mx-auto">
+                  <h4 className="text-sm font-medium text-gray-700 mb-3">
+                    Popular searches:
+                  </h4>
+                  <div className="flex flex-wrap gap-2 justify-center">
+                    {[
+                      "The Bear",
+                      "Dune",
+                      "Stranger Things",
+                      "The Office",
+                      "Breaking Bad",
+                      "Avatar",
+                    ].map((title) => (
+                      <button
+                        key={title}
+                        onClick={() => handleSuggestionClick(title)}
+                        className="px-3 py-1 text-sm text-blue-600 bg-blue-50 rounded-full hover:bg-blue-100 transition-colors"
+                        type="button"
+                      >
+                        {title}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            );
+          }
+
+          if (results.length === 0) {
+            return (
+              <div className="text-center text-gray-500">
+                No results found for &ldquo;{searchQuery}&rdquo;. Try checking
+                the spelling or using a different title.
+              </div>
+            );
+          }
+
+          return (
+            <ul className="grid gap-6 sm:grid-cols-2 lg:grid-cols-3">
+              {results.map((item) => {
+                const key = getResultKey(item);
+                const status = watchlistStatus[key];
+                const isAdding = addingId === key;
+
+                return (
+                  <li
+                    key={key}
+                    className="flex gap-4 rounded-lg border border-gray-200 p-4 shadow-sm"
+                  >
+                    <div className="w-24 flex-shrink-0">
+                      {item.poster_url ? (
+                        <Image
+                          src={item.poster_url}
+                          alt={`${item.title} poster`}
+                          width={96}
+                          height={144}
+                          className="h-36 w-24 rounded-md object-cover"
+                        />
+                      ) : (
+                        <div className="flex h-36 w-24 items-center justify-center rounded-md bg-gray-100 text-xs font-medium text-gray-500">
+                          No poster
+                        </div>
+                      )}
+                    </div>
+                    <div className="flex flex-1 flex-col">
+                      <h3 className="text-lg font-semibold text-gray-900">
+                        {item.title}
+                      </h3>
+                      <p className="text-sm text-gray-600">
+                        {item.year ? item.year : "Year unknown"}
+                      </p>
+                      <span className="mt-2 inline-flex w-fit items-center rounded-full bg-blue-50 px-2 py-0.5 text-xs font-medium text-blue-700">
+                        {item.type === "movie" ? "Movie" : "TV"}
+                      </span>
+                      <div className="mt-auto pt-4">
+                        <Button
+                          variant="outline"
+                          className="w-full"
+                          type="button"
+                          onClick={() => handleAddToWatchlist(item)}
+                          disabled={status === "added" || isAdding}
+                          loading={isAdding}
+                        >
+                          {status === "added" ? "Added" : "Add to Watchlist"}
+                        </Button>
+                        {status === "error" && (
+                          <p className="mt-2 text-xs text-red-600">
+                            Something went wrong. Try again.
+                          </p>
+                        )}
+                      </div>
+                    </div>
+                  </li>
+                );
+              })}
+            </ul>
+          );
+        })()}
+      </div>
+    </div>
+  );
+}
