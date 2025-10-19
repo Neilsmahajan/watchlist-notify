@@ -1,100 +1,25 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-export type WatchlistType = "movie" | "show";
-export type WatchlistStatus = "planned" | "watching" | "finished";
+import {
+  AVAILABILITY_ACCESS_META,
+  AVAILABILITY_ACCESS_ORDER,
+  AvailabilityProvider,
+  AvailabilityResponse,
+  ServiceResponse,
+  StatSummary,
+  UserService,
+  WatchlistItem,
+  WatchlistResponse,
+  typeLabels,
+  getPrimaryAccess,
+} from "@/lib/watchlist/types";
 
-export type WatchlistItem = {
-  id: string;
-  title: string;
-  type: WatchlistType;
-  status: WatchlistStatus;
-  year?: number;
-  tmdb_id?: number;
-  added_at?: string;
-  updated_at?: string;
-};
-
-export type WatchlistResponse = {
-  items?: WatchlistItem[];
-  error?: string;
-};
-
-export type AvailabilityAccess = "subscription" | "free" | "ads";
-
-export const AVAILABILITY_ACCESS_ORDER: AvailabilityAccess[] = [
-  "subscription",
-  "free",
-  "ads",
-];
-
-export const AVAILABILITY_ACCESS_META: Record<
-  AvailabilityAccess,
-  { label: string; description: string; chipClass: string; badgeClass: string }
-> = {
-  subscription: {
-    label: "Subscription",
-    description: "Included with your paid plan",
-    chipClass:
-      "bg-emerald-50 text-emerald-700 border border-emerald-100 hover:border-emerald-200",
-    badgeClass: "bg-emerald-100 text-emerald-800",
-  },
-  free: {
-    label: "Free",
-    description: "Free to stream",
-    chipClass:
-      "bg-sky-50 text-sky-700 border border-sky-100 hover:border-sky-200",
-    badgeClass: "bg-sky-100 text-sky-800",
-  },
-  ads: {
-    label: "Free with ads",
-    description: "Ad-supported access",
-    chipClass:
-      "bg-amber-50 text-amber-700 border border-amber-100 hover:border-amber-200",
-    badgeClass: "bg-amber-100 text-amber-800",
-  },
-};
-
-export type AvailabilityProvider = {
-  code: string;
-  name: string;
-  logo_path?: string;
-  link?: string;
-  access?: AvailabilityAccess[];
-};
-
-export type AvailabilityResponse = {
-  region: string;
-  providers: AvailabilityProvider[];
-  unmatched_user_services?: string[];
-  error?: string;
-};
-
-export type ServiceAccess = AvailabilityAccess;
-
-export type UserService = {
-  code: string;
-  name: string;
-  active: boolean;
-  added_at?: string;
-  access?: ServiceAccess;
-};
-
-export type ServiceResponse = {
-  services?: UserService[];
-  error?: string;
-};
-
-export type StatSummary = {
-  label: string;
-  value: string;
-  color: string;
-  loading: boolean;
-};
-
-export const typeLabels: Record<WatchlistType, string> = {
-  movie: "Movie",
-  show: "TV",
-};
+export {
+  AVAILABILITY_ACCESS_META,
+  AVAILABILITY_ACCESS_ORDER,
+  typeLabels,
+  getPrimaryAccess,
+} from "@/lib/watchlist/types";
 
 export function formatDisplayDate(value?: string): string | null {
   if (!value) {
@@ -110,15 +35,6 @@ export function formatDisplayDate(value?: string): string | null {
     year: "numeric",
   });
 }
-
-const DEFAULT_AVAILABILITY_ACCESS: AvailabilityAccess = "subscription";
-
-export const getPrimaryAccess = (
-  provider: AvailabilityProvider,
-): AvailabilityAccess => {
-  const [first] = provider.access ?? [];
-  return first ?? DEFAULT_AVAILABILITY_ACCESS;
-};
 
 const getAccessRank = (provider: AvailabilityProvider): number => {
   const primary = getPrimaryAccess(provider);
@@ -158,7 +74,7 @@ type UseWatchlistInsightsResult = {
 };
 
 export function useWatchlistInsights(
-  options: UseWatchlistInsightsOptions = {},
+  options: UseWatchlistInsightsOptions = {}
 ): UseWatchlistInsightsResult {
   const {
     enabled = true,
@@ -228,7 +144,7 @@ export function useWatchlistInsights(
             try {
               const typeParam = item.type === "show" ? "tv" : "movie";
               const response = await fetch(
-                `/api/availability/${item.tmdb_id}?type=${typeParam}`,
+                `/api/availability/${item.tmdb_id}?type=${typeParam}`
               );
 
               if (!response.ok) {
@@ -252,7 +168,7 @@ export function useWatchlistInsights(
               console.error("Availability fetch error", err);
               return { id: item.id, data: null };
             }
-          }),
+          })
         );
 
         if (!isMountedRef.current) {
@@ -277,7 +193,7 @@ export function useWatchlistInsights(
         }
       }
     },
-    [availabilityLimit, enabled],
+    [availabilityLimit, enabled]
   );
 
   const loadWatchlist = useCallback(
@@ -334,7 +250,7 @@ export function useWatchlistInsights(
         }
       }
     },
-    [enabled, loadAvailability],
+    [enabled, loadAvailability]
   );
 
   const loadServices = useCallback(
@@ -388,7 +304,7 @@ export function useWatchlistInsights(
         }
       }
     },
-    [enabled],
+    [enabled]
   );
 
   useEffect(() => {
@@ -421,7 +337,7 @@ export function useWatchlistInsights(
 
   const activeServices = useMemo(
     () => services.filter((service) => service.active),
-    [services],
+    [services]
   );
 
   const activeServiceCodes = useMemo(() => {
@@ -454,7 +370,7 @@ export function useWatchlistInsights(
         }
       }
       const providers = Array.from(deduped.values()).filter((provider) =>
-        activeServiceCodes.has(provider.code),
+        activeServiceCodes.has(provider.code)
       );
       if (!providers.length) {
         continue;
@@ -474,17 +390,17 @@ export function useWatchlistInsights(
 
   const nowStreaming = useMemo(
     () => availableForYou.slice(0, maxStreamingItems),
-    [availableForYou, maxStreamingItems],
+    [availableForYou, maxStreamingItems]
   );
 
   const watchingCount = useMemo(
     () => watchlist.filter((item) => item.status === "watching").length,
-    [watchlist],
+    [watchlist]
   );
 
   const finishedCount = useMemo(
     () => watchlist.filter((item) => item.status === "finished").length,
-    [watchlist],
+    [watchlist]
   );
 
   const stats = useMemo<StatSummary[]>(
@@ -529,12 +445,12 @@ export function useWatchlistInsights(
       watchlistLoading,
       watchingCount,
       availabilityLoading,
-    ],
+    ]
   );
 
   const availableSectionLoading = useMemo(
     () => watchlistLoading || servicesLoading || availabilityLoading,
-    [availabilityLoading, servicesLoading, watchlistLoading],
+    [availabilityLoading, servicesLoading, watchlistLoading]
   );
 
   const sortedServices = useMemo(() => {
