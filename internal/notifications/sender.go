@@ -34,7 +34,7 @@ type EmailBody struct {
 
 const (
 	DefaultBaseURL       = "https://api.postmarkapp.com/email"
-	DefaultFromEmail     = "contact@watchlistnotify.com"
+	DefaultFromEmail     = "alerts@watchlistnotify.com"
 	DefaultMessageStream = "outbound"
 )
 

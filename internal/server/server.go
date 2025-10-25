@@ -24,7 +24,7 @@ type Server struct {
 
 const (
 	defaultPort   = 8080
-	fromEmail     = "contact@watchlistnotify.com"
+	fromEmail     = "alerts@watchlistnotify.com"
 	messageStream = "outbound"
 )
 
