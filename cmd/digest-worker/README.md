@@ -1,60 +1,59 @@
 # Digest Worker Service
 
-A scheduled Cloud Run service that sends personalized watchlist digest emails to users.
+A scheduled Cloud Run Job that sends personalized watchlist digest emails to users.
 
 ## Quick Start
 
 ### Deploy Worker
 
 ```bash
-# Deploy worker to Cloud Run
-./scripts/release-worker.sh
+# Deploy worker as Cloud Run Job (with env vars from cloudrun.env)
+./scripts/release-worker.sh --env-file cloudrun.env
 
 # Or with Cloud Build
-./scripts/release-worker.sh --cloud-build
-```
-
-### Set Environment Variables
-
-```bash
-gcloud run services update digest-worker \
-  --region us-east1 \
-  --set-env-vars "MONGODB_URI=mongodb+srv://...,POSTMARK_SERVER_TOKEN=..."
+./scripts/release-worker.sh --cloud-build --env-file cloudrun.env
 ```
 
 ### Create Scheduler Job (First Time Only)
 
 ```bash
-# Get worker URL
-WORKER_URL=$(gcloud run services describe digest-worker --region us-east1 --format 'value(status.url)')
+# Get project details
+PROJECT_ID="watchlist-notify-470822"
+REGION="us-east1"
 
 # Create service account
-gcloud iam service-accounts create digest-scheduler
+gcloud iam service-accounts create digest-scheduler \
+  --display-name "Digest Worker Scheduler"
 
 # Grant invoke permission
-gcloud run services add-iam-policy-binding digest-worker \
-  --region us-east1 \
-  --member "serviceAccount:digest-scheduler@watchlist-notify-470822.iam.gserviceaccount.com" \
+gcloud run jobs add-iam-policy-binding digest-worker \
+  --region ${REGION} \
+  --member "serviceAccount:digest-scheduler@${PROJECT_ID}.iam.gserviceaccount.com" \
   --role "roles/run.invoker"
 
 # Create scheduler job (runs every hour)
 gcloud scheduler jobs create http digest-worker-hourly \
-  --location us-east1 \
+  --location ${REGION} \
   --schedule "0 * * * *" \
-  --uri "${WORKER_URL}" \
+  --uri "https://${REGION}-run.googleapis.com/apis/run.googleapis.com/v1/namespaces/${PROJECT_ID}/jobs/digest-worker:run" \
   --http-method POST \
-  --oidc-service-account-email "digest-scheduler@watchlist-notify-470822.iam.gserviceaccount.com" \
-  --oidc-token-audience "${WORKER_URL}"
+  --oauth-service-account-email "digest-scheduler@${PROJECT_ID}.iam.gserviceaccount.com" \
+  --description "Runs digest email worker every hour"
 ```
 
 ### Manual Test
 
 ```bash
-# Trigger scheduler manually
-gcloud scheduler jobs run digest-worker-hourly --location us-east1
+# Execute job manually
+gcloud run jobs execute digest-worker --region us-east1
 
 # View logs
-gcloud run logs read digest-worker --region us-east1 --limit 50
+gcloud logging read "resource.type=cloud_run_job AND resource.labels.job_name=digest-worker" \
+  --limit 50 \
+  --format "table(timestamp,severity,textPayload)"
+
+# Trigger via scheduler
+gcloud scheduler jobs run digest-worker-hourly --location us-east1
 ```
 
 ## How It Works

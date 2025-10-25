@@ -185,50 +185,45 @@ fi
 
 # --- Deploy -----------------------------------------------------------------
 if [[ ${DO_DEPLOY} -eq 1 ]]; then
-  log "Deploying worker to Cloud Run..."
+  log "Deploying worker to Cloud Run Jobs..."
   
-  # Check if service exists
-  if gcloud run services describe "${WORKER_SERVICE}" --region "${REGION}" --project "${PROJECT_ID}" &>/dev/null; then
-    log "Updating existing service..."
+  # Check if job exists
+  if gcloud run jobs describe "${WORKER_SERVICE}" --region "${REGION}" --project "${PROJECT_ID}" &>/dev/null 2>&1; then
+    log "Updating existing job..."
     if [[ ${DRY_RUN} -eq 0 ]]; then
-      CMD=(gcloud run deploy "${WORKER_SERVICE}" \
+      CMD=(gcloud run jobs update "${WORKER_SERVICE}" \
         --image "${FULL_IMAGE}" \
         --region "${REGION}" \
         --project "${PROJECT_ID}" \
-        --platform managed \
-        --quiet)
+        --max-retries 1 \
+        --task-timeout 540s)
       if [[ ${#SET_ENV_ARGS[@]} -gt 0 ]]; then
         CMD+=("${SET_ENV_ARGS[@]}")
       fi
       "${CMD[@]}"
     else
-      log "[DRY RUN] Would update service ${WORKER_SERVICE} with image ${FULL_IMAGE}"
+      log "[DRY RUN] Would update job ${WORKER_SERVICE} with image ${FULL_IMAGE}"
       if [[ ${#SET_ENV_ARGS[@]} -gt 0 ]]; then
         log "[DRY RUN] Would set env vars: ${MERGED_ENV}"
       fi
     fi
   else
-    log "Creating new service..."
+    log "Creating new job..."
     
     if [[ ${DRY_RUN} -eq 0 ]]; then
-      CMD=(gcloud run deploy "${WORKER_SERVICE}" \
+      CMD=(gcloud run jobs create "${WORKER_SERVICE}" \
         --image "${FULL_IMAGE}" \
         --region "${REGION}" \
         --project "${PROJECT_ID}" \
-        --platform managed \
-        --no-allow-unauthenticated \
-        --memory 512Mi \
-        --timeout 540s \
-        --max-instances 1 \
-        --concurrency 1 \
-        --no-cpu-throttling \
-        --quiet)
+        --max-retries 1 \
+        --task-timeout 540s \
+        --memory 512Mi)
       if [[ ${#SET_ENV_ARGS[@]} -gt 0 ]]; then
         CMD+=("${SET_ENV_ARGS[@]}")
       fi
       "${CMD[@]}"
       
-      log "Service created. Next steps:"
+      log "Job created. Next steps:"
       if [[ ${#SET_ENV_ARGS[@]} -eq 0 ]]; then
         warn "NOTE: No environment variables were set. You may need to set:"
         warn "  - MONGODB_URI"
@@ -237,18 +232,18 @@ if [[ ${DO_DEPLOY} -eq 1 ]]; then
       fi
       log "Create Cloud Scheduler job (see docs/DIGEST_WORKER_DEPLOYMENT.md)"
     else
-      log "[DRY RUN] Would create new service ${WORKER_SERVICE}"
+      log "[DRY RUN] Would create new job ${WORKER_SERVICE}"
       if [[ ${#SET_ENV_ARGS[@]} -gt 0 ]]; then
         log "[DRY RUN] Would set env vars: ${MERGED_ENV}"
       fi
     fi
   fi
   
-  color green "✓ Worker deployed successfully"
+  color green "✓ Worker job deployed successfully"
 else
   log "Skipping deployment (--no-deploy)"
 fi
 
 color green "✓ Worker release complete!"
 log "Image: ${FULL_IMAGE}"
-log "Service: ${WORKER_SERVICE}"
+log "Job: ${WORKER_SERVICE}"

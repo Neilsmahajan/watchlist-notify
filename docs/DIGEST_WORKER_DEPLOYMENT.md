@@ -2,12 +2,13 @@
 
 ## Architecture Overview
 
-The digest worker is a **separate Cloud Run service** that runs on a schedule via **Cloud Scheduler**.
+The digest worker is a **Cloud Run Job** that runs on a schedule via **Cloud Scheduler**.
 
 ```
 ┌─────────────────┐      Triggers every hour      ┌──────────────────┐
-│ Cloud Scheduler │ ─────────────────────────────> │ Cloud Run Worker │
-└─────────────────┘                                └──────────────────┘
+│ Cloud Scheduler │ ─────────────────────────────> │ Cloud Run Job    │
+└─────────────────┘                                │ (digest-worker)  │
+                                                   └──────────────────┘
                                                             │
                                                             │ Queries users
                                                             │ Sends emails
@@ -16,6 +17,88 @@ The digest worker is a **separate Cloud Run service** that runs on a schedule vi
                                                     │   MongoDB    │
                                                     │   Postmark   │
                                                     └──────────────┘
+```
+
+**Cloud Run Jobs vs Services:**
+
+- **Jobs** = Batch workloads that run to completion and exit (our digest worker)
+- **Services** = Always-on HTTP servers that handle requests (our API)
+
+## Deployment Steps
+
+### 1. Build and Push Worker Image
+
+```bash
+# Set your project variables (or source from .deploy.env)
+export PROJECT_ID="watchlist-notify-470822"
+export REGION="us-east1"
+export REPO="watchlistnotify"
+
+# Build the worker image
+docker buildx build --platform linux/amd64 \
+  -f Dockerfile.worker \
+  -t ${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO}/digest-worker:latest \
+  .
+
+# Push to Artifact Registry
+docker push ${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO}/digest-worker:latest
+```
+
+### 2. Deploy Worker as Cloud Run Job
+
+```bash
+# Deploy the worker job (runs to completion, doesn't listen on HTTP)
+gcloud run jobs create digest-worker \
+  --image ${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO}/digest-worker:latest \
+  --region ${REGION} \
+  --set-env-vars "MONGODB_URI=${MONGODB_URI},POSTMARK_SERVER_TOKEN=${POSTMARK_SERVER_TOKEN},POSTMARK_BASE_URL=https://api.postmarkapp.com/email" \
+  --memory 512Mi \
+  --task-timeout 540s \
+  --max-retries 1
+```
+
+**Important flags explained:**
+
+- `--task-timeout 540s`: 9 minutes max per execution
+- `--max-retries 1`: Retry once if job fails
+- `--memory 512Mi`: Allocate 512MB RAM
+
+### 3. Create Cloud Scheduler Job
+
+```bash
+# Create a service account for the scheduler (if not exists)
+gcloud iam service-accounts create digest-scheduler \
+  --display-name "Digest Worker Scheduler"
+
+# Grant the service account permission to execute Cloud Run Jobs
+gcloud run jobs add-iam-policy-binding digest-worker \
+  --region ${REGION} \
+  --member "serviceAccount:digest-scheduler@${PROJECT_ID}.iam.gserviceaccount.com" \
+  --role "roles/run.invoker"
+
+# Create the scheduler job (runs every hour at :00)
+gcloud scheduler jobs create http digest-worker-hourly \
+  --location ${REGION} \
+  --schedule "0 * * * *" \
+  --uri "https://${REGION}-run.googleapis.com/apis/run.googleapis.com/v1/namespaces/${PROJECT_ID}/jobs/digest-worker:run" \
+  --http-method POST \
+  --oauth-service-account-email "digest-scheduler@${PROJECT_ID}.iam.gserviceaccount.com" \
+  --description "Runs digest email worker every hour"
+```
+
+### 4. Test the Deployment
+
+```bash
+# Manually execute the job
+gcloud run jobs execute digest-worker --region ${REGION}
+
+# View execution logs
+gcloud logging read "resource.type=cloud_run_job AND resource.labels.job_name=digest-worker" \
+  --limit 50 \
+  --format "table(timestamp,severity,textPayload)"
+
+# Or manually trigger the scheduler job
+gcloud scheduler jobs run digest-worker-hourly --location ${REGION}
 ```
 
 ## Deployment Steps
