@@ -96,3 +96,40 @@ func (s *service) UpdateUserPreferences(ctx context.Context, userID primitive.Ob
 	}
 	return &updated, nil
 }
+
+func (s *service) GetUsersForDigest(ctx context.Context, now time.Time) ([]*models.User, error) {
+	collection := s.db.Database(databaseName).Collection("users")
+
+	filter := bson.M{
+		"preferences.digest_consent": true,
+		"preferences.digest.enabled": true,
+		"$or": []bson.M{
+			{"preferences.digest.next_scheduled_at": bson.M{"$lte": now}},
+			{"preferences.digest.next_scheduled_at": bson.M{"$exists": false}},
+		},
+	}
+
+	cursor, err := collection.Find(ctx, filter)
+	if err != nil {
+		return nil, err
+	}
+	defer cursor.Close(ctx)
+
+	var users []*models.User
+	if err := cursor.All(ctx, &users); err != nil {
+		return nil, err
+	}
+	return users, nil
+}
+
+func (s *service) UpdateDigestTimestamps(ctx context.Context, userID primitive.ObjectID, lastSent, nextScheduled time.Time) error {
+	collection := s.db.Database(databaseName).Collection("users")
+	_, err := collection.UpdateOne(ctx, bson.M{"_id": userID}, bson.M{
+		"$set": bson.M{
+			"preferences.digest.last_sent_at":      lastSent,
+			"preferences.digest.next_scheduled_at": nextScheduled,
+			"updated_at":                           time.Now(),
+		},
+	})
+	return err
+}

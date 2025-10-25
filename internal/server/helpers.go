@@ -3,6 +3,7 @@ package server
 import (
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/neilsmahajan/watchlist-notify/internal/models"
@@ -109,5 +110,24 @@ func validWatchlistType(t string) bool {
 		return true
 	default:
 		return false
+	}
+}
+
+func calculateNextDigestTime(interval int, unit string, lastSent *time.Time) time.Time {
+	base := time.Now()
+	if lastSent != nil && !lastSent.IsZero() {
+		base = *lastSent
+	}
+
+	switch unit {
+	case "days":
+		return base.AddDate(0, 0, interval)
+	case "weeks":
+		return base.AddDate(0, 0, interval*7)
+	case "months":
+		return base.AddDate(0, interval, 0)
+	default:
+		// Fallback to days if unit is unrecognized
+		return base.AddDate(0, 0, 7)
 	}
 }

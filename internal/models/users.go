@@ -14,10 +14,11 @@ type ServiceSubscription struct {
 }
 
 type DigestSettings struct {
-	Enabled      bool       `bson:"enabled" json:"enabled"`
-	Interval     int        `bson:"interval" json:"interval"`           // >=1
-	IntervalUnit string     `bson:"interval_unit" json:"interval_unit"` // e.g. "days", "weeks", "months"
-	LastSentAt   *time.Time `bson:"last_sent_at,omitempty" json:"last_sent_at,omitempty"`
+	Enabled         bool       `bson:"enabled" json:"enabled"`
+	Interval        int        `bson:"interval" json:"interval"`           // >=1
+	IntervalUnit    string     `bson:"interval_unit" json:"interval_unit"` // e.g. "days", "weeks", "months"
+	LastSentAt      *time.Time `bson:"last_sent_at,omitempty" json:"last_sent_at,omitempty"`
+	NextScheduledAt *time.Time `bson:"next_scheduled_at,omitempty" json:"next_scheduled_at,omitempty"`
 }
 
 type Preferences struct {
