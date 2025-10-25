@@ -2,9 +2,7 @@
 
 Track your personal movie & TV show watchlist across streaming platforms and automatically get email alerts when titles become available on the services you already subscribe to.
 
-> Status: Active development. Implementing Go backend (Gin + MongoDB + Auth0 authentication) and a Next.js frontend with modern UI. TMDb integration (search + watch providers) implemented. Expect breaking changes until v0.1.0.
->
-> Email notifications are still in progress: the backend plumbing is being wired up, but the delivery provider and template system have not been finalized yet.
+> Status: Beta (v0.9). Core features complete with Go backend (Gin + MongoDB + Auth0), Next.js frontend, TMDb integration, and scheduled digest email notifications via Postmark. Production-ready and deployed on Cloud Run + Vercel.
 
 ## Table of Contents
 
@@ -21,10 +19,11 @@ Track your personal movie & TV show watchlist across streaming platforms and aut
 11. Testing & Tooling
 12. Make Targets Cheat Sheet
 13. Deployment (Current & Planned)
-14. Roadmap / Milestones
-15. Contributing
-16. Maintainer & Contact
-17. License
+14. Deployment
+15. Roadmap / Milestones
+16. Contributing
+17. Maintainer & Contact
+18. License
 
 ## 1. Vision & Features
 
@@ -32,77 +31,96 @@ Problem: You maintain a list of movies / shows you want to watch, but you rarely
 
 Solution: Centralize your watchlist + subscription list and periodically notify you (email) when new items become streamable—reducing time spent searching and avoiding rental duplicates.
 
-Core (in-progress):
+Core Features (Implemented):
 
-- Auth0 authentication (Google OAuth + username/password login)
-- Modern responsive UI with navigation, dashboard, and user management
-- Manage user profile (email, display name, picture)
-- Persist user watchlist items (title, type, year, external IDs)
-- Persist user streaming service subscriptions (Netflix, Max, Prime Video, etc.)
-- TMDb integration for content search and watch provider data
-- Display availability of watchlist items across the user's streaming subscriptions in the frontend
-- Periodic availability scan (scheduled job) -> email digest
-- User preferences: notification frequency, primary email
+- ✅ Auth0 authentication (Google OAuth + username/password login)
+- ✅ Modern responsive UI with navigation, dashboard, and user management
+- ✅ User profile management (email, display name, picture)
+- ✅ Watchlist management (add, update, delete items with TMDb metadata)
+- ✅ Streaming service subscriptions (Netflix, Max, Prime Video, Apple TV+, etc.)
+- ✅ TMDb integration for content search and watch provider data
+- ✅ Real-time availability checking across user's subscribed services
+- ✅ **Scheduled digest email notifications** (configurable frequency: daily, weekly, monthly)
+- ✅ **Notification preferences** with customizable intervals and email selection
+- ✅ **Test email functionality** to preview digest emails
+- ✅ Redis caching for TMDb API responses (Upstash)
+- ✅ Production deployment on Cloud Run (API) and Vercel (Frontend)
 
-Future / Stretch:
+Future Enhancements:
 
-- Region-specific availability (country codes)
-- Multiple notification channels (push / SMS)
+- Region-specific availability (international support)
+- Multiple notification channels (push notifications, SMS)
 - Per-item instant alert toggle
-- Browser extension for 1-click adding
-- Public shareable lists / collaborative lists
-- AI-based alternative title matching / fuzzy matching
+- Browser extension for 1-click adding from streaming sites
+- Public shareable lists / collaborative watchlists
+- AI-based content recommendations
+- Advanced filtering and sorting options
 
 ## 2. High-Level Architecture
 
+
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                        Cloudflare (DNS/Proxy/CDN)            │
-│  watchlistnotify.com  (A / CNAME -> Vercel + future API)     │
+│ Cloudflare (DNS/Proxy/CDN)                                  │
+│ watchlistnotify.com (A / CNAME -> Vercel + Cloud Run API)   │
 └─────────────────────────────────────────────────────────────┘
-			  │
-			  │ HTTPS
-			  ▼
-	 ┌────────────────────┐          ┌──────────────────────────┐
-	 │  Frontend (Vercel) │  API     │      Backend API (Go)    │
-	 │  Next.js App Router│ <──────> │ Gin REST + Auth + Jobs   │
-	 └──────────┬─────────┘          └──────────┬──────────────┘
-			  │                               │
-			  │ (public assets, auth start)   │ MongoDB Atlas (Users, Watchlist, etc.)
-			  │                               ▼
-			  │                       ┌────────────────┐
-			  │                       │ MongoDB Atlas   │
-			  │                       └────────────────┘
-			  │                               │
-			  │                               ▼ (planned)
-			  │                     Availability Providers (APIs)
-			  │                     • TMDb (search + watch/providers) [planned next]
-			  │                               │
-			  │                               ▼
-			  │                        Email Provider (planned)
-			  ▼
-		  User Browser
+                │
+┌───────────────┴────────────────┐
+│                                │
+▼                                ▼
+┌──────────────────┐   ┌──────────────────┐
+│ Vercel (Next.js) │   │ Cloud Run (API)  │
+│ Frontend         │◄─►│ Go Backend       │
+└──────────────────┘   └────┬─────────────┘
+                            │
+    ┌───────────────────────┼───────────────────────┐
+    │                       │                       │
+    ▼                       ▼                       ▼
+┌──────────────────┐   ┌──────────────┐   ┌────────────────────┐
+│ MongoDB Atlas    │   │Upstash Redis │   │ Cloud Run Job      │
+│ (Database)       │   │ (Cache)      │   │ (Digest Worker)    │
+└──────────────────┘   └──────────────┘   └─────────┬──────────┘
+                           │
+                      Triggered by
+                           │
+                           ▼
+                      ┌────────────────────┐
+                      │ Cloud Scheduler    │
+                      │ (Hourly Cron)      │
+                      └─────────┬──────────┘
+                                │
+                          Sends emails via
+                                ▼
+                      ┌────────────────────┐
+                      │ Postmark API       │
+                      │ (Email Delivery)   │
+                      └────────────────────┘
 ```
 
 Current Hosting:
 
-- Frontend deployed on Vercel, served at https://watchlistnotify.com via Cloudflare DNS / proxy.
-- Domain & TLS termination proxied by Cloudflare (Vercel also manages certs for the connected domain; Cloudflare in proxy mode supplies edge caching & security).
-- Backend (Go API) currently local / in development; will receive a subdomain (e.g. `api.watchlistnotify.com`) or path-based routing through Cloudflare once deployed.
-- Database: MongoDB Atlas (multi-region/backups). Local Docker can be used for offline development.
-- Cache: Upstash Redis (managed) stores TMDb search and availability responses; the backend gracefully falls back to a no-op cache if Redis is unavailable.
+- **Frontend**: Deployed on Vercel at https://watchlistnotify.com via Cloudflare DNS/proxy
+- **API**: Deployed on Google Cloud Run at `api.watchlistnotify.com` (or via subdomain)
+- **Digest Worker**: Cloud Run Job triggered hourly by Cloud Scheduler
+- **Database**: MongoDB Atlas (multi-region with automated backups)
+- **Cache**: Upstash Redis (managed) for TMDb API responses with graceful fallback
+- **Email**: Postmark for transactional emails and digest notifications
+- **Domain & TLS**: Managed by Cloudflare with edge caching and DDoS protection
 
 ## 3. Tech Stack
 
 Backend:
 
-- Go (Gin web framework)
+- Go 1.25+ (Gin web framework)
 - MongoDB (official Go driver)
-- Redis (Upstash managed) cache via go-redis client
-- Auth0 (authentication with multiple providers)
-- JWT (HMAC) stored in HttpOnly cookie
-- MongoDB Atlas for dev/prod (preferred) — Docker Compose optional for local DB
-- TMDb API (search + watch providers for availability)
+- Redis (Upstash managed) via go-redis client with graceful fallback
+- Auth0 (multi-provider authentication)
+- JWT (HMAC) stored in HttpOnly cookies
+- MongoDB Atlas for database (local Docker optional)
+- TMDb API (search + watch providers)
+- Postmark API (email delivery)
+- Cloud Run (API deployment)
+- Cloud Run Jobs + Cloud Scheduler (digest worker)
 
 Frontend:
 
@@ -113,12 +131,16 @@ Frontend:
 - TypeScript with ESLint configuration
 - Optimized images with Next.js Image component
 
-Infrastructure (current + planned):
+Infrastructure:
 
-- Upstash Redis (managed cache for TMDb search/providers)
-- Reverse proxy (e.g. Caddy / Nginx / Cloudflare)
-- Background worker (Go) or cron (Cloud Scheduler / GitHub Actions)
-- Email provider (e.g. SendGrid / Postmark / AWS SES)
+- Google Cloud Run (API service deployment)
+- Google Cloud Run Jobs (digest worker)
+- Google Cloud Scheduler (hourly digest trigger)
+- Google Artifact Registry (container images)
+- Upstash Redis (managed cache)
+- Postmark (email delivery service)
+- Vercel (frontend hosting)
+- Cloudflare (DNS, CDN, DDoS protection)
 
 ## 4. Local Development
 
@@ -212,9 +234,10 @@ TMDB_API_KEY=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 # TMDB_API_BASE=https://api.themoviedb.org/3
 # TMDB_REGION=US
 
-# Email (planned)
-EMAIL_FROM=watchlist@watchlistnotify.com
-EMAIL_PROVIDER_API_KEY=xxx
+# Email (production)
+POSTMARK_SERVER_TOKEN=your-postmark-server-token
+POSTMARK_BASE_URL=https://api.postmarkapp.com/email
+EMAIL_FROM=alerts@watchlistnotify.com
 ```
 
 Frontend environment variables (create `frontend/.env.local`):
@@ -258,84 +281,138 @@ Security Notes:
 
 ## 7. API
 
-Implemented:
+### Authentication Endpoints
 
-- `GET /health` – service health
-- `GET /api/me` – authenticated user document
-- `PATCH /api/me/preferences` – update user preferences (email, name, notification prefs)
-- `GET /api/me/services` – list user streaming services
-- `PATCH /api/me/services` – update user streaming services
-- `POST /api/watchlist` – add item
-- `GET /api/watchlist` – list items
-- `DELETE /api/watchlist/:id`
-- `PUT /api/watchlist/:id` – update metadata / status
-- `GET /api/search` – search titles via TMDb
-- `GET /api/availability` – get availability data for watchlist items
+- `GET /health` – Service health check
+- `POST /auth/login` – Initiate Auth0 login flow
+- `POST /auth/callback` – Handle Auth0 callback and issue JWT
 
-Near-term planned:
+### User Endpoints
 
-- `GET /api/availability/:id?type=movie|tv` – get provider availability for a specific title
-- `GET /api/me/availability` – aggregate availability for the user's entire watchlist (paginated)
-- Background job endpoints for availability scanning
-- Email notification preferences and digest endpoints
+- `GET /api/me` – Get authenticated user profile
+- `PATCH /api/me/preferences` – Update user preferences (email, name, digest settings)
+- `GET /api/me/services` – List user's streaming service subscriptions
+- `PATCH /api/me/services` – Update streaming service subscriptions
+- `POST /api/me/notifications/test` – Send test digest email
 
-Error Format (current):
+### Watchlist Endpoints
+
+- `POST /api/watchlist` – Add item to watchlist
+- `GET /api/watchlist` – List user's watchlist items
+- `DELETE /api/watchlist/:id` – Remove item from watchlist
+- `PUT /api/watchlist/:id` – Update item metadata/status
+
+### Content Discovery
+
+- `GET /api/search` – Search movies/TV shows via TMDb
+- `GET /api/availability/:id` – Get streaming availability for specific title
+- `GET /api/availability` – Batch availability check for watchlist items
+
+Error Format:
 
 ```json
-{ "error": "message" }
+{ "error": "Descriptive error message" }
 ```
-
-Will evolve to structured error codes.
 
 ## 8. Data Model (current minimal)
 
-`User` (Mongo `users` collection):
+## 8. Data Model
+
+### User Collection (`users`)
 
 ```json
 {
   "_id": "ObjectId",
-  "auth0_id": "string",
-  "email": "string",
-  "name": "string",
-  "picture": "url",
-  "created_at": "ISO8601",
-  "updated_at": "ISO8601"
+  "auth0_id": "auth0|123456",
+  "email": "user@example.com",
+  "name": "John Doe",
+  "picture": "https://...",
+  "notification_email": "custom@example.com",
+  "services": ["netflix", "hulu", "prime_video"],
+  "digest_settings": {
+    "enabled": true,
+    "interval": 7,
+    "interval_unit": "days",
+    "last_sent_at": "2025-01-15T10:00:00Z",
+    "next_scheduled_at": "2025-01-22T10:00:00Z"
+  },
+  "digest_consent": true,
+  "created_at": "2025-01-01T12:00:00Z",
+  "updated_at": "2025-01-15T10:00:00Z"
 }
 ```
 
-`WatchlistItem` (Mongo `watchlist_items` collection):
+### Watchlist Item Collection (`watchlist_items`)
 
 ```json
 {
   "_id": "ObjectId",
   "user_id": "ObjectId",
-  "tmdb_id": "number",
-  "title": "string",
-  "type": "movie|tv",
-  "year": "number",
-  "poster_path": "string",
-  "added_at": "ISO8601",
-  "status": "want_to_watch|watching|watched"
+  "tmdb_id": 12345,
+  "title": "The Matrix",
+  "type": "movie",
+  "year": 1999,
+  "poster_path": "/poster.jpg",
+  "added_at": "2025-01-10T15:30:00Z",
+  "status": "want_to_watch"
 }
 ```
 
-Planned collections: `services`, `availability_cache`, `jobs`.
+**Status Values**: `want_to_watch`, `watching`, `watched`
 
-## 9. Background Jobs (planned)
+## 9. Email Notifications
 
-- Nightly availability scan per user service set
-- Deduplicate API lookups by batching unique title/provider queries
-- Store availability snapshot to avoid redundant external calls
-- Warm Redis cache with popular searches / upcoming releases to reduce cold-start latency
+### Architecture
 
-## 10. Email Delivery (planned)
+The digest email system uses a Cloud Run Job triggered hourly by Cloud Scheduler:
 
-- Digest summarizing new items available since last notification
-- Optional per-item immediate alert
-- Template engine (Go text/template or MJML via build)
-- Delivery provider TBD (evaluating Postmark, Resend, and AWS SES)
+1. **Cloud Scheduler** triggers the digest worker every hour
+2. **Digest Worker** (Cloud Run Job) executes:
+   - Queries users with `next_scheduled_at <= now` and `digest_consent = true`
+   - For each eligible user:
+     - Fetches their watchlist items
+     - Checks for newly available content on their subscribed services
+     - Generates personalized HTML email
+     - Sends via Postmark API
+     - Updates `last_sent_at` and recalculates `next_scheduled_at`
 
-## 11. Testing & Tooling
+### User Preferences
+
+Users can configure:
+
+- **Email address**: Use Auth0 account email or custom email
+- **Digest frequency**: Every X days/weeks/months (e.g., every 7 days, every 2 weeks)
+- **Consent**: Enable/disable digest emails
+- **Test email**: Preview digest without changing schedule
+
+### Email Content
+
+Digest emails include:
+
+- Newly available items with streaming service badges
+- Watchlist summary (total items, available count, watching count)
+- Call-to-action button to view full watchlist
+- Professional HTML template with responsive design
+- Unsubscribe link in footer
+
+### Deployment
+
+The digest worker is deployed as a Cloud Run Job:
+
+```bash
+# Deploy worker
+./scripts/release-worker.sh --env-file cloudrun.env
+
+# Manual execution (testing)
+gcloud run jobs execute digest-worker --region us-east1
+
+# View logs
+gcloud logging read "resource.type=cloud_run_job AND resource.labels.job_name=digest-worker" --limit 50
+```
+
+See `cmd/digest-worker/README.md` for detailed deployment and monitoring instructions.
+
+## 10. Testing & Tooling
 
 Run all tests:
 
@@ -358,7 +435,7 @@ API requests (Bruno):
 - Auth is configured at the `API` folder level using `{{token}}`. Get a token via Auth0 login flow or copy from browser dev tools after authentication.
 - All request URLs use `{{base_url}}`; path params can be set as variables (e.g., `{{id}}`).
 
-## 12. Make Targets Cheat Sheet
+## 11. Make Targets Cheat Sheet
 
 | Target                 | Description                             |
 | ---------------------- | --------------------------------------- |
@@ -376,15 +453,102 @@ API requests (Bruno):
 | make docker-push       | push image to Artifact Registry         |
 | make docker-build-push | build and push in one step              |
 | make run-container     | run the image locally                   |
-| make deploy            | deploy to Cloud Run                     |
+| make deploy            | deploy API to Cloud Run                 |
+| make deploy-worker     | deploy digest worker to Cloud Run Job   |
 
 Note: The docker targets are optional if you configure MONGODB_URI to use MongoDB Atlas.
 
-## 13. Deployment (Current & Planned)
+## 12. Deployment
 
-Current State:
+### Frontend (Vercel)
 
-- Frontend: Deployed on Vercel (production) mapped to `watchlistnotify.com` through Cloudflare (CNAME flattening/ALIAS depending on config). Preview deployments auto-generated by Vercel.
+The Next.js frontend is deployed on Vercel with automatic deployments:
+
+- **Production**: https://watchlistnotify.com (auto-deploys from `main` branch)
+- **Preview**: Automatic preview deployments for pull requests
+- **Domain**: Managed via Cloudflare DNS with CNAME to Vercel
+
+Configuration:
+
+- Environment variables set in Vercel dashboard
+- Build command: `cd frontend && pnpm install && pnpm build`
+- Output directory: `frontend/.next`
+
+### Backend API (Cloud Run)
+
+The Go API is deployed to Google Cloud Run:
+
+```bash
+# Build and deploy API
+./scripts/release.sh --env-file cloudrun.env
+
+# Or with Cloud Build
+./scripts/release.sh --cloud-build --env-file cloudrun.env
+```
+
+**Environment variables** are loaded from `cloudrun.env` (not committed to git).
+
+**Deployment details**:
+
+- Region: `us-east1`
+- Container: Built with Docker, pushed to Artifact Registry
+- Scaling: Min 0, Max 10 instances
+- Memory: 512Mi, CPU: 1
+- Authentication: Public endpoints + JWT-protected routes
+
+### Digest Worker (Cloud Run Job)
+
+The digest email worker runs as a Cloud Run Job:
+
+```bash
+# Deploy worker
+./scripts/release-worker.sh --env-file cloudrun.env
+
+# Create Cloud Scheduler job (one-time setup)
+gcloud scheduler jobs create http digest-worker-hourly \
+  --location us-east1 \
+  --schedule "0 * * * *" \
+  --uri "https://us-east1-run.googleapis.com/apis/run.googleapis.com/v1/namespaces/PROJECT_ID/jobs/digest-worker:run" \
+  --http-method POST \
+  --oauth-service-account-email "digest-scheduler@PROJECT_ID.iam.gserviceaccount.com"
+```
+
+**Monitoring**:
+
+```bash
+# View job executions
+gcloud run jobs executions list --job digest-worker --region us-east1
+
+# View logs
+gcloud logging read "resource.type=cloud_run_job AND resource.labels.job_name=digest-worker" --limit 50
+
+# Manual execution (testing)
+gcloud run jobs execute digest-worker --region us-east1
+```
+
+See `cmd/digest-worker/README.md` for detailed deployment guide.
+
+### Infrastructure Components
+
+- **MongoDB Atlas**: Managed database with automated backups
+- **Upstash Redis**: Managed cache for TMDb API responses
+- **Postmark**: Email delivery service
+- **Cloudflare**: DNS, CDN, and DDoS protection
+- **Google Artifact Registry**: Container image storage
+
+### Key Files
+
+- `cmd/api/main.go` - API server entry point
+- `cmd/digest-worker/main.go` - Digest worker entry point
+- `internal/server/` - HTTP handlers and routing
+- `internal/database/` - MongoDB repositories
+- `internal/digest/` - Email generation logic
+- `internal/notifications/` - Postmark integration
+- `scripts/release.sh` - API deployment script
+- `scripts/release-worker.sh` - Worker deployment script
+- `Dockerfile` - API container image
+- `Dockerfile.worker` - Worker container image
+- `frontend/` - Next.js application
 - DNS / CDN / Security: Cloudflare manages DNS records (`A`/`CNAME`) and provides caching + WAF layer. Keep CORS origin list tight (production: `https://watchlistnotify.com`).
 - Backend: Not yet deployed; running locally during development. All auth flows redirect to local backend until production API domain exists.
 - Database: MongoDB Atlas for both dev and prod (recommended). Optional local Docker for offline development.
@@ -435,29 +599,60 @@ Deployment Checklist (API – future):
 6. Monitor logs & metrics for 24h
 7. Prime cache and execute an internal notification dry run once email delivery ships
 
-## 14. Roadmap / Milestones
+## 13. Roadmap / Milestones
 
-- [x] Auth0 integration with modern UI
-- [x] Basic watchlist CRUD functionality
-- [x] TMDb integration for search and availability
-- [x] Professional frontend with navigation, dashboard, and user management
-- [ ] v0.1.0 MVP: Email notifications + availability scanning job
-- [ ] v0.2.0 Enhanced availability integration (region support + more providers)
-- [ ] v0.3.0 Digest email + advanced preferences
-- [ ] v0.4.0 Multiple notification channels + browser extension
-- [ ] v0.5.0 Public beta (stability + docs)
+**Completed (v0.9 - Beta)**:
 
-## 15. Contributing
+- ✅ Auth0 integration with Google OAuth and username/password login
+- ✅ Modern responsive UI with navigation, dashboard, search, profile, and settings
+- ✅ Complete watchlist CRUD functionality with TMDb metadata
+- ✅ TMDb integration for search and streaming availability
+- ✅ User profile and streaming service subscription management
+- ✅ Scheduled digest email notifications (configurable frequency)
+- ✅ Notification preferences with custom email and interval settings
+- ✅ Test email functionality
+- ✅ Production deployment (Cloud Run + Vercel)
+- ✅ Redis caching for TMDb API responses
 
-PRs welcome after public beta. Until then, issues for ideas / architecture discussion are appreciated.
+**Planned Future Enhancements**:
 
-Local Dev Tips:
+- [ ] v1.0.0: Public launch with polished onboarding flow
+- [ ] v1.1.0: Region-specific availability (international support)
+- [ ] v1.2.0: Per-item instant alerts (notify immediately when available)
+- [ ] v1.3.0: Browser extension for 1-click watchlist adding
+- [ ] v1.4.0: Public shareable lists and collaborative watchlists
+- [ ] v1.5.0: Advanced filtering, sorting, and AI-based recommendations
+- [ ] v2.0.0: Mobile apps (iOS/Android)
 
-- Use `air` for fast reload
-- Keep Mongo indexes minimal until schema stabilizes
-- Add fake data scripts (planned `cmd/seed`)
+## 14. Contributing
 
-## 16. Maintainer & Contact
+Contributions are welcome! Please open an issue first to discuss major changes.
+
+**Development Workflow**:
+
+1. Fork the repository
+2. Create a feature branch (`git checkout -b feature/amazing-feature`)
+3. Make your changes with tests
+4. Run tests (`make test`)
+5. Commit with clear messages (`git commit -m 'Add amazing feature'`)
+6. Push to your branch (`git push origin feature/amazing-feature`)
+7. Open a Pull Request
+
+**Code Guidelines**:
+
+- Follow Go best practices and conventions
+- Write tests for new features
+- Update documentation for API changes
+- Use meaningful variable and function names
+- Keep functions small and focused
+
+**Local Development**:
+
+- Use `make watch` for live reload during development
+- Test API endpoints with Bruno collection in `docs/bruno/`
+- Check logs for errors before submitting PR
+
+## 15. Maintainer & Contact
 
 Maintainer: Neil Mahajan  
 Links & Site: https://links.neilsmahajan.com  
@@ -466,7 +661,7 @@ Project Contact: contact@watchlistnotify.com
 
 Security Disclosure: Email both addresses with subject `[SECURITY] <short summary>` and allow time for remediation before public disclosure.
 
-## 17. License
+## 16. License
 
 Licensed under the MIT License. See `LICENCE` for the full text.
 
