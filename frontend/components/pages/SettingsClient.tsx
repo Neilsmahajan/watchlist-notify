@@ -590,6 +590,94 @@ export default function SettingsClient({ user }: SettingsClientProps) {
             </div>
           ) : (
             <div className="space-y-6">
+              {/* Current Preferences Summary */}
+              {userData && (
+                <div className="bg-gradient-to-br from-blue-50 to-indigo-50 rounded-lg border border-blue-200 p-5 mb-6">
+                  <h3 className="text-sm font-semibold text-gray-900 mb-3 flex items-center gap-2">
+                    <svg
+                      xmlns="http://www.w3.org/2000/svg"
+                      className="h-5 w-5 text-blue-600"
+                      viewBox="0 0 20 20"
+                      fill="currentColor"
+                    >
+                      <path
+                        fillRule="evenodd"
+                        d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z"
+                        clipRule="evenodd"
+                      />
+                    </svg>
+                    Current Notification Settings
+                  </h3>
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    <div className="bg-white rounded-md p-3 border border-blue-100">
+                      <dt className="text-xs font-medium text-gray-600 mb-1">
+                        Notification Email
+                      </dt>
+                      <dd className="text-sm font-semibold text-gray-900">
+                        {userData.preferences.use_account_email
+                          ? userData.email
+                          : userData.preferences.notify_email ||
+                            "Not configured"}
+                      </dd>
+                      <dd className="text-xs text-gray-500 mt-0.5">
+                        {userData.preferences.use_account_email
+                          ? "Using account email"
+                          : "Using custom email"}
+                      </dd>
+                    </div>
+                    <div className="bg-white rounded-md p-3 border border-blue-100">
+                      <dt className="text-xs font-medium text-gray-600 mb-1">
+                        Digest Notifications
+                      </dt>
+                      <dd className="text-sm font-semibold text-gray-900">
+                        {userData.preferences.digest.enabled ? (
+                          <span className="text-green-700">Enabled</span>
+                        ) : (
+                          <span className="text-gray-500">Disabled</span>
+                        )}
+                      </dd>
+                      {userData.preferences.digest.enabled && (
+                        <dd className="text-xs text-gray-500 mt-0.5">
+                          Every {userData.preferences.digest.interval}{" "}
+                          {userData.preferences.digest.interval_unit}
+                          {userData.preferences.digest.last_sent_at && (
+                            <>
+                              {" • Last sent "}
+                              {formatDisplayDate(
+                                userData.preferences.digest.last_sent_at,
+                              )}
+                            </>
+                          )}
+                        </dd>
+                      )}
+                    </div>
+                    <div className="bg-white rounded-md p-3 border border-blue-100">
+                      <dt className="text-xs font-medium text-gray-600 mb-1">
+                        Digest Consent
+                      </dt>
+                      <dd className="text-sm font-semibold text-gray-900">
+                        {userData.preferences.digest_consent ? (
+                          <span className="text-green-700">Granted</span>
+                        ) : (
+                          <span className="text-gray-500">Not granted</span>
+                        )}
+                      </dd>
+                    </div>
+                    <div className="bg-white rounded-md p-3 border border-blue-100">
+                      <dt className="text-xs font-medium text-gray-600 mb-1">
+                        Marketing Consent
+                      </dt>
+                      <dd className="text-sm font-semibold text-gray-900">
+                        {userData.preferences.marketing_consent ? (
+                          <span className="text-green-700">Granted</span>
+                        ) : (
+                          <span className="text-gray-500">Not granted</span>
+                        )}
+                      </dd>
+                    </div>
+                  </div>
+                </div>
+              )}
               {/* Email Configuration */}
               <div className="border-b pb-6">
                 <h3 className="text-sm font-semibold text-gray-900 mb-4">

@@ -1,6 +1,7 @@
 "use client";
 
 import Image from "next/image";
+import { useCallback, useEffect, useState } from "react";
 import { Button, EmptyState, LoadingSpinner } from "@/components/ui";
 import {
   AVAILABILITY_ACCESS_META,
@@ -10,12 +11,40 @@ import {
   useWatchlistInsights,
 } from "@/lib/hooks/useWatchlistInsights";
 import type { SessionUser } from "@/lib/auth/types";
+import { redirectToLogin } from "@/lib/auth/client";
+
+type UserPreferences = {
+  notify_email?: string;
+  use_account_email: boolean;
+  marketing_consent: boolean;
+  digest_consent: boolean;
+  digest: {
+    enabled: boolean;
+    interval: number;
+    interval_unit: "days" | "weeks" | "months";
+    last_sent_at?: string;
+    next_scheduled_at?: string;
+  };
+};
+
+type UserData = {
+  id: string;
+  email: string;
+  name: string;
+  picture: string;
+  region: string;
+  preferences: UserPreferences;
+  created_at: string;
+  updated_at: string;
+};
 
 interface ProfileClientProps {
   user: SessionUser | null;
 }
 
 export default function ProfileClient({ user }: ProfileClientProps) {
+  const [userData, setUserData] = useState<UserData | null>(null);
+  const [userLoading, setUserLoading] = useState(true);
   const {
     stats,
     watchlist,
@@ -31,6 +60,60 @@ export default function ProfileClient({ user }: ProfileClientProps) {
     refreshWatchlist,
     refreshServices,
   } = useWatchlistInsights({ enabled: Boolean(user) });
+
+  const handleUnauthorized = useCallback((response: Response) => {
+    if (response.status !== 401) {
+      return false;
+    }
+    redirectToLogin();
+    return true;
+  }, []);
+
+  const loadUserData = useCallback(
+    async (options: { signal?: AbortSignal } = {}) => {
+      const { signal } = options;
+      setUserLoading(true);
+
+      try {
+        const response = await fetch("/api/me", { signal });
+        if (handleUnauthorized(response)) {
+          return;
+        }
+        const data = (await response
+          .json()
+          .catch(() => null)) as UserData | null;
+
+        if (signal?.aborted) {
+          return;
+        }
+
+        if (!response.ok || !data) {
+          setUserData(null);
+          return;
+        }
+
+        setUserData(data);
+      } catch (err) {
+        if ((err as { name?: string }).name === "AbortError") {
+          return;
+        }
+        console.error("User data fetch error", err);
+        setUserData(null);
+      } finally {
+        setUserLoading(false);
+      }
+    },
+    [handleUnauthorized],
+  );
+
+  useEffect(() => {
+    if (!user) {
+      return;
+    }
+    const controller = new AbortController();
+    void loadUserData({ signal: controller.signal });
+    return () => controller.abort();
+  }, [loadUserData, user]);
 
   if (!user) {
     return (
@@ -402,6 +485,115 @@ export default function ProfileClient({ user }: ProfileClientProps) {
                   />
                 )}
               </div>
+            </div>
+
+            <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
+              <div className="flex items-center justify-between mb-4">
+                <h2 className="text-lg font-semibold text-gray-900">
+                  Notification Preferences
+                </h2>
+                <Button variant="outline" size="sm" href="/settings">
+                  Edit
+                </Button>
+              </div>
+              {userLoading ? (
+                <div className="flex items-center justify-center py-10">
+                  <LoadingSpinner size="md" />
+                </div>
+              ) : userData?.preferences ? (
+                <div className="space-y-4">
+                  <div className="rounded-lg bg-gray-50 p-3">
+                    <dt className="text-xs font-medium text-gray-600 mb-1">
+                      Email Notifications
+                    </dt>
+                    <dd className="text-sm font-medium text-gray-900 break-words">
+                      {userData.preferences.use_account_email
+                        ? userData.email
+                        : userData.preferences.notify_email || "Not configured"}
+                    </dd>
+                    <dd className="text-xs text-gray-500 mt-0.5">
+                      {userData.preferences.use_account_email
+                        ? "Using account email"
+                        : "Using custom email"}
+                    </dd>
+                  </div>
+
+                  <div className="rounded-lg bg-gray-50 p-3">
+                    <dt className="text-xs font-medium text-gray-600 mb-1">
+                      Digest Emails
+                    </dt>
+                    <dd className="text-sm font-medium text-gray-900">
+                      {userData.preferences.digest.enabled ? (
+                        <span className="inline-flex items-center gap-1.5">
+                          <span className="h-2 w-2 rounded-full bg-green-600"></span>
+                          <span className="text-green-700">Enabled</span>
+                        </span>
+                      ) : (
+                        <span className="inline-flex items-center gap-1.5">
+                          <span className="h-2 w-2 rounded-full bg-gray-400"></span>
+                          <span className="text-gray-500">Disabled</span>
+                        </span>
+                      )}
+                    </dd>
+                    {userData.preferences.digest.enabled && (
+                      <dd className="text-xs text-gray-600 mt-1">
+                        Every {userData.preferences.digest.interval}{" "}
+                        {userData.preferences.digest.interval_unit}
+                        {userData.preferences.digest.last_sent_at && (
+                          <>
+                            <br />
+                            Last sent:{" "}
+                            {formatDisplayDate(
+                              userData.preferences.digest.last_sent_at,
+                            )}
+                          </>
+                        )}
+                      </dd>
+                    )}
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-3">
+                    <div className="rounded-lg bg-gray-50 p-3">
+                      <dt className="text-xs font-medium text-gray-600 mb-1">
+                        Digest
+                      </dt>
+                      <dd className="text-sm font-medium">
+                        {userData.preferences.digest_consent ? (
+                          <span className="text-green-700">✓ Consented</span>
+                        ) : (
+                          <span className="text-gray-500">Not granted</span>
+                        )}
+                      </dd>
+                    </div>
+                    <div className="rounded-lg bg-gray-50 p-3">
+                      <dt className="text-xs font-medium text-gray-600 mb-1">
+                        Marketing
+                      </dt>
+                      <dd className="text-sm font-medium">
+                        {userData.preferences.marketing_consent ? (
+                          <span className="text-green-700">✓ Consented</span>
+                        ) : (
+                          <span className="text-gray-500">Not granted</span>
+                        )}
+                      </dd>
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                <div className="rounded-lg border border-dashed border-gray-300 p-4 text-center">
+                  <p className="text-sm text-gray-600">
+                    Notification preferences not configured
+                  </p>
+                  <Button
+                    href="/settings"
+                    variant="outline"
+                    size="sm"
+                    className="mt-3"
+                  >
+                    Set Up Notifications
+                  </Button>
+                </div>
+              )}
             </div>
 
             <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
