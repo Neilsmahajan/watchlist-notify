@@ -20,10 +20,17 @@ func (s *service) UpsertUser(ctx context.Context, u *models.User) error {
 		"region":     defaultRegion,
 		"services":   bson.A{},
 		"preferences": bson.M{
-			"digest_frequency":  models.DigestFrequencyDaily,
 			"digest_consent":    false,
 			"marketing_consent": false,
 			"use_account_email": true,
+			"digest": bson.M{
+				"enabled":        false,
+				"interval_value": 1,
+				"interval_unit":  "day",
+				"anchor_date":    now,
+				"preferred_hour": 14,
+				"timezone":       "UTC",
+			},
 		},
 	}
 	set := bson.M{
@@ -34,9 +41,6 @@ func (s *service) UpsertUser(ctx context.Context, u *models.User) error {
 	}
 	if u.Region != "" {
 		set["region"] = u.Region
-	}
-	if u.Preferences.DigestFrequency != "" {
-		set["preferences.digest_frequency"] = u.Preferences.DigestFrequency
 	}
 	_, err := collection.UpdateOne(ctx, bson.M{"email": u.Email}, bson.M{
 		"$set":         set,

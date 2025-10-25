@@ -237,15 +237,62 @@ func (s *Server) updateUserServicesHandler(c *gin.Context) {
 }
 
 func (s *Server) updateUserNotificationPreferencessHandler(c *gin.Context) {
-	user, ok := s.getUser(c)
+	_, ok := s.getUser(c)
 	if !ok {
 		return
 	}
 }
 
 func (s *Server) testNotificationHandler(c *gin.Context) {
-	user, ok := s.getUser(c)
-	if !ok {
+
+	const (
+		subject  = "Test Notification from Watchlist Notify"
+		htmlBody = "<p>This is a test notification from Watchlist Notify.</p>"
+	)
+
+	// Check if notifications sender is configured
+	if s.notificationsSender == nil {
+		jsonError(c, http.StatusServiceUnavailable, "notification service is not configured")
 		return
 	}
+
+	var body struct {
+		Type          string `json:"type"`           // e.g. "digest"
+		OverrideEmail string `json:"override_email"` // optional
+	}
+
+	if err := c.ShouldBindJSON(&body); err != nil {
+		jsonError(c, http.StatusBadRequest, "invalid body")
+		return
+	}
+
+	// Determine recipient email based on preferences and override
+	toEmail := body.OverrideEmail
+	if strings.TrimSpace(toEmail) == "" {
+		user, ok := s.getUser(c)
+		if !ok {
+			return
+		}
+		if user.Preferences.UseAccountEmail || strings.TrimSpace(user.Preferences.NotifyEmail) == "" {
+			toEmail = user.Email
+		} else {
+			toEmail = user.Preferences.NotifyEmail
+		}
+	}
+
+	if body.Type == "" {
+		body.Type = "digest"
+	}
+
+	if err := s.notificationsSender.SendEmail(toEmail, subject, htmlBody); err != nil {
+		jsonError(c, http.StatusInternalServerError, "failed to send test notification: "+err.Error())
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"message": "test notification sent successfully",
+		"sent_to": toEmail,
+		"type":    body.Type,
+		"sent_at": time.Now(),
+	})
 }

@@ -1,0 +1,26 @@
+meta {
+  name: Test Notification Email
+  type: http
+  seq: 3
+}
+
+post {
+  url: {{base_url}}/api/me/notifications/test
+  body: json
+  auth: inherit
+}
+
+headers {
+  Content-Type: application/json
+}
+
+body:json {
+  {
+    "type": "digest",
+    "override_email": "neilsmahajan@gmail.com"
+  }
+}
+
+settings {
+  encodeUrl: true
+}
