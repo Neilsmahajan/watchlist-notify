@@ -235,3 +235,17 @@ func (s *Server) updateUserServicesHandler(c *gin.Context) {
 	}
 	c.JSON(http.StatusOK, updatedUser)
 }
+
+func (s *Server) updateUserNotificationPreferencessHandler(c *gin.Context) {
+	user, ok := s.getUser(c)
+	if !ok {
+		return
+	}
+}
+
+func (s *Server) testNotificationHandler(c *gin.Context) {
+	user, ok := s.getUser(c)
+	if !ok {
+		return
+	}
+}

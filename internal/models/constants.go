@@ -79,3 +79,9 @@ var ServiceCodeSet = map[string]bool{
 	ServiceESPNPlus:      true,
 	ServiceDiscoveryPlus: true,
 }
+
+// Notification defaults
+const (
+	DefaultDigestHour     = 14
+	DefaultDigestTimezone = "Etc/UTC" // override per region during user creation
+)

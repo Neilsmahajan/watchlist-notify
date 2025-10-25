@@ -33,6 +33,8 @@ func (s *Server) RegisterRoutes() http.Handler {
 	protected.PATCH("/me/preferences", s.updateUserPreferencesHandler)
 	protected.GET("/me/services", s.listUserServicesHandler)
 	protected.PATCH("/me/services", s.updateUserServicesHandler)
+	protected.PATCH("/me/notifications", s.updateUserNotificationPreferencessHandler)
+	protected.POST("/me/notifications/test", s.testNotificationHandler)
 
 	protected.POST("/watchlist", s.createWatchlistItemHandler)
 	protected.GET("/watchlist", s.listWatchlistItemsHandler)

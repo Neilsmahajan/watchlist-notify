@@ -13,13 +13,23 @@ type ServiceSubscription struct {
 	Plan    string    `bson:"plan,omitempty" json:"plan,omitempty"` // optional
 }
 
+type DigestSettings struct {
+	Enabled         bool       `bson:"enabled" json:"enabled"`
+	IntervalValue   int        `bson:"interval_value" json:"interval_value"` // >=1
+	IntervalUnit    string     `bson:"interval_unit" json:"interval_unit"`   // e.g. "day", "week", "month"
+	AnchorDate      time.Time  `bson:"anchor_date" json:"anchor_date"`       // first send, UTC midnight
+	PreferredHour   int        `bson:"preferred_hour" json:"preferred_hour"` // 0-23, default to 14 (2 PM)
+	Timezone        string     `bson:"timezone" json:"timezone"`             // IANA timezone name, e.g. "America/New_York"
+	LastSentAt      *time.Time `bson:"last_sent_at,omitempty" json:"last_sent_at,omitempty"`
+	NextScheduledAt *time.Time `bson:"next_scheduled_at,omitempty" json:"next_scheduled_at,omitempty"`
+}
+
 type Preferences struct {
-	NotifyEmail      string     `bson:"notify_email,omitempty" json:"notify_email,omitempty"`
-	UseAccountEmail  bool       `bson:"use_account_email" json:"use_account_email"`
-	MarketingConsent bool       `bson:"marketing_consent" json:"marketing_consent"`
-	DigestConsent    bool       `bson:"digest_consent" json:"digest_consent"`
-	DigestFrequency  string     `bson:"digest_frequency" json:"digest_frequency"` // enum: daily | weekly | manual
-	LastDigestSentAt *time.Time `bson:"last_digest_sent_at,omitempty" json:"last_digest_sent_at,omitempty"`
+	NotifyEmail      string         `bson:"notify_email,omitempty" json:"notify_email,omitempty"`
+	UseAccountEmail  bool           `bson:"use_account_email" json:"use_account_email"`
+	MarketingConsent bool           `bson:"marketing_consent" json:"marketing_consent"`
+	DigestConsent    bool           `bson:"digest_consent" json:"digest_consent"`
+	Digest           DigestSettings `bson:"digest" json:"digest"`
 }
 
 type User struct {
