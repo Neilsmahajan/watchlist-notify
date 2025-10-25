@@ -1,10 +1,10 @@
 package models
 
-// Digest frequencies
+// Digest interval units for DigestSettings
 const (
-	DigestFrequencyDaily  = "daily"
-	DigestFrequencyWeekly = "weekly"
-	DigestFrequencyManual = "manual"
+	DigestIntervalDay   = "day"
+	DigestIntervalWeek  = "week"
+	DigestIntervalMonth = "month"
 )
 
 // Watchlist item types
@@ -18,11 +18,4 @@ const (
 	WatchlistStatusPlanned  = "planned"
 	WatchlistStatusWatching = "watching"
 	WatchlistStatusFinished = "finished"
-)
-
-// Notification types (future use but defined early for consistency)
-const (
-	DigestIntervalDay   = "day"
-	DigestIntervalWeek  = "week"
-	DigestIntervalMonth = "month"
 )

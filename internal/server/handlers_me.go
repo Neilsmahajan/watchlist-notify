@@ -26,7 +26,10 @@ func (s *Server) updateUserPreferencesHandler(c *gin.Context) {
 		UseAccountEmail  *bool   `json:"use_account_email"`
 		MarketingConsent *bool   `json:"marketing_consent"`
 		DigestConsent    *bool   `json:"digest_consent"`
-		DigestFrequency  *string `json:"digest_frequency"`
+		DigestEnabled    *bool   `json:"digest_enabled"`
+		DigestInterval   *string `json:"digest_interval"` // "day", "week", "month"
+		DigestHour       *int    `json:"digest_hour"`     // 0-23
+		DigestTimezone   *string `json:"digest_timezone"` // IANA timezone
 	}
 	if err := c.ShouldBindJSON(&body); err != nil {
 		jsonError(c, http.StatusBadRequest, "invalid body")
@@ -60,15 +63,35 @@ func (s *Server) updateUserPreferencesHandler(c *gin.Context) {
 	if body.DigestConsent != nil {
 		updates["preferences.digest_consent"] = *body.DigestConsent
 	}
-	if body.DigestFrequency != nil {
-		df := strings.ToLower(strings.TrimSpace(*body.DigestFrequency))
-		switch df {
-		case models.DigestFrequencyDaily, models.DigestFrequencyWeekly, models.DigestFrequencyManual:
-			updates["preferences.digest_frequency"] = df
+	if body.DigestEnabled != nil {
+		updates["preferences.digest.enabled"] = *body.DigestEnabled
+	}
+	if body.DigestInterval != nil {
+		interval := strings.ToLower(strings.TrimSpace(*body.DigestInterval))
+		switch interval {
+		case models.DigestIntervalDay, models.DigestIntervalWeek, models.DigestIntervalMonth:
+			updates["preferences.digest.interval_unit"] = interval
 		default:
-			jsonError(c, http.StatusBadRequest, "invalid digest_frequency")
+			jsonError(c, http.StatusBadRequest, "invalid digest_interval: must be 'day', 'week', or 'month'")
 			return
 		}
+	}
+	if body.DigestHour != nil {
+		hour := *body.DigestHour
+		if hour < 0 || hour > 23 {
+			jsonError(c, http.StatusBadRequest, "digest_hour must be between 0 and 23")
+			return
+		}
+		updates["preferences.digest.preferred_hour"] = hour
+	}
+	if body.DigestTimezone != nil {
+		tz := strings.TrimSpace(*body.DigestTimezone)
+		if tz == "" {
+			jsonError(c, http.StatusBadRequest, "digest_timezone cannot be empty")
+			return
+		}
+		// Optional: validate timezone using time.LoadLocation
+		updates["preferences.digest.timezone"] = tz
 	}
 
 	if len(updates) == 0 {
@@ -237,10 +260,9 @@ func (s *Server) updateUserServicesHandler(c *gin.Context) {
 }
 
 func (s *Server) updateUserNotificationPreferencessHandler(c *gin.Context) {
-	_, ok := s.getUser(c)
-	if !ok {
-		return
-	}
+	// TODO: Implement batch notification preferences update if needed
+	// For now, users can update digest settings via updateUserPreferencesHandler
+	jsonError(c, http.StatusNotImplemented, "use PATCH /me/preferences to update notification settings")
 }
 
 func (s *Server) testNotificationHandler(c *gin.Context) {

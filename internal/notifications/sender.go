@@ -4,12 +4,17 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"strings"
 	"time"
 )
+
+type EmailSender interface {
+	SendEmail(toEmail, subject, htmlBody string) error
+}
 
 type Sender struct {
 	postmarkServerAPIToken string
@@ -91,12 +96,16 @@ func (s *Sender) SendEmail(toEmail, subject, htmlBody string) error {
 	defer func(Body io.ReadCloser) {
 		err := Body.Close()
 		if err != nil {
-			return
+			fmt.Printf("Warning: Failed to close response body: %v\n", err)
 		}
 	}(resp.Body)
 
 	if resp.StatusCode != http.StatusOK {
-		return errors.New("failed to send email, status code: " + resp.Status)
+		bodyBytes, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return fmt.Errorf("failed to send email, status: %s, and failed to read body: %v", resp.Status, err)
+		}
+		return fmt.Errorf("failed to send email, status: %s, body: %s", resp.Status, string(bodyBytes))
 	}
 
 	return nil
