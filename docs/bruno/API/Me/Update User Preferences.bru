@@ -12,7 +12,13 @@ patch {
 
 body:json {
   {
-    "digest_frequency": "daily"
+    "notify_email": "user@example.com",
+    "use_account_email": true,
+    "marketing_consent": true,
+    "digest_consent": true,
+    "digest_enabled": true,
+    "digest_interval": 2,
+    "digest_interval_unit": "weeks"
   }
 }
 

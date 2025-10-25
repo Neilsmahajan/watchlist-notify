@@ -22,25 +22,22 @@ func (s *Server) updateUserPreferencesHandler(c *gin.Context) {
 	}
 
 	var body struct {
-		NotifyEmail      *string `json:"notify_email"`
-		UseAccountEmail  *bool   `json:"use_account_email"`
-		MarketingConsent *bool   `json:"marketing_consent"`
-		DigestConsent    *bool   `json:"digest_consent"`
-		DigestEnabled    *bool   `json:"digest_enabled"`
-		DigestInterval   *string `json:"digest_interval"` // "day", "week", "month"
-		DigestHour       *int    `json:"digest_hour"`     // 0-23
-		DigestTimezone   *string `json:"digest_timezone"` // IANA timezone
+		NotifyEmail        *string `json:"notify_email"`
+		UseAccountEmail    *bool   `json:"use_account_email"`
+		MarketingConsent   *bool   `json:"marketing_consent"`
+		DigestConsent      *bool   `json:"digest_consent"`
+		DigestEnabled      *bool   `json:"digest_enabled"`
+		DigestInterval     *int    `json:"digest_interval"`      // 1-31 for days, 1-12 for weeks/months
+		DigestIntervalUnit *string `json:"digest_interval_unit"` // "days", "weeks", "months"
 	}
 	if err := c.ShouldBindJSON(&body); err != nil {
 		jsonError(c, http.StatusBadRequest, "invalid body")
 		return
 	}
 
-	// Build updates and validate
 	updates := map[string]any{}
 	if body.NotifyEmail != nil {
 		email := strings.TrimSpace(*body.NotifyEmail)
-		// allow empty if UseAccountEmail will be true
 		if email == "" && (body.UseAccountEmail == nil || !*body.UseAccountEmail) {
 			jsonError(c, http.StatusBadRequest, "notify_email cannot be empty unless use_account_email is true")
 			return
@@ -49,9 +46,7 @@ func (s *Server) updateUserPreferencesHandler(c *gin.Context) {
 	}
 	if body.UseAccountEmail != nil {
 		updates["preferences.use_account_email"] = *body.UseAccountEmail
-		// If switching to account email, we can clear notify_email to avoid confusion (optional)
 		if *body.UseAccountEmail {
-			// Only clear if caller didn’t specify a custom notify_email in same request
 			if body.NotifyEmail == nil {
 				updates["preferences.notify_email"] = ""
 			}
@@ -67,31 +62,36 @@ func (s *Server) updateUserPreferencesHandler(c *gin.Context) {
 		updates["preferences.digest.enabled"] = *body.DigestEnabled
 	}
 	if body.DigestInterval != nil {
-		interval := strings.ToLower(strings.TrimSpace(*body.DigestInterval))
-		switch interval {
-		case models.DigestIntervalDay, models.DigestIntervalWeek, models.DigestIntervalMonth:
-			updates["preferences.digest.interval_unit"] = interval
-		default:
-			jsonError(c, http.StatusBadRequest, "invalid digest_interval: must be 'day', 'week', or 'month'")
+		interval := *body.DigestInterval
+		if interval < 1 {
+			jsonError(c, http.StatusBadRequest, "digest_interval must be at least 1")
 			return
 		}
+		// Validate based on unit if also provided
+		if body.DigestIntervalUnit != nil {
+			unit := strings.ToLower(*body.DigestIntervalUnit)
+			switch unit {
+			case "days":
+				if interval > 31 {
+					jsonError(c, http.StatusBadRequest, "digest_interval for days cannot exceed 31")
+					return
+				}
+			case "weeks", "months":
+				if interval > 12 {
+					jsonError(c, http.StatusBadRequest, "digest_interval for weeks/months cannot exceed 12")
+					return
+				}
+			}
+		}
+		updates["preferences.digest.interval"] = interval
 	}
-	if body.DigestHour != nil {
-		hour := *body.DigestHour
-		if hour < 0 || hour > 23 {
-			jsonError(c, http.StatusBadRequest, "digest_hour must be between 0 and 23")
+	if body.DigestIntervalUnit != nil {
+		unit := strings.ToLower(strings.TrimSpace(*body.DigestIntervalUnit))
+		if unit != "days" && unit != "weeks" && unit != "months" {
+			jsonError(c, http.StatusBadRequest, "digest_interval_unit must be 'days', 'weeks', or 'months'")
 			return
 		}
-		updates["preferences.digest.preferred_hour"] = hour
-	}
-	if body.DigestTimezone != nil {
-		tz := strings.TrimSpace(*body.DigestTimezone)
-		if tz == "" {
-			jsonError(c, http.StatusBadRequest, "digest_timezone cannot be empty")
-			return
-		}
-		// Optional: validate timezone using time.LoadLocation
-		updates["preferences.digest.timezone"] = tz
+		updates["preferences.digest.interval_unit"] = unit
 	}
 
 	if len(updates) == 0 {
@@ -259,14 +259,7 @@ func (s *Server) updateUserServicesHandler(c *gin.Context) {
 	c.JSON(http.StatusOK, updatedUser)
 }
 
-func (s *Server) updateUserNotificationPreferencessHandler(c *gin.Context) {
-	// TODO: Implement batch notification preferences update if needed
-	// For now, users can update digest settings via updateUserPreferencesHandler
-	jsonError(c, http.StatusNotImplemented, "use PATCH /me/preferences to update notification settings")
-}
-
 func (s *Server) testNotificationHandler(c *gin.Context) {
-
 	const (
 		subject  = "Test Notification from Watchlist Notify"
 		htmlBody = "<p>This is a test notification from Watchlist Notify.</p>"
@@ -278,23 +271,38 @@ func (s *Server) testNotificationHandler(c *gin.Context) {
 		return
 	}
 
-	var body struct {
-		Type          string `json:"type"`           // e.g. "digest"
-		OverrideEmail string `json:"override_email"` // optional
-	}
-
-	if err := c.ShouldBindJSON(&body); err != nil {
-		jsonError(c, http.StatusBadRequest, "invalid body")
+	user, ok := s.getUser(c)
+	if !ok {
 		return
 	}
 
+	var body struct {
+		Type          string `json:"type"`           // e.g. "digest"
+		OverrideEmail string `json:"override_email"` // optional - must be user's account or notify email
+	}
+
+	if err := c.ShouldBindJSON(&body); err != nil {
+		// Allow empty body for simple test
+		body.Type = "digest"
+	}
+
 	// Determine recipient email based on preferences and override
-	toEmail := body.OverrideEmail
-	if strings.TrimSpace(toEmail) == "" {
-		user, ok := s.getUser(c)
-		if !ok {
+	toEmail := strings.TrimSpace(body.OverrideEmail)
+
+	// Validate override email if provided - must match user's configured emails
+	if toEmail != "" {
+		validEmails := map[string]bool{
+			strings.ToLower(user.Email): true,
+		}
+		if user.Preferences.NotifyEmail != "" {
+			validEmails[strings.ToLower(user.Preferences.NotifyEmail)] = true
+		}
+		if !validEmails[strings.ToLower(toEmail)] {
+			jsonError(c, http.StatusBadRequest, "override_email must be your account email or configured notification email")
 			return
 		}
+	} else {
+		// Use preference-based email selection
 		if user.Preferences.UseAccountEmail || strings.TrimSpace(user.Preferences.NotifyEmail) == "" {
 			toEmail = user.Email
 		} else {

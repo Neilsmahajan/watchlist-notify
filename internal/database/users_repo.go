@@ -24,12 +24,9 @@ func (s *service) UpsertUser(ctx context.Context, u *models.User) error {
 			"marketing_consent": false,
 			"use_account_email": true,
 			"digest": bson.M{
-				"enabled":        false,
-				"interval_value": 1,
-				"interval_unit":  "day",
-				"anchor_date":    now,
-				"preferred_hour": 14,
-				"timezone":       "UTC",
+				"enabled":       false,
+				"interval":      1,
+				"interval_unit": "days",
 			},
 		},
 	}
