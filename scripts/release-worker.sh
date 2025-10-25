@@ -2,13 +2,15 @@
 # release-worker.sh - Build, push, and deploy the digest worker to Cloud Run
 #
 # Usage:
-#   scripts/release-worker.sh [--tag TAG] [--cloud-build] [--no-deploy] [--dry-run]
+#   scripts/release-worker.sh [--tag TAG] [--cloud-build] [--no-deploy] [--env "K=V"] [--env-file FILE] [--dry-run]
 #
 # Examples:
 #   scripts/release-worker.sh                    # build locally, push, deploy
 #   scripts/release-worker.sh --cloud-build      # build via Cloud Build
 #   scripts/release-worker.sh --tag v1.2.3       # custom tag
 #   scripts/release-worker.sh --no-deploy        # just build and push
+#   scripts/release-worker.sh --env-file cloudrun.env  # deploy with env vars from file
+#   scripts/release-worker.sh --env "FOO=bar,HELLO=world"  # set specific env vars
 #   scripts/release-worker.sh --dry-run          # show what would happen
 
 set -euo pipefail
@@ -57,6 +59,8 @@ TAG=""
 USE_CLOUD_BUILD=0
 DO_DEPLOY=1
 DRY_RUN=0
+ENV_INLINE=""
+ENV_FILE=""
 
 # --- Parse args -------------------------------------------------------------
 while [[ $# -gt 0 ]]; do
@@ -64,19 +68,28 @@ while [[ $# -gt 0 ]]; do
     --tag) TAG="$2"; shift 2 ;;
     --cloud-build) USE_CLOUD_BUILD=1; shift ;;
     --no-deploy) DO_DEPLOY=0; shift ;;
+    --env) ENV_INLINE="$2"; shift 2 ;;
+    --env-file) ENV_FILE="$2"; shift 2 ;;
     --dry-run) DRY_RUN=1; shift ;;
     --help) cat <<'HELP'
 Usage: scripts/release-worker.sh [options]
 
 Options:
-  --tag TAG        Use custom tag (default: auto-generated from date+sha)
-  --cloud-build    Build using Cloud Build instead of local buildx
-  --no-deploy      Skip deployment (just build and push)
-  --dry-run        Show what would happen without making changes
-  --help           Show this help
+  --tag TAG             Use custom tag (default: auto-generated from date+sha)
+  --cloud-build         Build using Cloud Build instead of local buildx
+  --no-deploy           Skip deployment (just build and push)
+  --env "K=V,K2=V2"     Set/override env vars on deploy (comma separated)
+  --env-file <path>     File with KEY=VAL lines to set on deploy
+  --dry-run             Show what would happen without making changes
+  --help                Show this help
 
 Environment variables (from .deploy.env):
   PROJECT_ID, REGION, REPO, PLATFORM
+
+Examples:
+  scripts/release-worker.sh --env-file cloudrun.env
+  scripts/release-worker.sh --env "MONGODB_URI=...,POSTMARK_SERVER_TOKEN=..."
+  scripts/release-worker.sh --cloud-build --env-file cloudrun.env
 HELP
     exit 0 ;;
     *) err "Unknown option: $1"; exit 1 ;;
@@ -150,6 +163,26 @@ fi
 
 color green "✓ Worker image built and pushed: ${FULL_IMAGE}"
 
+# --- Prepare deploy env vars ------------------------------------------------
+SET_ENV_ARGS=()
+MERGED_ENV=""
+if [[ -n ${ENV_INLINE} ]]; then
+  MERGED_ENV="${ENV_INLINE}"
+fi
+if [[ -n ${ENV_FILE} ]]; then
+  if [[ ! -f ${ENV_FILE} ]]; then err "Env file not found: ${ENV_FILE}"; exit 1; fi
+  FILE_VARS=$(grep -v '^#' "${ENV_FILE}" | grep -E '^[A-Za-z_][A-Za-z0-9_]*=' | paste -sd, -)
+  if [[ -n ${MERGED_ENV} && -n ${FILE_VARS} ]]; then
+    MERGED_ENV="${MERGED_ENV},${FILE_VARS}"
+  elif [[ -z ${MERGED_ENV} ]]; then
+    MERGED_ENV="${FILE_VARS}"
+  fi
+fi
+if [[ -n ${MERGED_ENV} ]]; then
+  SET_ENV_ARGS+=(--set-env-vars "${MERGED_ENV}")
+  log "Setting environment variables from provided config"
+fi
+
 # --- Deploy -----------------------------------------------------------------
 if [[ ${DO_DEPLOY} -eq 1 ]]; then
   log "Deploying worker to Cloud Run..."
@@ -158,22 +191,27 @@ if [[ ${DO_DEPLOY} -eq 1 ]]; then
   if gcloud run services describe "${WORKER_SERVICE}" --region "${REGION}" --project "${PROJECT_ID}" &>/dev/null; then
     log "Updating existing service..."
     if [[ ${DRY_RUN} -eq 0 ]]; then
-      gcloud run deploy "${WORKER_SERVICE}" \
+      CMD=(gcloud run deploy "${WORKER_SERVICE}" \
         --image "${FULL_IMAGE}" \
         --region "${REGION}" \
         --project "${PROJECT_ID}" \
         --platform managed \
-        --quiet
+        --quiet)
+      if [[ ${#SET_ENV_ARGS[@]} -gt 0 ]]; then
+        CMD+=("${SET_ENV_ARGS[@]}")
+      fi
+      "${CMD[@]}"
     else
       log "[DRY RUN] Would update service ${WORKER_SERVICE} with image ${FULL_IMAGE}"
+      if [[ ${#SET_ENV_ARGS[@]} -gt 0 ]]; then
+        log "[DRY RUN] Would set env vars: ${MERGED_ENV}"
+      fi
     fi
   else
     log "Creating new service..."
-    warn "NOTE: You'll need to manually set environment variables and configure Cloud Scheduler"
-    warn "See docs/DIGEST_WORKER_DEPLOYMENT.md for full setup instructions"
     
     if [[ ${DRY_RUN} -eq 0 ]]; then
-      gcloud run deploy "${WORKER_SERVICE}" \
+      CMD=(gcloud run deploy "${WORKER_SERVICE}" \
         --image "${FULL_IMAGE}" \
         --region "${REGION}" \
         --project "${PROJECT_ID}" \
@@ -184,14 +222,25 @@ if [[ ${DO_DEPLOY} -eq 1 ]]; then
         --max-instances 1 \
         --concurrency 1 \
         --no-cpu-throttling \
-        --quiet
+        --quiet)
+      if [[ ${#SET_ENV_ARGS[@]} -gt 0 ]]; then
+        CMD+=("${SET_ENV_ARGS[@]}")
+      fi
+      "${CMD[@]}"
       
       log "Service created. Next steps:"
-      log "1. Set environment variables (MONGODB_URI, POSTMARK_SERVER_TOKEN)"
-      log "2. Create Cloud Scheduler job"
-      log "See docs/DIGEST_WORKER_DEPLOYMENT.md for details"
+      if [[ ${#SET_ENV_ARGS[@]} -eq 0 ]]; then
+        warn "NOTE: No environment variables were set. You may need to set:"
+        warn "  - MONGODB_URI"
+        warn "  - POSTMARK_SERVER_TOKEN"
+        warn "  - POSTMARK_BASE_URL"
+      fi
+      log "Create Cloud Scheduler job (see docs/DIGEST_WORKER_DEPLOYMENT.md)"
     else
       log "[DRY RUN] Would create new service ${WORKER_SERVICE}"
+      if [[ ${#SET_ENV_ARGS[@]} -gt 0 ]]; then
+        log "[DRY RUN] Would set env vars: ${MERGED_ENV}"
+      fi
     fi
   fi
   
