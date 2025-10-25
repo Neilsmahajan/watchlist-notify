@@ -138,7 +138,7 @@ export default function HomeLanding() {
             href="/auth/login"
             variant="primary"
             size="lg"
-            className="bg-white text-gray-900 hover:bg-gray-100"
+            className="bg-blue-600 text-white hover:bg-blue-700"
           >
             Sign Up Now
           </Button>
