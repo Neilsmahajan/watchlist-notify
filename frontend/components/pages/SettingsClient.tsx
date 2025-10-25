@@ -24,6 +24,31 @@ type ServicesResponse = {
   error?: string;
 };
 
+type UserPreferences = {
+  notify_email?: string;
+  use_account_email: boolean;
+  marketing_consent: boolean;
+  digest_consent: boolean;
+  digest: {
+    enabled: boolean;
+    interval: number;
+    interval_unit: "days" | "weeks" | "months";
+    last_sent_at?: string;
+  };
+};
+
+type User = {
+  id: string;
+  email: string;
+  name: string;
+  picture: string;
+  region: string;
+  services?: Service[];
+  preferences: UserPreferences;
+  created_at: string;
+  updated_at: string;
+};
+
 const serviceAssets: Record<string, { logo?: string; fallback?: string }> = {
   netflix: { logo: "/netflix_logo.png" },
   prime_video: { logo: "/prime_video_logo.png" },
@@ -58,6 +83,29 @@ export default function SettingsClient({ user }: SettingsClientProps) {
     Record<string, boolean>
   >({});
 
+  // User data state
+  const [userData, setUserData] = useState<User | null>(null);
+  const [userLoading, setUserLoading] = useState(true);
+
+  // Notification preferences state
+  const [notifyEmail, setNotifyEmail] = useState("");
+  const [useAccountEmail, setUseAccountEmail] = useState(true);
+  const [digestEnabled, setDigestEnabled] = useState(false);
+  const [digestInterval, setDigestInterval] = useState(1);
+  const [digestIntervalUnit, setDigestIntervalUnit] = useState<
+    "days" | "weeks" | "months"
+  >("weeks");
+  const [digestConsent, setDigestConsent] = useState(false);
+  const [marketingConsent, setMarketingConsent] = useState(false);
+
+  // Notification preferences UI state
+  const [prefsLoading, setPrefsLoading] = useState(false);
+  const [prefsError, setPrefsError] = useState<string | null>(null);
+  const [prefsMessage, setPrefsMessage] = useState<string | null>(null);
+  const [testEmailLoading, setTestEmailLoading] = useState(false);
+  const [testEmailMessage, setTestEmailMessage] = useState<string | null>(null);
+  const [testEmailError, setTestEmailError] = useState<string | null>(null);
+
   const handleUnauthorized = useCallback((response: Response) => {
     if (response.status !== 401) {
       return false;
@@ -65,6 +113,54 @@ export default function SettingsClient({ user }: SettingsClientProps) {
     redirectToLogin();
     return true;
   }, []);
+
+  const loadUserData = useCallback(
+    async (options: { signal?: AbortSignal; silent?: boolean } = {}) => {
+      const { signal, silent } = options;
+      if (!silent) {
+        setUserLoading(true);
+      }
+
+      try {
+        const response = await fetch("/api/me", { signal });
+        if (handleUnauthorized(response)) {
+          return;
+        }
+        const data = (await response.json().catch(() => null)) as User | null;
+
+        if (signal?.aborted) {
+          return;
+        }
+
+        if (!response.ok || !data) {
+          setUserData(null);
+          return;
+        }
+
+        setUserData(data);
+        // Initialize preference form state from loaded user data
+        const prefs = data.preferences;
+        setNotifyEmail(prefs.notify_email || "");
+        setUseAccountEmail(prefs.use_account_email);
+        setDigestEnabled(prefs.digest.enabled);
+        setDigestInterval(prefs.digest.interval);
+        setDigestIntervalUnit(prefs.digest.interval_unit);
+        setDigestConsent(prefs.digest_consent);
+        setMarketingConsent(prefs.marketing_consent);
+      } catch (err) {
+        if ((err as { name?: string }).name === "AbortError") {
+          return;
+        }
+        console.error("User data fetch error", err);
+        setUserData(null);
+      } finally {
+        if (!silent && !signal?.aborted) {
+          setUserLoading(false);
+        }
+      }
+    },
+    [handleUnauthorized],
+  );
 
   const loadServices = useCallback(
     async (options: { signal?: AbortSignal; silent?: boolean } = {}) => {
@@ -117,13 +213,152 @@ export default function SettingsClient({ user }: SettingsClientProps) {
       return;
     }
     const controller = new AbortController();
+    void loadUserData({ signal: controller.signal });
     void loadServices({ signal: controller.signal });
     return () => controller.abort();
-  }, [loadServices, user]);
+  }, [loadServices, loadUserData, user]);
 
   const handleServicesRefresh = () => {
     setServicesMessage(null);
     void loadServices();
+  };
+
+  const handlePreferencesSave = async () => {
+    setPrefsLoading(true);
+    setPrefsError(null);
+    setPrefsMessage(null);
+
+    try {
+      const body: {
+        notify_email?: string;
+        use_account_email?: boolean;
+        marketing_consent?: boolean;
+        digest_consent?: boolean;
+        digest_enabled?: boolean;
+        digest_interval?: number;
+        digest_interval_unit?: "days" | "weeks" | "months";
+      } = {};
+
+      // Only send fields that have been modified
+      if (userData) {
+        if (useAccountEmail !== userData.preferences.use_account_email) {
+          body.use_account_email = useAccountEmail;
+        }
+        if (
+          !useAccountEmail &&
+          notifyEmail !== userData.preferences.notify_email
+        ) {
+          body.notify_email = notifyEmail;
+        }
+        if (digestEnabled !== userData.preferences.digest.enabled) {
+          body.digest_enabled = digestEnabled;
+        }
+        if (digestInterval !== userData.preferences.digest.interval) {
+          body.digest_interval = digestInterval;
+        }
+        if (digestIntervalUnit !== userData.preferences.digest.interval_unit) {
+          body.digest_interval_unit = digestIntervalUnit;
+        }
+        if (digestConsent !== userData.preferences.digest_consent) {
+          body.digest_consent = digestConsent;
+        }
+        if (marketingConsent !== userData.preferences.marketing_consent) {
+          body.marketing_consent = marketingConsent;
+        }
+      } else {
+        // If no existing user data, send all values
+        body.use_account_email = useAccountEmail;
+        if (!useAccountEmail) {
+          body.notify_email = notifyEmail;
+        }
+        body.digest_enabled = digestEnabled;
+        body.digest_interval = digestInterval;
+        body.digest_interval_unit = digestIntervalUnit;
+        body.digest_consent = digestConsent;
+        body.marketing_consent = marketingConsent;
+      }
+
+      if (Object.keys(body).length === 0) {
+        setPrefsMessage("No changes to save.");
+        return;
+      }
+
+      const response = await fetch("/api/me/preferences", {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(body),
+      });
+
+      if (handleUnauthorized(response)) {
+        return;
+      }
+
+      const data = (await response.json().catch(() => null)) as
+        | { error?: string }
+        | User
+        | null;
+
+      if (!response.ok) {
+        const message =
+          (data && "error" in data && data.error) ||
+          "Failed to update preferences.";
+        setPrefsError(message);
+        return;
+      }
+
+      // Reload user data to get the latest state
+      await loadUserData({ silent: true });
+      setPrefsMessage("Preferences updated successfully.");
+    } catch (err) {
+      console.error("Preferences update error", err);
+      setPrefsError("Unable to update preferences. Please retry.");
+    } finally {
+      setPrefsLoading(false);
+    }
+  };
+
+  const handleSendTestEmail = async () => {
+    setTestEmailLoading(true);
+    setTestEmailError(null);
+    setTestEmailMessage(null);
+
+    try {
+      const response = await fetch("/api/me/notifications/test", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          type: "digest",
+        }),
+      });
+
+      if (handleUnauthorized(response)) {
+        return;
+      }
+
+      const data = (await response.json().catch(() => null)) as {
+        error?: string;
+        message?: string;
+        sent_to?: string;
+      } | null;
+
+      if (!response.ok) {
+        const message = data?.error || "Failed to send test email.";
+        setTestEmailError(message);
+        return;
+      }
+
+      const recipient = data?.sent_to || "your configured email";
+      setTestEmailMessage(`Test email sent to ${recipient}!`);
+    } catch (err) {
+      console.error("Test email error", err);
+      setTestEmailError("Unable to send test email. Please retry.");
+    } finally {
+      setTestEmailLoading(false);
+    }
   };
 
   const handleServiceToggle = async (service: Service) => {
@@ -342,51 +577,228 @@ export default function SettingsClient({ user }: SettingsClientProps) {
 
         <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
           <h2 className="text-xl font-semibold text-gray-900 mb-4">
-            Notifications
+            Notification Preferences
           </h2>
-          <div className="space-y-4">
-            <div className="flex items-center justify-between">
-              <div>
-                <h3 className="text-sm font-medium text-gray-900">
-                  Email Notifications
-                </h3>
-                <p className="text-sm text-gray-600">
-                  Get notified when content becomes available
-                </p>
-              </div>
-              <button className="relative inline-flex h-6 w-11 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent bg-blue-600 transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-blue-600 focus:ring-offset-2">
-                <span className="translate-x-5 pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out"></span>
-              </button>
-            </div>
+          <p className="text-gray-600 mb-6">
+            Configure how and when you receive availability notifications.
+          </p>
 
-            <div className="flex items-center justify-between">
-              <div>
-                <h3 className="text-sm font-medium text-gray-900">
-                  Weekly Digest
-                </h3>
-                <p className="text-sm text-gray-600">
-                  Get a weekly summary of new content
-                </p>
-              </div>
-              <button className="relative inline-flex h-6 w-11 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent bg-gray-200 transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-blue-600 focus:ring-offset-2">
-                <span className="translate-x-0 pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out"></span>
-              </button>
+          {userLoading ? (
+            <div className="flex flex-col items-center gap-3 py-6 text-gray-500">
+              <LoadingSpinner size="md" />
+              <p>Loading preferences...</p>
             </div>
+          ) : (
+            <div className="space-y-6">
+              {/* Email Configuration */}
+              <div className="border-b pb-6">
+                <h3 className="text-sm font-semibold text-gray-900 mb-4">
+                  Email Address
+                </h3>
+                <div className="space-y-3">
+                  <label className="flex items-start gap-3">
+                    <input
+                      type="radio"
+                      name="email-choice"
+                      checked={useAccountEmail}
+                      onChange={() => setUseAccountEmail(true)}
+                      className="mt-1 h-4 w-4 text-blue-600 focus:ring-blue-600"
+                    />
+                    <div className="flex-1">
+                      <div className="text-sm font-medium text-gray-900">
+                        Use account email
+                      </div>
+                      <div className="text-sm text-gray-600">
+                        {user?.email || "Your Auth0 account email"}
+                      </div>
+                    </div>
+                  </label>
+                  <label className="flex items-start gap-3">
+                    <input
+                      type="radio"
+                      name="email-choice"
+                      checked={!useAccountEmail}
+                      onChange={() => setUseAccountEmail(false)}
+                      className="mt-1 h-4 w-4 text-blue-600 focus:ring-blue-600"
+                    />
+                    <div className="flex-1">
+                      <div className="text-sm font-medium text-gray-900 mb-2">
+                        Use custom email
+                      </div>
+                      <input
+                        type="email"
+                        value={notifyEmail}
+                        onChange={(e) => setNotifyEmail(e.target.value)}
+                        disabled={useAccountEmail}
+                        placeholder="your.email@example.com"
+                        className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500 disabled:bg-gray-100 disabled:text-gray-500"
+                      />
+                    </div>
+                  </label>
+                </div>
+              </div>
 
-            <div className="flex items-center justify-between">
-              <div>
-                <h3 className="text-sm font-medium text-gray-900">
-                  Trending Alerts
-                </h3>
-                <p className="text-sm text-gray-600">
-                  Get notified about trending content in your genres
-                </p>
+              {/* Digest Settings */}
+              <div className="border-b pb-6">
+                <div className="flex items-center justify-between mb-4">
+                  <div>
+                    <h3 className="text-sm font-semibold text-gray-900">
+                      Digest Emails
+                    </h3>
+                    <p className="text-sm text-gray-600">
+                      Receive periodic summaries of available content
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setDigestEnabled(!digestEnabled)}
+                    className={`relative inline-flex h-6 w-11 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-blue-600 focus:ring-offset-2 ${
+                      digestEnabled ? "bg-blue-600" : "bg-gray-200"
+                    }`}
+                  >
+                    <span
+                      className={`${
+                        digestEnabled ? "translate-x-5" : "translate-x-0"
+                      } pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out`}
+                    ></span>
+                  </button>
+                </div>
+
+                {digestEnabled && (
+                  <div className="space-y-4 pl-4 border-l-2 border-blue-100">
+                    <div>
+                      <label className="block text-sm font-medium text-gray-900 mb-2">
+                        Send digest every
+                      </label>
+                      <div className="flex gap-3">
+                        <input
+                          type="number"
+                          min="1"
+                          max={
+                            digestIntervalUnit === "days"
+                              ? 31
+                              : digestIntervalUnit === "weeks" ||
+                                  digestIntervalUnit === "months"
+                                ? 12
+                                : 31
+                          }
+                          value={digestInterval}
+                          onChange={(e) => {
+                            const val = parseInt(e.target.value) || 1;
+                            setDigestInterval(Math.max(1, val));
+                          }}
+                          className="w-20 rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+                        />
+                        <select
+                          value={digestIntervalUnit}
+                          onChange={(e) =>
+                            setDigestIntervalUnit(
+                              e.target.value as "days" | "weeks" | "months",
+                            )
+                          }
+                          className="flex-1 rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+                        >
+                          <option value="days">Day(s)</option>
+                          <option value="weeks">Week(s)</option>
+                          <option value="months">Month(s)</option>
+                        </select>
+                      </div>
+                      <p className="mt-1 text-xs text-gray-500">
+                        {digestIntervalUnit === "days" && "Maximum: 31 days"}
+                        {(digestIntervalUnit === "weeks" ||
+                          digestIntervalUnit === "months") &&
+                          "Maximum: 12"}
+                      </p>
+                    </div>
+
+                    <label className="flex items-start gap-3">
+                      <input
+                        type="checkbox"
+                        checked={digestConsent}
+                        onChange={(e) => setDigestConsent(e.target.checked)}
+                        className="mt-1 h-4 w-4 rounded text-blue-600 focus:ring-blue-600"
+                      />
+                      <div className="flex-1">
+                        <div className="text-sm font-medium text-gray-900">
+                          I consent to receive digest emails
+                        </div>
+                        <div className="text-sm text-gray-600">
+                          Required to enable digest notifications
+                        </div>
+                      </div>
+                    </label>
+                  </div>
+                )}
               </div>
-              <button className="relative inline-flex h-6 w-11 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent bg-gray-200 transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-blue-600 focus:ring-offset-2">
-                <span className="translate-x-0 pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out"></span>
-              </button>
+
+              {/* Marketing Consent */}
+              <div className="pb-6">
+                <label className="flex items-start gap-3">
+                  <input
+                    type="checkbox"
+                    checked={marketingConsent}
+                    onChange={(e) => setMarketingConsent(e.target.checked)}
+                    className="mt-1 h-4 w-4 rounded text-blue-600 focus:ring-blue-600"
+                  />
+                  <div className="flex-1">
+                    <div className="text-sm font-medium text-gray-900">
+                      Marketing emails
+                    </div>
+                    <div className="text-sm text-gray-600">
+                      Receive updates about new features and improvements
+                    </div>
+                  </div>
+                </label>
+              </div>
+
+              {/* Messages */}
+              <div className="space-y-2">
+                {prefsMessage && (
+                  <div className="rounded-md bg-green-50 px-3 py-2 text-sm text-green-700">
+                    {prefsMessage}
+                  </div>
+                )}
+                {prefsError && (
+                  <div className="rounded-md bg-red-50 px-3 py-2 text-sm text-red-700">
+                    {prefsError}
+                  </div>
+                )}
+                {testEmailMessage && (
+                  <div className="rounded-md bg-blue-50 px-3 py-2 text-sm text-blue-700">
+                    {testEmailMessage}
+                  </div>
+                )}
+                {testEmailError && (
+                  <div className="rounded-md bg-red-50 px-3 py-2 text-sm text-red-700">
+                    {testEmailError}
+                  </div>
+                )}
+              </div>
+
+              {/* Action Buttons */}
+              <div className="flex flex-col sm:flex-row gap-3 pt-4">
+                <Button
+                  type="button"
+                  onClick={handlePreferencesSave}
+                  disabled={prefsLoading}
+                  loading={prefsLoading}
+                  className="flex-1 sm:flex-initial"
+                >
+                  Save Preferences
+                </Button>
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={handleSendTestEmail}
+                  disabled={testEmailLoading || prefsLoading}
+                  loading={testEmailLoading}
+                  className="flex-1 sm:flex-initial"
+                >
+                  Send Test Email
+                </Button>
+              </div>
             </div>
-          </div>
+          )}
         </div>
 
         <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
