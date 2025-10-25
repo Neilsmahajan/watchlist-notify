@@ -99,6 +99,42 @@ func (s *Server) updateUserPreferencesHandler(c *gin.Context) {
 		return
 	}
 
+	// If digest settings changed, recalculate next_scheduled_at
+	if _, hasEnabled := updates["preferences.digest.enabled"]; hasEnabled {
+		if enabled, ok := updates["preferences.digest.enabled"].(bool); ok && enabled {
+			// Calculate next send time when enabling digest
+			interval := user.Preferences.Digest.Interval
+			unit := user.Preferences.Digest.IntervalUnit
+
+			// Use updated values if provided
+			if newInterval, ok := updates["preferences.digest.interval"].(int); ok {
+				interval = newInterval
+			}
+			if newUnit, ok := updates["preferences.digest.interval_unit"].(string); ok {
+				unit = newUnit
+			}
+
+			nextTime := CalculateNextDigestTime(interval, unit, user.Preferences.Digest.LastSentAt)
+			updates["preferences.digest.next_scheduled_at"] = nextTime
+		}
+	} else if _, hasInterval := updates["preferences.digest.interval"]; hasInterval || updates["preferences.digest.interval_unit"] != nil {
+		// Recalculate if interval or unit changed (and digest is enabled)
+		if user.Preferences.Digest.Enabled {
+			interval := user.Preferences.Digest.Interval
+			unit := user.Preferences.Digest.IntervalUnit
+
+			if newInterval, ok := updates["preferences.digest.interval"].(int); ok {
+				interval = newInterval
+			}
+			if newUnit, ok := updates["preferences.digest.interval_unit"].(string); ok {
+				unit = newUnit
+			}
+
+			nextTime := CalculateNextDigestTime(interval, unit, user.Preferences.Digest.LastSentAt)
+			updates["preferences.digest.next_scheduled_at"] = nextTime
+		}
+	}
+
 	updated, err := s.db.UpdateUserPreferences(c.Request.Context(), user.ID, updates)
 	if err != nil {
 		jsonError(c, http.StatusInternalServerError, "failed to update preferences")

@@ -27,6 +27,8 @@ type Service interface {
 	CountWatchlistItems(ctx context.Context, opts models.ListWatchlistOptions) (int64, error)
 	UpdateWatchlistItem(ctx context.Context, userID, itemID primitive.ObjectID, fields map[string]any) (*models.WatchlistItem, error)
 	DeleteWatchlistItem(ctx context.Context, userID, itemID primitive.ObjectID) error
+	UpdateDigestTimestamps(ctx context.Context, userID primitive.ObjectID, lastSent, nextScheduled time.Time) error
+	GetUsersForDigest(ctx context.Context, now time.Time) ([]*models.User, error)
 }
 
 type service struct {

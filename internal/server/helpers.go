@@ -113,7 +113,9 @@ func validWatchlistType(t string) bool {
 	}
 }
 
-func calculateNextDigestTime(interval int, unit string, lastSent *time.Time) time.Time {
+// CalculateNextDigestTime calculates when the next digest should be sent
+// based on the interval, unit, and last sent time. Exported for use by digest worker.
+func CalculateNextDigestTime(interval int, unit string, lastSent *time.Time) time.Time {
 	base := time.Now()
 	if lastSent != nil && !lastSent.IsZero() {
 		base = *lastSent
@@ -127,7 +129,7 @@ func calculateNextDigestTime(interval int, unit string, lastSent *time.Time) tim
 	case "months":
 		return base.AddDate(0, interval, 0)
 	default:
-		// Fallback to days if unit is unrecognized
+		// Fallback to 7 days if unit is unrecognized
 		return base.AddDate(0, 0, 7)
 	}
 }
