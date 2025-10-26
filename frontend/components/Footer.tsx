@@ -64,15 +64,7 @@ export default function Footer() {
             <ul className="space-y-2 text-sm text-gray-600 dark:text-slate-400">
               <li>
                 <a
-                  href="#"
-                  className="transition-colors hover:text-blue-600 dark:hover:text-blue-400"
-                >
-                  Help Center
-                </a>
-              </li>
-              <li>
-                <a
-                  href="#"
+                  href="/contact"
                   className="transition-colors hover:text-blue-600 dark:hover:text-blue-400"
                 >
                   Contact Us
@@ -80,7 +72,7 @@ export default function Footer() {
               </li>
               <li>
                 <a
-                  href="#"
+                  href="/privacy"
                   className="transition-colors hover:text-blue-600 dark:hover:text-blue-400"
                 >
                   Privacy Policy
@@ -88,7 +80,7 @@ export default function Footer() {
               </li>
               <li>
                 <a
-                  href="#"
+                  href="/terms"
                   className="transition-colors hover:text-blue-600 dark:hover:text-blue-400"
                 >
                   Terms of Service
