@@ -97,6 +97,8 @@ export default function WatchlistClient({
   const [items, setItems] = useState<WatchlistItem[]>(initialItems);
   const [filterType, setFilterType] = useState<"all" | WatchlistType>("all");
   const [sortOption, setSortOption] = useState("-added_at");
+  const [searchQuery, setSearchQuery] = useState("");
+  const [debouncedSearch, setDebouncedSearch] = useState("");
   const [isFetching, setIsFetching] = useState(false);
   const [listError, setListError] = useState<string | null>(initialListError);
   const [actionMessage, setActionMessage] = useState<string | null>(null);
@@ -149,6 +151,14 @@ export default function WatchlistClient({
   useEffect(() => {
     availabilityLoadingRef.current = availabilityLoading;
   }, [availabilityLoading]);
+
+  // Debounce search input
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setDebouncedSearch(searchQuery);
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [searchQuery]);
 
   const requestAvailability = useCallback(
     async (item: WatchlistItem, options?: { force?: boolean }) => {
@@ -274,6 +284,9 @@ export default function WatchlistClient({
         if (sortOption) {
           params.set("sort", sortOption);
         }
+        if (debouncedSearch.trim()) {
+          params.set("search", debouncedSearch.trim());
+        }
 
         const queryString = params.toString();
         const url = queryString
@@ -328,7 +341,13 @@ export default function WatchlistClient({
         }
       }
     },
-    [filterType, sortOption, fetchAvailabilityForItems, handleUnauthorized],
+    [
+      filterType,
+      sortOption,
+      debouncedSearch,
+      fetchAvailabilityForItems,
+      handleUnauthorized,
+    ],
   );
 
   useEffect(() => {
@@ -564,7 +583,7 @@ export default function WatchlistClient({
   // Reset to page 1 when filters change
   useEffect(() => {
     setCurrentPage(1);
-  }, [filterType, sortOption]);
+  }, [filterType, sortOption, debouncedSearch]);
 
   const handlePageChange = (newPage: number) => {
     setCurrentPage(newPage);
@@ -588,6 +607,47 @@ export default function WatchlistClient({
 
       <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-8">
         <div className="flex flex-wrap items-end gap-4 mb-6">
+          <div className="flex flex-col flex-1 min-w-[200px]">
+            <label
+              className="text-sm font-medium text-gray-700"
+              htmlFor="watchlist-search"
+            >
+              Search
+            </label>
+            <div className="relative mt-1">
+              <input
+                id="watchlist-search"
+                type="text"
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                placeholder="Search by title..."
+                className="w-full rounded-md border border-gray-300 px-3 py-2 pr-10 text-sm focus:border-transparent focus:ring-2 focus:ring-blue-500"
+              />
+              {searchQuery && (
+                <button
+                  type="button"
+                  onClick={() => setSearchQuery("")}
+                  className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600"
+                  aria-label="Clear search"
+                >
+                  <svg
+                    className="w-5 h-5"
+                    fill="none"
+                    stroke="currentColor"
+                    viewBox="0 0 24 24"
+                  >
+                    <path
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      strokeWidth={2}
+                      d="M6 18L18 6M6 6l12 12"
+                    />
+                  </svg>
+                </button>
+              )}
+            </div>
+          </div>
+
           <div className="flex flex-col">
             <label
               className="text-sm font-medium text-gray-700"
