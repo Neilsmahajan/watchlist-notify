@@ -103,6 +103,8 @@ export default function WatchlistClient({
   const [actionError, setActionError] = useState<string | null>(null);
   const [updatingId, setUpdatingId] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [currentPage, setCurrentPage] = useState(1);
+  const [itemsPerPage, setItemsPerPage] = useState(20);
   const [availability, setAvailability] = useState<
     Record<string, AvailabilityResponse | null>
   >(() => ({ ...initialAvailability }));
@@ -265,6 +267,7 @@ export default function WatchlistClient({
 
       try {
         const params = new URLSearchParams();
+        params.set("limit", "0"); // Fetch all items
         if (filterType !== "all") {
           params.set("type", filterType);
         }
@@ -275,7 +278,7 @@ export default function WatchlistClient({
         const queryString = params.toString();
         const url = queryString
           ? `/api/watchlist?${queryString}`
-          : "/api/watchlist";
+          : "/api/watchlist?limit=0";
 
         const response = await fetch(url, { signal });
 
@@ -552,6 +555,27 @@ export default function WatchlistClient({
     [requestAvailability],
   );
 
+  // Pagination logic
+  const totalPages = Math.ceil(items.length / itemsPerPage);
+  const startIndex = (currentPage - 1) * itemsPerPage;
+  const endIndex = startIndex + itemsPerPage;
+  const paginatedItems = items.slice(startIndex, endIndex);
+
+  // Reset to page 1 when filters change
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [filterType, sortOption]);
+
+  const handlePageChange = (newPage: number) => {
+    setCurrentPage(newPage);
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  };
+
+  const handleItemsPerPageChange = (newItemsPerPage: number) => {
+    setItemsPerPage(newItemsPerPage);
+    setCurrentPage(1);
+  };
+
   return (
     <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
       <div className="mb-8">
@@ -739,255 +763,347 @@ export default function WatchlistClient({
           }
 
           return (
-            <ul className="space-y-4">
-              {items.map((item) => {
-                const addedDate = formatDate(item.added_at);
-                const updatedDate = formatDate(item.updated_at);
-                const disabling =
-                  updatingId === item.id || deletingId === item.id;
-                const availabilityData = availability[item.id];
-                const availabilityIsLoading =
-                  availabilityLoading[item.id] ?? false;
-                const availabilityMessage = availabilityError[item.id];
-                const groupedProviders: Record<
-                  AvailabilityAccess,
-                  AvailabilityProvider[]
-                > = {
-                  subscription: [],
-                  free: [],
-                  ads: [],
-                };
-                const seenByCategory: Record<
-                  AvailabilityAccess,
-                  Set<string>
-                > = {
-                  subscription: new Set(),
-                  free: new Set(),
-                  ads: new Set(),
-                };
-                if (
-                  availabilityData &&
-                  Array.isArray(availabilityData.providers)
-                ) {
-                  for (const provider of availabilityData.providers) {
-                    if (!provider) {
-                      continue;
+            <div>
+              <div className="mb-4 flex items-center justify-between text-sm text-gray-600">
+                <div>
+                  Showing {startIndex + 1}-{Math.min(endIndex, items.length)} of{" "}
+                  {items.length} items
+                </div>
+                <div className="flex items-center gap-2">
+                  <label htmlFor="items-per-page" className="text-sm">
+                    Items per page:
+                  </label>
+                  <select
+                    id="items-per-page"
+                    value={itemsPerPage}
+                    onChange={(e) =>
+                      handleItemsPerPageChange(Number(e.target.value))
                     }
-                    const accessList =
-                      provider.access && provider.access.length
-                        ? Array.from(new Set(provider.access))
-                        : [getPrimaryAccess(provider)];
-                    for (const access of accessList) {
-                      const set = seenByCategory[access];
-                      if (!set || set.has(provider.code)) {
+                    className="rounded-md border border-gray-300 px-2 py-1 text-sm focus:border-transparent focus:ring-2 focus:ring-blue-500"
+                  >
+                    <option value={10}>10</option>
+                    <option value={20}>20</option>
+                    <option value={50}>50</option>
+                    <option value={100}>100</option>
+                  </select>
+                </div>
+              </div>
+              <ul className="space-y-4">
+                {paginatedItems.map((item) => {
+                  const addedDate = formatDate(item.added_at);
+                  const updatedDate = formatDate(item.updated_at);
+                  const disabling =
+                    updatingId === item.id || deletingId === item.id;
+                  const availabilityData = availability[item.id];
+                  const availabilityIsLoading =
+                    availabilityLoading[item.id] ?? false;
+                  const availabilityMessage = availabilityError[item.id];
+                  const groupedProviders: Record<
+                    AvailabilityAccess,
+                    AvailabilityProvider[]
+                  > = {
+                    subscription: [],
+                    free: [],
+                    ads: [],
+                  };
+                  const seenByCategory: Record<
+                    AvailabilityAccess,
+                    Set<string>
+                  > = {
+                    subscription: new Set(),
+                    free: new Set(),
+                    ads: new Set(),
+                  };
+                  if (
+                    availabilityData &&
+                    Array.isArray(availabilityData.providers)
+                  ) {
+                    for (const provider of availabilityData.providers) {
+                      if (!provider) {
                         continue;
                       }
-                      set.add(provider.code);
-                      groupedProviders[access].push(provider);
+                      const accessList =
+                        provider.access && provider.access.length
+                          ? Array.from(new Set(provider.access))
+                          : [getPrimaryAccess(provider)];
+                      for (const access of accessList) {
+                        const set = seenByCategory[access];
+                        if (!set || set.has(provider.code)) {
+                          continue;
+                        }
+                        set.add(provider.code);
+                        groupedProviders[access].push(provider);
+                      }
+                    }
+                    for (const access of AVAILABILITY_ACCESS_ORDER) {
+                      groupedProviders[access].sort((a, b) =>
+                        (a.name || a.code).localeCompare(b.name || b.code),
+                      );
                     }
                   }
-                  for (const access of AVAILABILITY_ACCESS_ORDER) {
-                    groupedProviders[access].sort((a, b) =>
-                      (a.name || a.code).localeCompare(b.name || b.code),
-                    );
-                  }
-                }
-                const hasProviders = AVAILABILITY_ACCESS_ORDER.some(
-                  (access) => groupedProviders[access].length > 0,
-                );
+                  const hasProviders = AVAILABILITY_ACCESS_ORDER.some(
+                    (access) => groupedProviders[access].length > 0,
+                  );
 
-                return (
-                  <li
-                    key={item.id}
-                    className="rounded-lg border border-gray-200 p-6 shadow-sm"
-                  >
-                    <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
-                      <div>
-                        <h3 className="text-xl font-semibold text-gray-900">
-                          {item.title}
-                        </h3>
-                        <div className="mt-2 flex flex-wrap items-center gap-3 text-sm text-gray-600">
-                          <span className="inline-flex items-center rounded-full bg-blue-50 px-2 py-0.5 text-xs font-medium text-blue-700">
-                            {typeLabels[item.type]}
-                          </span>
-                          {typeof item.year === "number" && item.year > 0 && (
-                            <span>{item.year}</span>
-                          )}
-                          {item.tmdb_id ? (
-                            <span>TMDb #{item.tmdb_id}</span>
-                          ) : null}
-                          {item.tags && item.tags.length > 0 ? (
-                            <span>Tags: {item.tags.join(", ")}</span>
-                          ) : null}
+                  return (
+                    <li
+                      key={item.id}
+                      className="rounded-lg border border-gray-200 p-6 shadow-sm"
+                    >
+                      <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
+                        <div>
+                          <h3 className="text-xl font-semibold text-gray-900">
+                            {item.title}
+                          </h3>
+                          <div className="mt-2 flex flex-wrap items-center gap-3 text-sm text-gray-600">
+                            <span className="inline-flex items-center rounded-full bg-blue-50 px-2 py-0.5 text-xs font-medium text-blue-700">
+                              {typeLabels[item.type]}
+                            </span>
+                            {typeof item.year === "number" && item.year > 0 && (
+                              <span>{item.year}</span>
+                            )}
+                            {item.tmdb_id ? (
+                              <span>TMDb #{item.tmdb_id}</span>
+                            ) : null}
+                            {item.tags && item.tags.length > 0 ? (
+                              <span>Tags: {item.tags.join(", ")}</span>
+                            ) : null}
+                          </div>
                         </div>
-                      </div>
-                      <Button
-                        variant="outline"
-                        type="button"
-                        onClick={() => handleDelete(item.id)}
-                        loading={deletingId === item.id}
-                        disabled={deletingId === item.id}
-                      >
-                        Remove
-                      </Button>
-                    </div>
-
-                    <div className="mt-4 grid gap-4 md:grid-cols-2 md:items-center">
-                      <div>
-                        <label
-                          htmlFor={`watchlist-status-${item.id}`}
-                          className="mb-1 block text-sm font-medium text-gray-700"
+                        <Button
+                          variant="outline"
+                          type="button"
+                          onClick={() => handleDelete(item.id)}
+                          loading={deletingId === item.id}
+                          disabled={deletingId === item.id}
                         >
-                          Status
-                        </label>
-                        <select
-                          id={`watchlist-status-${item.id}`}
-                          value={item.status}
-                          onChange={(event) =>
-                            handleStatusChange(
-                              item.id,
-                              event.target.value as WatchlistStatus,
-                            )
-                          }
-                          disabled={disabling}
-                          className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-transparent focus:ring-2 focus:ring-blue-500 disabled:cursor-not-allowed disabled:bg-gray-100"
-                        >
-                          {statusOptions.map((option) => (
-                            <option key={option.value} value={option.value}>
-                              {option.label}
-                            </option>
-                          ))}
-                        </select>
+                          Remove
+                        </Button>
                       </div>
 
-                      <div className="text-sm text-gray-500">
-                        {addedDate && <p>Added {addedDate}</p>}
-                        {updatedDate && <p>Updated {updatedDate}</p>}
-                      </div>
-                    </div>
-
-                    <div className="mt-4 rounded-md border border-gray-100 bg-gray-50 p-4">
-                      <div className="mb-2 flex flex-wrap items-center gap-2">
-                        <p className="text-sm font-semibold text-gray-700">
-                          Streaming availability
-                          {availabilityData?.region
-                            ? ` · ${availabilityData.region}`
-                            : ""}
-                        </p>
-                        {item.tmdb_id ? (
-                          <Button
-                            size="sm"
-                            variant="outline"
-                            type="button"
-                            onClick={() => handleAvailabilityRefresh(item)}
-                            loading={availabilityIsLoading}
+                      <div className="mt-4 grid gap-4 md:grid-cols-2 md:items-center">
+                        <div>
+                          <label
+                            htmlFor={`watchlist-status-${item.id}`}
+                            className="mb-1 block text-sm font-medium text-gray-700"
                           >
-                            Check again
-                          </Button>
-                        ) : null}
-                      </div>
-                      {!item.tmdb_id ? (
-                        <p className="text-sm text-gray-600">
-                          Link a TMDb entry to check availability.
-                        </p>
-                      ) : availabilityIsLoading &&
-                        !hasProviders &&
-                        !availabilityMessage ? (
-                        <div className="flex items-center gap-2 text-sm text-gray-500">
-                          <LoadingSpinner size="sm" />
-                          <span>Checking your services…</span>
-                        </div>
-                      ) : availabilityMessage ? (
-                        <p className="text-sm text-red-600">
-                          {availabilityMessage}
-                        </p>
-                      ) : hasProviders ? (
-                        <div className="space-y-3">
-                          {AVAILABILITY_ACCESS_ORDER.map((access) => {
-                            const providersForAccess = groupedProviders[access];
-                            if (!providersForAccess.length) {
-                              return null;
+                            Status
+                          </label>
+                          <select
+                            id={`watchlist-status-${item.id}`}
+                            value={item.status}
+                            onChange={(event) =>
+                              handleStatusChange(
+                                item.id,
+                                event.target.value as WatchlistStatus,
+                              )
                             }
-                            const meta = AVAILABILITY_ACCESS_META[access];
-                            return (
-                              <div
-                                key={`${item.id}-${access}`}
-                                className="space-y-2"
-                              >
-                                <p className="text-xs font-semibold uppercase text-gray-500">
-                                  {meta.label}
-                                </p>
-                                <div className="flex flex-wrap items-center gap-3">
-                                  {providersForAccess.map((provider) => {
-                                    const logoSrc = provider.logo_path
-                                      ? `${TMDB_IMAGE_BASE}${provider.logo_path}`
-                                      : null;
-                                    return (
-                                      <a
-                                        key={`${item.id}-${access}-${provider.code}`}
-                                        href={provider.link ?? undefined}
-                                        target={
-                                          provider.link ? "_blank" : undefined
-                                        }
-                                        rel={
-                                          provider.link
-                                            ? "noopener noreferrer"
-                                            : undefined
-                                        }
-                                        className={`flex items-center gap-2 rounded-full px-3 py-1 text-sm font-medium shadow-sm transition-colors ${meta.chipClass}`}
-                                      >
-                                        {logoSrc ? (
-                                          <Image
-                                            src={logoSrc}
-                                            alt={provider.name}
-                                            width={28}
-                                            height={28}
-                                            className="h-7 w-7 rounded"
-                                          />
-                                        ) : null}
-                                        <span>{provider.name}</span>
-                                      </a>
-                                    );
-                                  })}
-                                </div>
-                              </div>
-                            );
-                          })}
-                          {availabilityData?.unmatched_user_services &&
-                          availabilityData.unmatched_user_services.length ? (
-                            <p className="text-xs text-gray-500">
-                              Not seeing:{" "}
-                              {availabilityData.unmatched_user_services.join(
-                                ", ",
-                              )}
-                            </p>
-                          ) : null}
+                            disabled={disabling}
+                            className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-transparent focus:ring-2 focus:ring-blue-500 disabled:cursor-not-allowed disabled:bg-gray-100"
+                          >
+                            {statusOptions.map((option) => (
+                              <option key={option.value} value={option.value}>
+                                {option.label}
+                              </option>
+                            ))}
+                          </select>
                         </div>
-                      ) : availabilityData ? (
-                        <div className="space-y-2 text-sm text-gray-600">
-                          <p>
-                            Not currently available on your connected services.
+
+                        <div className="text-sm text-gray-500">
+                          {addedDate && <p>Added {addedDate}</p>}
+                          {updatedDate && <p>Updated {updatedDate}</p>}
+                        </div>
+                      </div>
+
+                      <div className="mt-4 rounded-md border border-gray-100 bg-gray-50 p-4">
+                        <div className="mb-2 flex flex-wrap items-center gap-2">
+                          <p className="text-sm font-semibold text-gray-700">
+                            Streaming availability
+                            {availabilityData?.region
+                              ? ` · ${availabilityData.region}`
+                              : ""}
                           </p>
-                          {availabilityData.unmatched_user_services &&
-                          availabilityData.unmatched_user_services.length ? (
-                            <p className="text-xs text-gray-500">
-                              Still missing:{" "}
-                              {availabilityData.unmatched_user_services.join(
-                                ", ",
-                              )}
-                            </p>
+                          {item.tmdb_id ? (
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              type="button"
+                              onClick={() => handleAvailabilityRefresh(item)}
+                              loading={availabilityIsLoading}
+                            >
+                              Check again
+                            </Button>
                           ) : null}
                         </div>
-                      ) : (
-                        <p className="text-sm text-gray-600">
-                          Availability will appear once checked.
-                        </p>
-                      )}
-                    </div>
-                  </li>
-                );
-              })}
-            </ul>
+                        {!item.tmdb_id ? (
+                          <p className="text-sm text-gray-600">
+                            Link a TMDb entry to check availability.
+                          </p>
+                        ) : availabilityIsLoading &&
+                          !hasProviders &&
+                          !availabilityMessage ? (
+                          <div className="flex items-center gap-2 text-sm text-gray-500">
+                            <LoadingSpinner size="sm" />
+                            <span>Checking your services…</span>
+                          </div>
+                        ) : availabilityMessage ? (
+                          <p className="text-sm text-red-600">
+                            {availabilityMessage}
+                          </p>
+                        ) : hasProviders ? (
+                          <div className="space-y-3">
+                            {AVAILABILITY_ACCESS_ORDER.map((access) => {
+                              const providersForAccess =
+                                groupedProviders[access];
+                              if (!providersForAccess.length) {
+                                return null;
+                              }
+                              const meta = AVAILABILITY_ACCESS_META[access];
+                              return (
+                                <div
+                                  key={`${item.id}-${access}`}
+                                  className="space-y-2"
+                                >
+                                  <p className="text-xs font-semibold uppercase text-gray-500">
+                                    {meta.label}
+                                  </p>
+                                  <div className="flex flex-wrap items-center gap-3">
+                                    {providersForAccess.map((provider) => {
+                                      const logoSrc = provider.logo_path
+                                        ? `${TMDB_IMAGE_BASE}${provider.logo_path}`
+                                        : null;
+                                      return (
+                                        <a
+                                          key={`${item.id}-${access}-${provider.code}`}
+                                          href={provider.link ?? undefined}
+                                          target={
+                                            provider.link ? "_blank" : undefined
+                                          }
+                                          rel={
+                                            provider.link
+                                              ? "noopener noreferrer"
+                                              : undefined
+                                          }
+                                          className={`flex items-center gap-2 rounded-full px-3 py-1 text-sm font-medium shadow-sm transition-colors ${meta.chipClass}`}
+                                        >
+                                          {logoSrc ? (
+                                            <Image
+                                              src={logoSrc}
+                                              alt={provider.name}
+                                              width={28}
+                                              height={28}
+                                              className="h-7 w-7 rounded"
+                                            />
+                                          ) : null}
+                                          <span>{provider.name}</span>
+                                        </a>
+                                      );
+                                    })}
+                                  </div>
+                                </div>
+                              );
+                            })}
+                            {availabilityData?.unmatched_user_services &&
+                            availabilityData.unmatched_user_services.length ? (
+                              <p className="text-xs text-gray-500">
+                                Not seeing:{" "}
+                                {availabilityData.unmatched_user_services.join(
+                                  ", ",
+                                )}
+                              </p>
+                            ) : null}
+                          </div>
+                        ) : availabilityData ? (
+                          <div className="space-y-2 text-sm text-gray-600">
+                            <p>
+                              Not currently available on your connected
+                              services.
+                            </p>
+                            {availabilityData.unmatched_user_services &&
+                            availabilityData.unmatched_user_services.length ? (
+                              <p className="text-xs text-gray-500">
+                                Still missing:{" "}
+                                {availabilityData.unmatched_user_services.join(
+                                  ", ",
+                                )}
+                              </p>
+                            ) : null}
+                          </div>
+                        ) : (
+                          <p className="text-sm text-gray-600">
+                            Availability will appear once checked.
+                          </p>
+                        )}
+                      </div>
+                    </li>
+                  );
+                })}
+              </ul>
+              {totalPages > 1 && (
+                <div className="mt-6 flex items-center justify-center gap-2">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => handlePageChange(currentPage - 1)}
+                    disabled={currentPage === 1}
+                  >
+                    Previous
+                  </Button>
+                  <div className="flex gap-1">
+                    {Array.from({ length: totalPages }, (_, i) => i + 1).map(
+                      (page) => {
+                        // Show first page, last page, current page, and pages around current
+                        const showPage =
+                          page === 1 ||
+                          page === totalPages ||
+                          Math.abs(page - currentPage) <= 1;
+                        const showEllipsis =
+                          (page === 2 && currentPage > 4) ||
+                          (page === totalPages - 1 &&
+                            currentPage < totalPages - 3);
+
+                        if (!showPage && !showEllipsis) {
+                          return null;
+                        }
+
+                        if (showEllipsis) {
+                          return (
+                            <span
+                              key={page}
+                              className="px-3 py-1 text-sm text-gray-500"
+                            >
+                              ...
+                            </span>
+                          );
+                        }
+
+                        return (
+                          <button
+                            key={page}
+                            onClick={() => handlePageChange(page)}
+                            className={`rounded-md px-3 py-1 text-sm ${
+                              page === currentPage
+                                ? "bg-blue-600 text-white"
+                                : "bg-gray-100 text-gray-700 hover:bg-gray-200"
+                            }`}
+                          >
+                            {page}
+                          </button>
+                        );
+                      },
+                    )}
+                  </div>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => handlePageChange(currentPage + 1)}
+                    disabled={currentPage === totalPages}
+                  >
+                    Next
+                  </Button>
+                </div>
+              )}
+            </div>
           );
         })()}
       </div>

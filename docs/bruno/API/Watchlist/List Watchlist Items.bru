@@ -5,14 +5,14 @@ meta {
 }
 
 get {
-  url: {{base_url}}/api/watchlist?type=show&sort=title
+  url: {{base_url}}/api/watchlist
   body: none
   auth: inherit
 }
 
 params:query {
-  type: show
-  sort: title
+  ~type: show
+  ~sort: title
   ~limit: 2
   ~status: planned
 }

@@ -222,7 +222,7 @@ export function useWatchlistInsights(
       }
 
       try {
-        const response = await fetch("/api/watchlist?sort=-added_at", {
+        const response = await fetch("/api/watchlist?sort=-added_at&limit=0", {
           signal,
         });
 

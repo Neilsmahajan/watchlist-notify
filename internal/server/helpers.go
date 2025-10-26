@@ -11,7 +11,7 @@ import (
 
 const (
 	defaultLimit = 20
-	maxLimit     = 100
+	maxLimit     = 1000 // Increased to support larger watchlists
 )
 
 // jsonError standardizes error responses and aborts the context.
@@ -69,19 +69,24 @@ func toString(v any) string {
 
 // parseLimitOffset parses limit/offset with defaults and bounds. On invalid
 // values it writes an error and returns (0,0,false).
+// If limit is set to 0, it returns maxLimit to fetch all items.
 func parseLimitOffset(c *gin.Context) (int, int, bool) {
 	q := c.Request.URL.Query()
 	limit := defaultLimit
 	if v := q.Get("limit"); v != "" {
 		n, err := strconv.Atoi(v)
-		if err != nil || n <= 0 {
+		if err != nil || n < 0 {
 			jsonError(c, http.StatusBadRequest, "invalid limit")
 			return 0, 0, false
 		}
-		if n > maxLimit {
-			n = maxLimit
+		if n == 0 {
+			// Special case: limit=0 means fetch all items
+			limit = maxLimit
+		} else if n > maxLimit {
+			limit = maxLimit
+		} else {
+			limit = n
 		}
-		limit = n
 	}
 	offset := 0
 	if v := q.Get("offset"); v != "" {

@@ -25,6 +25,7 @@ async function bootstrapWatchlist(token: string): Promise<BootstrapResult> {
 
   const watchlistUrl = new URL("/api/watchlist", backend);
   watchlistUrl.searchParams.set("sort", "-added_at");
+  watchlistUrl.searchParams.set("limit", "0"); // Fetch all items
 
   try {
     const response = await fetch(watchlistUrl, {
