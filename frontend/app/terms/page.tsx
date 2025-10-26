@@ -27,10 +27,10 @@ export default function TermsPage() {
               Agreement to Terms
             </h2>
             <p className="text-gray-600 dark:text-slate-400 mb-4">
-              These Terms of Service ("Terms") govern your access to and use of
-              Watchlist Notify's website, services, and applications
-              (collectively, the "Service"). By accessing or using the Service,
-              you agree to be bound by these Terms.
+              These Terms of Service (&quot;Terms&quot;) govern your access to
+              and use of Watchlist Notify&apos;s website, services, and
+              applications (collectively, the &quot;Service&quot;). By accessing
+              or using the Service, you agree to be bound by these Terms.
             </p>
             <p className="text-gray-600 dark:text-slate-400">
               If you do not agree to these Terms, please do not use the Service.
@@ -215,10 +215,11 @@ export default function TermsPage() {
               Disclaimer of Warranties
             </h2>
             <p className="text-gray-600 dark:text-slate-400 mb-4">
-              THE SERVICE IS PROVIDED "AS IS" AND "AS AVAILABLE" WITHOUT
-              WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED, INCLUDING BUT
-              NOT LIMITED TO IMPLIED WARRANTIES OF MERCHANTABILITY, FITNESS FOR
-              A PARTICULAR PURPOSE, AND NON-INFRINGEMENT.
+              THE SERVICE IS PROVIDED &quot;AS IS&quot; AND &quot;AS
+              AVAILABLE&quot; WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR
+              IMPLIED, INCLUDING BUT NOT LIMITED TO IMPLIED WARRANTIES OF
+              MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, AND
+              NON-INFRINGEMENT.
             </p>
             <p className="text-gray-600 dark:text-slate-400">
               We do not warrant that the Service will be uninterrupted, secure,
@@ -265,9 +266,9 @@ export default function TermsPage() {
               You agree to indemnify, defend, and hold harmless Watchlist Notify
               and its officers, directors, employees, and agents from and
               against any claims, liabilities, damages, losses, and expenses,
-              including reasonable attorneys' fees, arising out of or in any way
-              connected with your access to or use of the Service or your
-              violation of these Terms.
+              including reasonable attorneys&apos; fees, arising out of or in
+              any way connected with your access to or use of the Service or
+              your violation of these Terms.
             </p>
           </section>
 

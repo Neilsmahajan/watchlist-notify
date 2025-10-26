@@ -15,7 +15,7 @@ export default function ContactPage() {
             Contact Us
           </h1>
           <p className="text-lg text-gray-600 dark:text-slate-400">
-            Have a question or feedback? We'd love to hear from you.
+            Have a question or feedback? We&apos;d love to hear from you.
           </p>
         </div>
 
@@ -65,8 +65,8 @@ export default function ContactPage() {
                 Security Issues
               </h3>
               <p className="text-gray-600 dark:text-slate-400 mb-2">
-                If you've discovered a security vulnerability, please email us
-                with subject line{" "}
+                If you&apos;ve discovered a security vulnerability, please email
+                us with subject line{" "}
                 <code className="bg-gray-100 dark:bg-slate-800 px-2 py-1 rounded text-sm">
                   [SECURITY] &lt;short summary&gt;
                 </code>

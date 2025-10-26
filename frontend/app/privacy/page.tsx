@@ -27,9 +27,10 @@ export default function PrivacyPage() {
               Introduction
             </h2>
             <p className="text-gray-600 dark:text-slate-400 mb-4">
-              Watchlist Notify ("we," "our," or "us") is committed to protecting
-              your privacy. This Privacy Policy explains how we collect, use,
-              disclose, and safeguard your information when you use our service.
+              Watchlist Notify (&quot;we,&quot; &quot;our,&quot; or
+              &quot;us&quot;) is committed to protecting your privacy. This
+              Privacy Policy explains how we collect, use, disclose, and
+              safeguard your information when you use our service.
             </p>
             <p className="text-gray-600 dark:text-slate-400">
               By using Watchlist Notify, you agree to the collection and use of
@@ -271,7 +272,7 @@ export default function PrivacyPage() {
           {/* Children's Privacy */}
           <section>
             <h2 className="text-2xl font-semibold text-gray-900 dark:text-slate-100 mb-4">
-              Children's Privacy
+              Children&apos;s Privacy
             </h2>
             <p className="text-gray-600 dark:text-slate-400">
               Our service is not directed to individuals under the age of 13. We
@@ -289,8 +290,8 @@ export default function PrivacyPage() {
             <p className="text-gray-600 dark:text-slate-400">
               We may update our Privacy Policy from time to time. We will notify
               you of any changes by posting the new Privacy Policy on this page
-              and updating the "Last updated" date. You are advised to review
-              this Privacy Policy periodically for any changes.
+              and updating the &quot;Last updated&quot; date. You are advised to
+              review this Privacy Policy periodically for any changes.
             </p>
           </section>
 
