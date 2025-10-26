@@ -1,14 +1,15 @@
 "use client";
 
+import { useState, useEffect } from "react";
 import { Button, EmptyState, LoadingSpinner } from "@/components/ui";
+import { useWatchlistInsights } from "@/lib/hooks/useWatchlistInsights";
+import { SessionUser } from "@/lib/auth/types";
 import {
-  AVAILABILITY_ACCESS_META,
   formatDisplayDate,
-  getPrimaryAccess,
+  AVAILABILITY_ACCESS_META,
   typeLabels,
-  useWatchlistInsights,
+  getPrimaryAccess,
 } from "@/lib/hooks/useWatchlistInsights";
-import type { SessionUser } from "@/lib/auth/types";
 
 interface HomeDashboardClientProps {
   user: SessionUser | null;
@@ -20,12 +21,40 @@ export default function HomeDashboardClient({
   const {
     stats,
     availableSectionLoading,
-    nowStreaming,
+    availableForYou,
     watchlistError,
     servicesError,
     sortedServices,
     servicesLoading,
   } = useWatchlistInsights({ enabled: Boolean(user) });
+
+  const [currentPage, setCurrentPage] = useState(1);
+  const [itemsPerPage, setItemsPerPage] = useState(10);
+
+  // Pagination logic
+  const totalPages = Math.ceil(availableForYou.length / itemsPerPage);
+  const startIndex = (currentPage - 1) * itemsPerPage;
+  const endIndex = startIndex + itemsPerPage;
+  const paginatedItems = availableForYou.slice(startIndex, endIndex);
+
+  // Reset to page 1 when available items change
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [availableForYou.length]);
+
+  const handlePageChange = (newPage: number) => {
+    setCurrentPage(newPage);
+    // Scroll to the "Now Streaming" section
+    document.getElementById("now-streaming")?.scrollIntoView({
+      behavior: "smooth",
+      block: "start",
+    });
+  };
+
+  const handleItemsPerPageChange = (newItemsPerPage: number) => {
+    setItemsPerPage(newItemsPerPage);
+    setCurrentPage(1);
+  };
 
   if (!user) {
     return (
@@ -104,7 +133,10 @@ export default function HomeDashboardClient({
             </div>
           </div>
 
-          <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
+          <div
+            className="bg-white rounded-lg shadow-sm border border-gray-200 p-6"
+            id="now-streaming"
+          >
             <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4 mb-4">
               <div>
                 <h2 className="text-xl font-semibold text-gray-900">
@@ -123,68 +155,165 @@ export default function HomeDashboardClient({
               <div className="flex items-center justify-center py-12">
                 <LoadingSpinner size="lg" />
               </div>
-            ) : nowStreaming.length ? (
-              <ul className="space-y-4">
-                {nowStreaming.map(({ item, providers }) => (
-                  <li
-                    key={item.id}
-                    className="flex flex-col gap-4 rounded-lg border border-gray-200 p-4 md:flex-row md:items-start md:justify-between"
-                  >
-                    <div>
-                      <div className="flex flex-wrap items-center gap-2 mb-2">
-                        <span className="rounded-full bg-blue-50 px-2 py-0.5 text-xs font-semibold uppercase tracking-wide text-blue-600">
-                          {typeLabels[item.type]}
-                        </span>
-                        {item.year ? (
-                          <span className="text-sm text-gray-500">
-                            {item.year}
+            ) : availableForYou.length ? (
+              <div>
+                <div className="mb-4 flex items-center justify-between text-sm text-gray-600">
+                  <div>
+                    Showing {startIndex + 1}-
+                    {Math.min(endIndex, availableForYou.length)} of{" "}
+                    {availableForYou.length} available{" "}
+                    {availableForYou.length === 1 ? "title" : "titles"}
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <label
+                      htmlFor="items-per-page-dashboard"
+                      className="text-sm"
+                    >
+                      Items per page:
+                    </label>
+                    <select
+                      id="items-per-page-dashboard"
+                      value={itemsPerPage}
+                      onChange={(e) =>
+                        handleItemsPerPageChange(Number(e.target.value))
+                      }
+                      className="rounded-md border border-gray-300 px-2 py-1 text-sm focus:border-transparent focus:ring-2 focus:ring-blue-500"
+                    >
+                      <option value={5}>5</option>
+                      <option value={10}>10</option>
+                      <option value={20}>20</option>
+                      <option value={50}>50</option>
+                    </select>
+                  </div>
+                </div>
+                <ul className="space-y-4">
+                  {paginatedItems.map(({ item, providers }) => (
+                    <li
+                      key={item.id}
+                      className="flex flex-col gap-4 rounded-lg border border-gray-200 p-4 md:flex-row md:items-start md:justify-between"
+                    >
+                      <div>
+                        <div className="flex flex-wrap items-center gap-2 mb-2">
+                          <span className="rounded-full bg-blue-50 px-2 py-0.5 text-xs font-semibold uppercase tracking-wide text-blue-600">
+                            {typeLabels[item.type]}
                           </span>
-                        ) : null}
-                        {item.updated_at ? (
-                          <span className="text-sm text-gray-400">
-                            Updated {formatDisplayDate(item.updated_at)}
-                          </span>
-                        ) : null}
-                      </div>
-                      <h3 className="text-lg font-semibold text-gray-900">
-                        {item.title}
-                      </h3>
-                      {item.status !== "finished" && (
-                        <p className="mt-1 text-sm text-gray-500">
-                          Status:{" "}
-                          {item.status === "watching" ? "Watching" : "On Deck"}
-                        </p>
-                      )}
-                    </div>
-                    <div className="md:min-w-[200px]">
-                      <p className="text-xs uppercase text-gray-500 mb-2">
-                        Watch on
-                      </p>
-                      <div className="flex flex-wrap gap-2">
-                        {providers.slice(0, 3).map((provider) => {
-                          const meta =
-                            AVAILABILITY_ACCESS_META[
-                              getPrimaryAccess(provider)
-                            ];
-                          return (
-                            <span
-                              key={provider.code}
-                              className={`rounded-full px-2.5 py-1 text-xs font-medium border border-transparent ${meta.badgeClass}`}
-                            >
-                              {provider.name}
+                          {item.year ? (
+                            <span className="text-sm text-gray-500">
+                              {item.year}
                             </span>
-                          );
-                        })}
-                        {providers.length > 3 && (
-                          <span className="rounded-full bg-gray-100 px-2.5 py-1 text-xs font-medium text-gray-600">
-                            +{providers.length - 3} more
-                          </span>
+                          ) : null}
+                          {item.updated_at ? (
+                            <span className="text-sm text-gray-400">
+                              Updated {formatDisplayDate(item.updated_at)}
+                            </span>
+                          ) : null}
+                        </div>
+                        <h3 className="text-lg font-semibold text-gray-900">
+                          {item.title}
+                        </h3>
+                        {item.status !== "finished" && (
+                          <p className="mt-1 text-sm text-gray-500">
+                            Status:{" "}
+                            {item.status === "watching"
+                              ? "Watching"
+                              : "On Deck"}
+                          </p>
                         )}
                       </div>
+                      <div className="md:min-w-[200px]">
+                        <p className="text-xs uppercase text-gray-500 mb-2">
+                          Watch on
+                        </p>
+                        <div className="flex flex-wrap gap-2">
+                          {providers.slice(0, 3).map((provider) => {
+                            const meta =
+                              AVAILABILITY_ACCESS_META[
+                                getPrimaryAccess(provider)
+                              ];
+                            return (
+                              <span
+                                key={provider.code}
+                                className={`rounded-full px-2.5 py-1 text-xs font-medium border border-transparent ${meta.badgeClass}`}
+                              >
+                                {provider.name}
+                              </span>
+                            );
+                          })}
+                          {providers.length > 3 && (
+                            <span className="rounded-full bg-gray-100 px-2.5 py-1 text-xs font-medium text-gray-600">
+                              +{providers.length - 3} more
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+                {totalPages > 1 && (
+                  <div className="mt-6 flex items-center justify-center gap-2">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => handlePageChange(currentPage - 1)}
+                      disabled={currentPage === 1}
+                    >
+                      Previous
+                    </Button>
+                    <div className="flex gap-1">
+                      {Array.from({ length: totalPages }, (_, i) => i + 1).map(
+                        (page) => {
+                          // Show first page, last page, current page, and pages around current
+                          const showPage =
+                            page === 1 ||
+                            page === totalPages ||
+                            Math.abs(page - currentPage) <= 1;
+                          const showEllipsis =
+                            (page === 2 && currentPage > 4) ||
+                            (page === totalPages - 1 &&
+                              currentPage < totalPages - 3);
+
+                          if (!showPage && !showEllipsis) {
+                            return null;
+                          }
+
+                          if (showEllipsis) {
+                            return (
+                              <span
+                                key={page}
+                                className="px-3 py-1 text-sm text-gray-500"
+                              >
+                                ...
+                              </span>
+                            );
+                          }
+
+                          return (
+                            <button
+                              key={page}
+                              onClick={() => handlePageChange(page)}
+                              className={`rounded-md px-3 py-1 text-sm ${
+                                page === currentPage
+                                  ? "bg-blue-600 text-white"
+                                  : "bg-gray-100 text-gray-700 hover:bg-gray-200"
+                              }`}
+                            >
+                              {page}
+                            </button>
+                          );
+                        }
+                      )}
                     </div>
-                  </li>
-                ))}
-              </ul>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => handlePageChange(currentPage + 1)}
+                      disabled={currentPage === totalPages}
+                    >
+                      Next
+                    </Button>
+                  </div>
+                )}
+              </div>
             ) : (
               <EmptyState
                 title="Nothing available right now"

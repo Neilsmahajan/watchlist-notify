@@ -44,7 +44,6 @@ const getAccessRank = (provider: AvailabilityProvider): number => {
 type UseWatchlistInsightsOptions = {
   enabled?: boolean;
   maxStreamingItems?: number;
-  availabilityLimit?: number;
 };
 
 type WatchlistMatch = {
@@ -73,13 +72,9 @@ type UseWatchlistInsightsResult = {
 };
 
 export function useWatchlistInsights(
-  options: UseWatchlistInsightsOptions = {},
+  options: UseWatchlistInsightsOptions = {}
 ): UseWatchlistInsightsResult {
-  const {
-    enabled = true,
-    maxStreamingItems = 5,
-    availabilityLimit = 12,
-  } = options;
+  const { enabled = true, maxStreamingItems = 5 } = options;
 
   const [watchlist, setWatchlist] = useState<WatchlistItem[]>([]);
   const [watchlistError, setWatchlistError] = useState<string | null>(null);
@@ -124,9 +119,7 @@ export function useWatchlistInsights(
         return;
       }
 
-      const itemsToFetch = items
-        .filter((entry) => entry.tmdb_id)
-        .slice(0, availabilityLimit); // Avoid spamming the API by capping availability lookups.
+      const itemsToFetch = items.filter((entry) => entry.tmdb_id);
 
       if (!itemsToFetch.length) {
         if (isMountedRef.current) {
@@ -151,7 +144,7 @@ export function useWatchlistInsights(
             try {
               const typeParam = item.type === "show" ? "tv" : "movie";
               const response = await fetch(
-                `/api/availability/${item.tmdb_id}?type=${typeParam}`,
+                `/api/availability/${item.tmdb_id}?type=${typeParam}`
               );
 
               if (handleUnauthorized(response)) {
@@ -179,7 +172,7 @@ export function useWatchlistInsights(
               console.error("Availability fetch error", err);
               return { id: item.id, data: null };
             }
-          }),
+          })
         );
 
         if (!isMountedRef.current) {
@@ -204,7 +197,7 @@ export function useWatchlistInsights(
         }
       }
     },
-    [availabilityLimit, enabled, handleUnauthorized],
+    [enabled, handleUnauthorized]
   );
 
   const loadWatchlist = useCallback(
@@ -265,7 +258,7 @@ export function useWatchlistInsights(
         }
       }
     },
-    [enabled, handleUnauthorized, loadAvailability],
+    [enabled, handleUnauthorized, loadAvailability]
   );
 
   const loadServices = useCallback(
@@ -323,7 +316,7 @@ export function useWatchlistInsights(
         }
       }
     },
-    [enabled, handleUnauthorized],
+    [enabled, handleUnauthorized]
   );
 
   useEffect(() => {
@@ -356,7 +349,7 @@ export function useWatchlistInsights(
 
   const activeServices = useMemo(
     () => services.filter((service) => service.active),
-    [services],
+    [services]
   );
 
   const activeServiceCodes = useMemo(() => {
@@ -389,7 +382,7 @@ export function useWatchlistInsights(
         }
       }
       const providers = Array.from(deduped.values()).filter((provider) =>
-        activeServiceCodes.has(provider.code),
+        activeServiceCodes.has(provider.code)
       );
       if (!providers.length) {
         continue;
@@ -409,17 +402,17 @@ export function useWatchlistInsights(
 
   const nowStreaming = useMemo(
     () => availableForYou.slice(0, maxStreamingItems),
-    [availableForYou, maxStreamingItems],
+    [availableForYou, maxStreamingItems]
   );
 
   const watchingCount = useMemo(
     () => watchlist.filter((item) => item.status === "watching").length,
-    [watchlist],
+    [watchlist]
   );
 
   const finishedCount = useMemo(
     () => watchlist.filter((item) => item.status === "finished").length,
-    [watchlist],
+    [watchlist]
   );
 
   const stats = useMemo<StatSummary[]>(
@@ -464,12 +457,12 @@ export function useWatchlistInsights(
       watchlistLoading,
       watchingCount,
       availabilityLoading,
-    ],
+    ]
   );
 
   const availableSectionLoading = useMemo(
     () => watchlistLoading || servicesLoading || availabilityLoading,
-    [availabilityLoading, servicesLoading, watchlistLoading],
+    [availabilityLoading, servicesLoading, watchlistLoading]
   );
 
   const sortedServices = useMemo(() => {
