@@ -44,5 +44,6 @@ func (s *Server) RegisterRoutes() http.Handler {
 	protected.GET("/search", s.searchHandler)
 
 	protected.GET("/availability/:id", s.availabilityHandler)
+	protected.POST("/availability/batch", s.batchAvailabilityHandler)
 	return r
 }

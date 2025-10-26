@@ -300,7 +300,7 @@ export default function HomeDashboardClient({
                               {page}
                             </button>
                           );
-                        }
+                        },
                       )}
                     </div>
                     <Button

@@ -72,7 +72,7 @@ type UseWatchlistInsightsResult = {
 };
 
 export function useWatchlistInsights(
-  options: UseWatchlistInsightsOptions = {}
+  options: UseWatchlistInsightsOptions = {},
 ): UseWatchlistInsightsResult {
   const { enabled = true, maxStreamingItems = 5 } = options;
 
@@ -139,55 +139,119 @@ export function useWatchlistInsights(
       }
 
       try {
-        const results = await Promise.all(
-          itemsToFetch.map(async (item) => {
-            try {
-              const typeParam = item.type === "show" ? "tv" : "movie";
-              const response = await fetch(
-                `/api/availability/${item.tmdb_id}?type=${typeParam}`
-              );
+        // Use batch endpoint for better performance
+        const batchRequest = {
+          items: itemsToFetch.map((item) => ({
+            id: item.tmdb_id,
+            type: item.type === "show" ? "tv" : "movie",
+          })),
+        };
 
-              if (handleUnauthorized(response)) {
-                return { id: item.id, data: null };
-              }
+        const response = await fetch("/api/availability/batch", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify(batchRequest),
+        });
 
-              if (!response.ok) {
-                return { id: item.id, data: null };
-              }
+        if (handleUnauthorized(response)) {
+          return;
+        }
 
-              const data = (await response.json().catch(() => null)) as
-                | AvailabilityResponse
-                | { error?: string }
-                | null;
-
-              if (!data || typeof data !== "object" || "error" in data) {
-                return { id: item.id, data: null };
-              }
-
-              return {
-                id: item.id,
-                data: data as AvailabilityResponse,
+        if (!response.ok) {
+          console.error("Batch availability fetch failed", response.status);
+          // Fall back to setting null for all items
+          if (isMountedRef.current) {
+            setAvailabilityMap((prev) => {
+              const next: Record<string, AvailabilityResponse | null> = {
+                ...prev,
               };
-            } catch (err) {
-              console.error("Availability fetch error", err);
-              return { id: item.id, data: null };
+              for (const entry of items) {
+                next[entry.id] = null;
+              }
+              return next;
+            });
+          }
+          return;
+        }
+
+        const data = (await response.json().catch(() => null)) as {
+          region?: string;
+          results?: Record<
+            string,
+            {
+              providers: Array<{
+                code: string;
+                name: string;
+                logo_path?: string;
+                link?: string;
+                access: string[];
+              }>;
+              unmatched_user_services: string[];
             }
-          })
-        );
+          >;
+        } | null;
 
         if (!isMountedRef.current) {
           return;
         }
 
+        if (!data || !data.results) {
+          setAvailabilityMap((prev) => {
+            const next: Record<string, AvailabilityResponse | null> = {
+              ...prev,
+            };
+            for (const entry of items) {
+              next[entry.id] = null;
+            }
+            return next;
+          });
+          return;
+        }
+
+        // Map batch results back to watchlist items
+        setAvailabilityMap((prev) => {
+          const next: Record<string, AvailabilityResponse | null> = {
+            ...prev,
+          };
+
+          for (const item of itemsToFetch) {
+            const typeParam = item.type === "show" ? "tv" : "movie";
+            const key = `${typeParam}_${item.tmdb_id}`;
+            const result = data.results![key];
+
+            if (result) {
+              next[item.id] = {
+                region: data.region || "US",
+                providers: (result.providers || []) as AvailabilityProvider[],
+                unmatched_user_services: result.unmatched_user_services || [],
+              };
+            } else {
+              next[item.id] = null;
+            }
+          }
+
+          // Set null for items without tmdb_id
+          for (const entry of items) {
+            if (!entry.tmdb_id && !(entry.id in next)) {
+              next[entry.id] = null;
+            }
+          }
+
+          return next;
+        });
+      } catch (err) {
+        console.error("Batch availability fetch error", err);
+        if (!isMountedRef.current) {
+          return;
+        }
         setAvailabilityMap((prev) => {
           const next: Record<string, AvailabilityResponse | null> = {
             ...prev,
           };
           for (const entry of items) {
             next[entry.id] = null;
-          }
-          for (const { id, data } of results) {
-            next[id] = data;
           }
           return next;
         });
@@ -197,7 +261,7 @@ export function useWatchlistInsights(
         }
       }
     },
-    [enabled, handleUnauthorized]
+    [enabled, handleUnauthorized],
   );
 
   const loadWatchlist = useCallback(
@@ -258,7 +322,7 @@ export function useWatchlistInsights(
         }
       }
     },
-    [enabled, handleUnauthorized, loadAvailability]
+    [enabled, handleUnauthorized, loadAvailability],
   );
 
   const loadServices = useCallback(
@@ -316,7 +380,7 @@ export function useWatchlistInsights(
         }
       }
     },
-    [enabled, handleUnauthorized]
+    [enabled, handleUnauthorized],
   );
 
   useEffect(() => {
@@ -349,7 +413,7 @@ export function useWatchlistInsights(
 
   const activeServices = useMemo(
     () => services.filter((service) => service.active),
-    [services]
+    [services],
   );
 
   const activeServiceCodes = useMemo(() => {
@@ -382,7 +446,7 @@ export function useWatchlistInsights(
         }
       }
       const providers = Array.from(deduped.values()).filter((provider) =>
-        activeServiceCodes.has(provider.code)
+        activeServiceCodes.has(provider.code),
       );
       if (!providers.length) {
         continue;
@@ -402,17 +466,17 @@ export function useWatchlistInsights(
 
   const nowStreaming = useMemo(
     () => availableForYou.slice(0, maxStreamingItems),
-    [availableForYou, maxStreamingItems]
+    [availableForYou, maxStreamingItems],
   );
 
   const watchingCount = useMemo(
     () => watchlist.filter((item) => item.status === "watching").length,
-    [watchlist]
+    [watchlist],
   );
 
   const finishedCount = useMemo(
     () => watchlist.filter((item) => item.status === "finished").length,
-    [watchlist]
+    [watchlist],
   );
 
   const stats = useMemo<StatSummary[]>(
@@ -457,12 +521,12 @@ export function useWatchlistInsights(
       watchlistLoading,
       watchingCount,
       availabilityLoading,
-    ]
+    ],
   );
 
   const availableSectionLoading = useMemo(
     () => watchlistLoading || servicesLoading || availabilityLoading,
-    [availabilityLoading, servicesLoading, watchlistLoading]
+    [availabilityLoading, servicesLoading, watchlistLoading],
   );
 
   const sortedServices = useMemo(() => {
