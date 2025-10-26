@@ -9,6 +9,7 @@ import {
   AvailabilityProvider,
   AvailabilityResponse,
   TMDB_IMAGE_BASE,
+  UserService,
   WatchlistImportResponse,
   WatchlistItem,
   WatchlistResponse,
@@ -21,6 +22,7 @@ import { redirectToLogin } from "@/lib/auth/client";
 import {
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
   type ChangeEvent,
@@ -99,6 +101,7 @@ export default function WatchlistClient({
   const [sortOption, setSortOption] = useState("-added_at");
   const [searchQuery, setSearchQuery] = useState("");
   const [debouncedSearch, setDebouncedSearch] = useState("");
+  const [showAvailableOnly, setShowAvailableOnly] = useState(false);
   const [isFetching, setIsFetching] = useState(false);
   const [listError, setListError] = useState<string | null>(initialListError);
   const [actionMessage, setActionMessage] = useState<string | null>(null);
@@ -107,6 +110,8 @@ export default function WatchlistClient({
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [currentPage, setCurrentPage] = useState(1);
   const [itemsPerPage, setItemsPerPage] = useState(20);
+  const [services, setServices] = useState<UserService[]>([]);
+  const [servicesLoading, setServicesLoading] = useState(false);
   const [availability, setAvailability] = useState<
     Record<string, AvailabilityResponse | null>
   >(() => ({ ...initialAvailability }));
@@ -159,6 +164,28 @@ export default function WatchlistClient({
     }, 300);
     return () => clearTimeout(timer);
   }, [searchQuery]);
+
+  const loadServices = useCallback(async () => {
+    setServicesLoading(true);
+    try {
+      const response = await fetch("/api/me/services");
+      if (handleUnauthorized(response)) {
+        return;
+      }
+      if (!response.ok) {
+        console.error("Failed to load services");
+        return;
+      }
+      const data = await response.json();
+      if (Array.isArray(data?.services)) {
+        setServices(data.services);
+      }
+    } catch (err) {
+      console.error("Services fetch error", err);
+    } finally {
+      setServicesLoading(false);
+    }
+  }, [handleUnauthorized]);
 
   const requestAvailability = useCallback(
     async (item: WatchlistItem, options?: { force?: boolean }) => {
@@ -259,14 +286,70 @@ export default function WatchlistClient({
 
   const fetchAvailabilityForItems = useCallback(
     async (list: WatchlistItem[]) => {
-      for (const entry of list) {
-        if (!entry.tmdb_id) {
-          continue;
+      const itemsToFetch = list.filter((item) => item.tmdb_id);
+      if (itemsToFetch.length === 0) {
+        return;
+      }
+
+      // Use batch endpoint for better performance
+      try {
+        const typeMapping: Record<string, string> = {
+          movie: "movie",
+          show: "tv",
+        };
+
+        const batchRequest = {
+          items: itemsToFetch.map((item) => ({
+            id: item.tmdb_id,
+            type: typeMapping[item.type] || item.type,
+          })),
+        };
+
+        const response = await fetch("/api/availability/batch", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(batchRequest),
+        });
+
+        if (handleUnauthorized(response)) {
+          return;
         }
-        void requestAvailability(entry);
+
+        if (!response.ok) {
+          console.error("Batch availability check failed");
+          return;
+        }
+
+        const data = await response.json();
+        const results = data?.results || {};
+
+        if (!isMountedRef.current) {
+          return;
+        }
+
+        // Update availability state with batch results
+        setAvailability((prev) => {
+          const next = { ...prev };
+          for (const item of itemsToFetch) {
+            const typeParam = typeMapping[item.type] || item.type;
+            const key = `${typeParam}_${item.tmdb_id}`;
+            const result = results[key];
+            if (result) {
+              next[item.id] = {
+                region: data.region || "US",
+                providers: (result.providers || []) as AvailabilityProvider[],
+                unmatched_user_services: result.unmatched_user_services || [],
+              };
+            }
+          }
+          availabilityRef.current = next;
+          return next;
+        });
+      } catch (err) {
+        console.error("Batch availability error", err);
       }
     },
-    [requestAvailability],
+    [handleUnauthorized],
   );
 
   const loadWatchlist = useCallback(
@@ -359,6 +442,10 @@ export default function WatchlistClient({
     void loadWatchlist(controller.signal);
     return () => controller.abort();
   }, [loadWatchlist]);
+
+  useEffect(() => {
+    void loadServices();
+  }, [loadServices]);
 
   const handleRefresh = () => {
     void loadWatchlist();
@@ -574,16 +661,46 @@ export default function WatchlistClient({
     [requestAvailability],
   );
 
+  // Compute active service codes for filtering
+  const activeServiceCodes = useMemo(() => {
+    const codes = new Set<string>();
+    for (const service of services) {
+      if (service.active) {
+        codes.add(service.code.toLowerCase());
+      }
+    }
+    return codes;
+  }, [services]);
+
+  // Filter items to show only available ones if toggle is on
+  const displayItems = useMemo(() => {
+    if (!showAvailableOnly) {
+      return items;
+    }
+
+    return items.filter((item) => {
+      const avail = availability[item.id];
+      if (!avail || !avail.providers || avail.providers.length === 0) {
+        return false;
+      }
+
+      // Check if any provider matches user's active services
+      return avail.providers.some((provider) =>
+        activeServiceCodes.has(provider.code.toLowerCase()),
+      );
+    });
+  }, [items, showAvailableOnly, availability, activeServiceCodes]);
+
   // Pagination logic
-  const totalPages = Math.ceil(items.length / itemsPerPage);
+  const totalPages = Math.ceil(displayItems.length / itemsPerPage);
   const startIndex = (currentPage - 1) * itemsPerPage;
   const endIndex = startIndex + itemsPerPage;
-  const paginatedItems = items.slice(startIndex, endIndex);
+  const paginatedItems = displayItems.slice(startIndex, endIndex);
 
   // Reset to page 1 when filters change
   useEffect(() => {
     setCurrentPage(1);
-  }, [filterType, sortOption, debouncedSearch]);
+  }, [filterType, sortOption, debouncedSearch, showAvailableOnly]);
 
   const handlePageChange = (newPage: number) => {
     setCurrentPage(newPage);
@@ -690,6 +807,21 @@ export default function WatchlistClient({
                 </option>
               ))}
             </select>
+          </div>
+
+          <div className="flex flex-col justify-end">
+            <label className="flex items-center gap-2 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={showAvailableOnly}
+                onChange={(e) => setShowAvailableOnly(e.target.checked)}
+                className="w-4 h-4 rounded border-gray-300 text-blue-600 focus:ring-2 focus:ring-blue-500"
+                disabled={servicesLoading}
+              />
+              <span className="text-sm font-medium text-gray-700">
+                Available Only
+              </span>
+            </label>
           </div>
 
           <div className="ml-auto flex gap-2">
@@ -822,12 +954,58 @@ export default function WatchlistClient({
             );
           }
 
+          if (!isFetching && displayItems.length === 0 && items.length > 0) {
+            return (
+              <EmptyState
+                title="No available items found"
+                description={
+                  showAvailableOnly
+                    ? "None of your watchlist items are currently available on your connected streaming services. Try adjusting your filters or connect more services."
+                    : "No items match your current filters."
+                }
+                action={
+                  <div className="flex gap-2">
+                    <Button
+                      variant="outline"
+                      onClick={() => setShowAvailableOnly(false)}
+                    >
+                      Show All Items
+                    </Button>
+                    <Button href="/settings">Manage Services</Button>
+                  </div>
+                }
+                icon={
+                  <svg
+                    className="w-12 h-12"
+                    fill="none"
+                    stroke="currentColor"
+                    viewBox="0 0 24 24"
+                  >
+                    <path
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      strokeWidth={2}
+                      d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"
+                    />
+                  </svg>
+                }
+              />
+            );
+          }
+
           return (
             <div>
               <div className="mb-4 flex items-center justify-between text-sm text-gray-600">
                 <div>
-                  Showing {startIndex + 1}-{Math.min(endIndex, items.length)} of{" "}
-                  {items.length} items
+                  Showing {startIndex + 1}-
+                  {Math.min(endIndex, displayItems.length)} of{" "}
+                  {displayItems.length} items
+                  {showAvailableOnly &&
+                    items.length !== displayItems.length && (
+                      <span className="ml-1 text-gray-500">
+                        (filtered from {items.length})
+                      </span>
+                    )}
                 </div>
                 <div className="flex items-center gap-2">
                   <label htmlFor="items-per-page" className="text-sm">
