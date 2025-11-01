@@ -42,6 +42,19 @@ type ProviderInfo struct {
 	Access   []string `json:"access"`
 }
 
+// batchAvailabilityHandler godoc
+// @Summary Batch check streaming availability
+// @Description Check availability for multiple movies/TV shows across user's subscribed services in a single request
+// @Tags Availability
+// @Security BearerAuth
+// @Accept json
+// @Produce json
+// @Param body body BatchAvailabilityRequest true "List of items to check (max 500)"
+// @Success 200 {object} BatchAvailabilityResponse "Batch availability results"
+// @Failure 400 {object} ErrorResponse "Invalid request body or exceeds batch size limit"
+// @Failure 401 {object} ErrorResponse "Unauthorized"
+// @Failure 503 {object} ErrorResponse "Availability service unavailable"
+// @Router /api/availability/batch [post]
 func (s *Server) batchAvailabilityHandler(c *gin.Context) {
 	if s.tmdb == nil {
 		jsonError(c, http.StatusServiceUnavailable, "availability unavailable")

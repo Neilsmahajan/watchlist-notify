@@ -13,12 +13,37 @@ import (
 	"github.com/neilsmahajan/watchlist-notify/internal/providers/tmdb"
 )
 
+// healthHandler godoc
+// @Summary Health check
+// @Description Returns the current health status of the API and database connection
+// @Tags System
+// @Produce json
+// @Success 200 {object} map[string]interface{} "Service health status"
+// @Router /health [get]
 func (s *Server) healthHandler(c *gin.Context) {
 	c.JSON(http.StatusOK, s.db.Health())
 }
 
 // searchHandler proxies a minimal search to TMDb for movies or TV shows.
 // Query params: query (required), type=movie|tv (default movie), page (default 1), include_adult (default false)
+// searchHandler godoc
+// @Summary Search movies and TV shows
+// @Description Search for movies or TV shows via TMDb API with pagination and filters
+// @Tags Content Discovery
+// @Security BearerAuth
+// @Produce json
+// @Param query query string true "Search query string"
+// @Param type query string false "Content type: movie or tv" default(movie) Enums(movie, tv)
+// @Param page query int false "Page number for pagination (1-1000)" default(1) minimum(1) maximum(1000)
+// @Param include_adult query boolean false "Include adult content in results" default(false)
+// @Param language query string false "ISO 639-1 language code" default(en-US)
+// @Param region query string false "ISO 3166-1 region code" default(US)
+// @Success 200 {object} map[string]interface{} "Search results with pagination"
+// @Failure 400 {object} ErrorResponse "Invalid query parameters"
+// @Failure 401 {object} ErrorResponse "Unauthorized"
+// @Failure 502 {object} ErrorResponse "Upstream TMDb API error"
+// @Failure 503 {object} ErrorResponse "Search service unavailable"
+// @Router /api/search [get]
 func (s *Server) searchHandler(c *gin.Context) {
 	if s.tmdb == nil {
 		jsonError(c, http.StatusServiceUnavailable, "search unavailable")

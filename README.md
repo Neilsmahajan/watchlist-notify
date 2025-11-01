@@ -58,7 +58,6 @@ Future Enhancements:
 
 ## 2. High-Level Architecture
 
-
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │ Cloudflare (DNS/Proxy/CDN)                                  │
@@ -279,15 +278,36 @@ Security Notes:
 - Custom claims allow backend to extract user info from JWT without additional API calls
 - CSRF protection via Auth0's state parameter and SameSite cookie attributes
 
-## 7. API
+## 7. API Documentation
 
-### Authentication Endpoints
+### Quick Reference
 
-- `GET /health` – Service health check
-- `POST /auth/login` – Initiate Auth0 login flow
-- `POST /auth/callback` – Handle Auth0 callback and issue JWT
+**Interactive Documentation (Swagger UI):**
 
-### User Endpoints
+- Production: `https://api.watchlistnotify.com/swagger/index.html`
+- Local: `http://localhost:8080/swagger/index.html`
+
+**OpenAPI Specification:**
+
+- JSON: `https://api.watchlistnotify.com/swagger/doc.json`
+- YAML: `/docs/swagger.yaml` (in repository)
+
+**Complete API Guide:**
+See [`docs/API.md`](docs/API.md) for comprehensive documentation including:
+
+- Authentication details
+- Request/response examples
+- Error handling
+- Pagination
+- Rate limiting (planned)
+
+### Endpoint Summary
+
+#### Authentication Endpoints
+
+- `GET /health` – Service health check (public)
+
+#### User Endpoints
 
 - `GET /api/me` – Get authenticated user profile
 - `PATCH /api/me/preferences` – Update user preferences (email, name, digest settings)
@@ -295,26 +315,52 @@ Security Notes:
 - `PATCH /api/me/services` – Update streaming service subscriptions
 - `POST /api/me/notifications/test` – Send test digest email
 
-### Watchlist Endpoints
+#### Watchlist Endpoints
 
 - `POST /api/watchlist` – Add item to watchlist
-- `GET /api/watchlist` – List user's watchlist items
+- `GET /api/watchlist` – List user's watchlist items with filters and pagination
+- `PATCH /api/watchlist/:id` – Update item metadata/status
 - `DELETE /api/watchlist/:id` – Remove item from watchlist
-- `PUT /api/watchlist/:id` – Update item metadata/status
+- `POST /api/watchlist/import` – Bulk import from CSV (IMDb format)
 
-### Content Discovery
+#### Content Discovery
 
 - `GET /api/search` – Search movies/TV shows via TMDb
 - `GET /api/availability/:id` – Get streaming availability for specific title
-- `GET /api/availability` – Batch availability check for watchlist items
+- `POST /api/availability/batch` – Batch availability check (max 500 items)
 
-Error Format:
+### Authentication
+
+All protected endpoints require an Auth0 JWT token in the `Authorization` header:
+
+```http
+Authorization: Bearer YOUR_JWT_TOKEN
+```
+
+### Error Format
+
+All errors return a consistent JSON structure:
 
 ```json
 { "error": "Descriptive error message" }
 ```
 
-## 8. Data Model (current minimal)
+### Generating API Documentation
+
+If you modify handlers or add new endpoints, regenerate the OpenAPI spec:
+
+```bash
+# Install swag CLI (first time only)
+go install github.com/swaggo/swag/cmd/swag@latest
+
+# Generate documentation
+make swagger
+
+# Or manually
+swag init -g cmd/api/main.go -o docs --parseDependency --parseInternal
+```
+
+The generated files (`docs/docs.go`, `docs/swagger.json`, `docs/swagger.yaml`) are auto-generated and git-ignored.
 
 ## 8. Data Model
 
@@ -443,6 +489,7 @@ API requests (Bruno):
 | make build             | compile Go binary -> `./main`           |
 | make run               | run API (no reload)                     |
 | make watch             | run with Air live reload (auto-install) |
+| make swagger           | generate OpenAPI/Swagger docs           |
 | make docker-run        | start Mongo via compose                 |
 | make docker-down       | stop Mongo                              |
 | make test              | run all Go tests                        |

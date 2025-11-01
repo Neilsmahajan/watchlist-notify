@@ -14,6 +14,12 @@ const (
 	maxLimit     = 1000 // Increased to support larger watchlists
 )
 
+// ErrorResponse represents a standard API error response
+// @Description Standard error response structure used across all endpoints
+type ErrorResponse struct {
+	Error string `json:"error" example:"invalid request"`
+}
+
 // jsonError standardizes error responses and aborts the context.
 func jsonError(c *gin.Context, status int, msg string) {
 	c.AbortWithStatusJSON(status, gin.H{"error": msg})

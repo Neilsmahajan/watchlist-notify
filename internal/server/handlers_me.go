@@ -9,12 +9,35 @@ import (
 	"github.com/neilsmahajan/watchlist-notify/internal/models"
 )
 
+// meHandler godoc
+// @Summary Get current user profile
+// @Description Returns the authenticated user's complete profile including preferences and service subscriptions
+// @Tags Users
+// @Security BearerAuth
+// @Produce json
+// @Success 200 {object} models.User "User profile"
+// @Failure 401 {object} ErrorResponse "Unauthorized"
+// @Failure 500 {object} ErrorResponse "Internal server error"
+// @Router /api/me [get]
 func (s *Server) meHandler(c *gin.Context) {
 	if user, ok := s.getUser(c); ok {
 		c.JSON(http.StatusOK, user)
 	}
 }
 
+// updateUserPreferencesHandler godoc
+// @Summary Update user preferences
+// @Description Update user notification preferences, digest settings, and email configuration
+// @Tags Users
+// @Security BearerAuth
+// @Accept json
+// @Produce json
+// @Param body body object{notify_email=string,use_account_email=bool,marketing_consent=bool,digest_consent=bool,digest_enabled=bool,digest_interval=int,digest_interval_unit=string} true "User preferences update"
+// @Success 200 {object} models.User "Updated user profile"
+// @Failure 400 {object} ErrorResponse "Invalid request body"
+// @Failure 401 {object} ErrorResponse "Unauthorized"
+// @Failure 500 {object} ErrorResponse "Failed to update preferences"
+// @Router /api/me/preferences [patch]
 func (s *Server) updateUserPreferencesHandler(c *gin.Context) {
 	user, ok := s.getUser(c)
 	if !ok {
@@ -143,6 +166,15 @@ func (s *Server) updateUserPreferencesHandler(c *gin.Context) {
 	c.JSON(http.StatusOK, updated)
 }
 
+// listUserServicesHandler godoc
+// @Summary List streaming services
+// @Description Get all available streaming services with the user's subscription status
+// @Tags Services
+// @Security BearerAuth
+// @Produce json
+// @Success 200 {object} map[string]interface{} "List of services with subscription status"
+// @Failure 401 {object} ErrorResponse "Unauthorized"
+// @Router /api/me/services [get]
 func (s *Server) listUserServicesHandler(c *gin.Context) {
 	user, ok := s.getUser(c)
 	if !ok {
@@ -192,6 +224,19 @@ func (s *Server) listUserServicesHandler(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"services": out})
 }
 
+// updateUserServicesHandler godoc
+// @Summary Update streaming service subscriptions
+// @Description Add, remove, or toggle streaming service subscriptions for the authenticated user
+// @Tags Services
+// @Security BearerAuth
+// @Accept json
+// @Produce json
+// @Param body body object{add=[]string,remove=[]string,toggle=[]object{code=string,active=bool}} true "Service subscription changes"
+// @Success 200 {object} models.User "Updated user profile with services"
+// @Failure 400 {object} ErrorResponse "Invalid request body or service codes"
+// @Failure 401 {object} ErrorResponse "Unauthorized"
+// @Failure 500 {object} ErrorResponse "Failed to update services"
+// @Router /api/me/services [patch]
 func (s *Server) updateUserServicesHandler(c *gin.Context) {
 	user, ok := s.getUser(c)
 	if !ok {
@@ -295,6 +340,20 @@ func (s *Server) updateUserServicesHandler(c *gin.Context) {
 	c.JSON(http.StatusOK, updatedUser)
 }
 
+// testNotificationHandler godoc
+// @Summary Send test notification email
+// @Description Send a test digest email to verify email configuration and preview digest format
+// @Tags Notifications
+// @Security BearerAuth
+// @Accept json
+// @Produce json
+// @Param body body object{type=string,override_email=string} false "Test notification configuration"
+// @Success 200 {object} map[string]interface{} "Test notification sent successfully"
+// @Failure 400 {object} ErrorResponse "Invalid email or request"
+// @Failure 401 {object} ErrorResponse "Unauthorized"
+// @Failure 500 {object} ErrorResponse "Failed to send notification"
+// @Failure 503 {object} ErrorResponse "Notification service not configured"
+// @Router /api/me/notifications/test [post]
 func (s *Server) testNotificationHandler(c *gin.Context) {
 	const (
 		subject  = "Test Notification from Watchlist Notify"

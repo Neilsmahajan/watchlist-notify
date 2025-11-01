@@ -88,6 +88,18 @@ watch:
             fi; \
         fi
 
+# Generate Swagger/OpenAPI documentation
+swagger:
+	@echo "Generating OpenAPI documentation..."
+	@if command -v swag > /dev/null; then \
+		swag init -g cmd/api/main.go -o docs --parseDependency --parseInternal; \
+		echo "✓ Swagger docs generated at docs/"; \
+	else \
+		echo "Error: swag CLI not found. Install it with:"; \
+		echo "  go install github.com/swaggo/swag/cmd/swag@latest"; \
+		exit 1; \
+	fi
+
 # -----------------------------
 # Docker / Cloud Run targets
 # -----------------------------

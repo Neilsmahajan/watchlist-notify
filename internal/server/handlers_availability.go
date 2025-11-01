@@ -37,6 +37,21 @@ func resolveRegion(c *gin.Context, user *models.User) string {
 	return r
 }
 
+// availabilityHandler godoc
+// @Summary Get streaming availability
+// @Description Check which of the user's subscribed services have a specific movie or TV show available
+// @Tags Availability
+// @Security BearerAuth
+// @Produce json
+// @Param id path int true "TMDb content ID"
+// @Param type query string true "Content type" Enums(movie, tv)
+// @Param region query string false "ISO 3166-1 region code (defaults to user's region or US)"
+// @Success 200 {object} map[string]interface{} "Availability details for user's services"
+// @Failure 400 {object} ErrorResponse "Invalid ID or type"
+// @Failure 401 {object} ErrorResponse "Unauthorized"
+// @Failure 502 {object} ErrorResponse "Upstream TMDb API error"
+// @Failure 503 {object} ErrorResponse "Availability service unavailable"
+// @Router /api/availability/{id} [get]
 func (s *Server) availabilityHandler(c *gin.Context) {
 	if s.tmdb == nil {
 		jsonError(c, http.StatusServiceUnavailable, "availability unavailable")

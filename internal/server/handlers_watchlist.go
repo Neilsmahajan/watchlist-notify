@@ -16,6 +16,20 @@ import (
 	"go.mongodb.org/mongo-driver/bson/primitive"
 )
 
+// createWatchlistItemHandler godoc
+// @Summary Add item to watchlist
+// @Description Create a new movie or TV show entry in the user's watchlist
+// @Tags Watchlist
+// @Security BearerAuth
+// @Accept json
+// @Produce json
+// @Param body body object{title=string,type=string,year=int,tmdb_id=int,imdb_id=string,status=string,tags=[]string} true "Watchlist item to create"
+// @Success 201 {object} models.WatchlistItem "Created watchlist item"
+// @Failure 400 {object} ErrorResponse "Invalid request body"
+// @Failure 401 {object} ErrorResponse "Unauthorized"
+// @Failure 409 {object} ErrorResponse "Duplicate item"
+// @Failure 500 {object} ErrorResponse "Failed to create item"
+// @Router /api/watchlist [post]
 func (s *Server) createWatchlistItemHandler(c *gin.Context) {
 	user, ok := s.getUser(c)
 	if !ok {
@@ -97,6 +111,24 @@ func (s *Server) createWatchlistItemHandler(c *gin.Context) {
 	c.JSON(http.StatusCreated, item)
 }
 
+// listWatchlistItemsHandler godoc
+// @Summary List watchlist items
+// @Description Get all items in the user's watchlist with optional filtering, pagination, and sorting
+// @Tags Watchlist
+// @Security BearerAuth
+// @Produce json
+// @Param limit query int false "Number of items to return (0 for all, max 1000)" default(20)
+// @Param offset query int false "Number of items to skip" default(0)
+// @Param status query string false "Filter by status" Enums(planned, watching, finished)
+// @Param type query string false "Filter by content type" Enums(movie, show)
+// @Param search query string false "Search in title"
+// @Param sort query string false "Sort field (prefix with - for descending)" default(-added_at)
+// @Param with_count query boolean false "Include total count in response" default(false)
+// @Success 200 {object} map[string]interface{} "Watchlist items with pagination metadata"
+// @Failure 400 {object} ErrorResponse "Invalid query parameters"
+// @Failure 401 {object} ErrorResponse "Unauthorized"
+// @Failure 500 {object} ErrorResponse "Failed to fetch items"
+// @Router /api/watchlist [get]
 func (s *Server) listWatchlistItemsHandler(c *gin.Context) {
 	user, ok := s.getUser(c)
 	if !ok {
@@ -149,6 +181,22 @@ func (s *Server) listWatchlistItemsHandler(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"items": items, "meta": meta})
 }
 
+// updateWatchlistItemHandler godoc
+// @Summary Update watchlist item
+// @Description Update an existing watchlist item's details
+// @Tags Watchlist
+// @Security BearerAuth
+// @Accept json
+// @Produce json
+// @Param id path string true "Watchlist item ID (MongoDB ObjectID hex string)"
+// @Param body body object{title=string,status=string,tags=[]string,year=int,tmdb_id=int} true "Fields to update"
+// @Success 200 {object} models.WatchlistItem "Updated watchlist item"
+// @Failure 400 {object} ErrorResponse "Invalid ID or request body"
+// @Failure 401 {object} ErrorResponse "Unauthorized"
+// @Failure 404 {object} ErrorResponse "Item not found"
+// @Failure 409 {object} ErrorResponse "Duplicate item"
+// @Failure 500 {object} ErrorResponse "Update failed"
+// @Router /api/watchlist/{id} [patch]
 func (s *Server) updateWatchlistItemHandler(c *gin.Context) {
 	user, ok := s.getUser(c)
 	if !ok {
@@ -231,6 +279,19 @@ func (s *Server) updateWatchlistItemHandler(c *gin.Context) {
 	c.JSON(http.StatusOK, updated)
 }
 
+// deleteWatchlistItemHandler godoc
+// @Summary Delete watchlist item
+// @Description Remove an item from the user's watchlist
+// @Tags Watchlist
+// @Security BearerAuth
+// @Produce json
+// @Param id path string true "Watchlist item ID (MongoDB ObjectID hex string)"
+// @Success 200 {object} map[string]string "Deletion confirmation message"
+// @Failure 400 {object} ErrorResponse "Invalid ID"
+// @Failure 401 {object} ErrorResponse "Unauthorized"
+// @Failure 404 {object} ErrorResponse "Item not found"
+// @Failure 500 {object} ErrorResponse "Delete failed"
+// @Router /api/watchlist/{id} [delete]
 func (s *Server) deleteWatchlistItemHandler(c *gin.Context) {
 	user, ok := s.getUser(c)
 	if !ok {
@@ -257,6 +318,19 @@ func (s *Server) deleteWatchlistItemHandler(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"message": "watchlist item deleted"})
 }
 
+// importWatchlistHandler godoc
+// @Summary Import watchlist from CSV
+// @Description Bulk import watchlist items from a CSV file (IMDb export format)
+// @Tags Watchlist
+// @Security BearerAuth
+// @Accept multipart/form-data
+// @Produce json
+// @Param file formData file true "CSV file containing watchlist items (max 10MB)"
+// @Success 200 {object} map[string]interface{} "Import results with counts"
+// @Failure 400 {object} ErrorResponse "Invalid file or format"
+// @Failure 401 {object} ErrorResponse "Unauthorized"
+// @Failure 503 {object} ErrorResponse "Import service unavailable"
+// @Router /api/watchlist/import [post]
 func (s *Server) importWatchlistHandler(c *gin.Context) {
 	user, ok := s.getUser(c)
 	if !ok {
