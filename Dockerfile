@@ -12,8 +12,14 @@ RUN apk add --no-cache ca-certificates git build-base
 COPY go.mod go.sum ./
 RUN go mod download
 
+# Install swag CLI for generating Swagger docs
+RUN go install github.com/swaggo/swag/cmd/swag@latest
+
 # Copy the rest of the source
 COPY . .
+
+# Generate Swagger documentation
+RUN swag init -g cmd/api/main.go -o docs --parseDependency --parseInternal
 
 # Set environment for static linking and smaller binary
 ENV CGO_ENABLED=0 \

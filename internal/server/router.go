@@ -10,6 +10,7 @@ import (
 	swaggerFiles "github.com/swaggo/files"
 	ginSwagger "github.com/swaggo/gin-swagger"
 
+	_ "github.com/neilsmahajan/watchlist-notify/docs" // Import generated docs
 	"github.com/neilsmahajan/watchlist-notify/internal/middleware"
 )
 

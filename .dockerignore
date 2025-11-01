@@ -30,7 +30,10 @@ coverage/
 Dockerfile.dev
 
 # Misc
-docs/
+docs/bruno/
+docs/API.md
+docs/SWAGGER_GUIDE.md
+docs/SWAGGER_IMPLEMENTATION.md
 README.md
 docker-compose.yml
 Makefile
