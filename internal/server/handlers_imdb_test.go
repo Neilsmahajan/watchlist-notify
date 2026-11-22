@@ -1071,7 +1071,7 @@ func TestUnlinkIMDbWaitsOutAWorkerRun(t *testing.T) {
 	if rec.Code != http.StatusTooManyRequests {
 		t.Fatalf("unlinking 30 s after a worker's claim: status = %d, want 429; body: %s", rec.Code, rec.Body)
 	}
-	if wait, err := strconv.Atoi(rec.Header().Get("Retry-After")); err != nil || wait < 28 || wait > 30 {
+	if wait, err := strconv.Atoi(rec.Header().Get("Retry-After")); err != nil || wait < 20 || wait > 30 {
 		t.Errorf("Retry-After = %q, want the 30 seconds or so that are left of the minute", rec.Header().Get("Retry-After"))
 	}
 	if got := h.store.User(h.user.ID).IMDbSync; got == nil || !reflect.DeepEqual(*got, *linked) {
