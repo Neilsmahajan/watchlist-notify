@@ -57,6 +57,11 @@ const (
 	imdbLinkMinGap = imdbsync.LinkLockout
 )
 
+// msgIMDbLockedOut is the 429 of a link or unlink request inside the lockout.
+// It is true whichever fetch started the minute: the user's own link request
+// or the daily sync.
+const msgIMDbLockedOut = "Your IMDb list was read a moment ago. Try again in a minute."
+
 // imdbListFetcher reads a public IMDb list; *imdb.Client does.
 type imdbListFetcher interface {
 	FetchList(ctx context.Context, sourceID string) (imdb.List, error)
@@ -92,7 +97,7 @@ type IMDbLinkResult struct {
 
 // linkIMDbHandler godoc
 // @Summary Link a public IMDb list
-// @Description Links the user's public IMDb Watchlist (by user ID, ur…) or any public IMDb list (ls…), adds its titles to the watchlist now, and keeps the watchlist in step with it once a day from then on. Linking again replaces the link. Titles are added as planned items with source "imdb". Linking itself leaves every item the user already has exactly as it is. The daily sync, from its first run on, adopts items the user imported from IMDb earlier: an item that carries the IMDb ID of a title on the list (which only an import stores), is still "planned" and has no tags gets source "imdb" and follows the list from then on. Items added by hand are never adopted. The daily sync removes an item only if its source is "imdb", the user has not changed its status or tagged it, and it has been missing from two complete fetches of the list at least 12 hours apart. IMDb does not permit public or commercial use of its data, so this is strictly opt-in, stores only IMDb title IDs (everything else comes from TMDb), and reads a list at most once a day: there is no "sync now", and a second link attempt within 60 seconds is refused.
+// @Description Links the user's public IMDb Watchlist (by user ID, ur…) or any public IMDb list (ls…), adds its titles to the watchlist now, and keeps the watchlist in step with it once a day from then on. Linking again replaces the link. Titles are added as planned items with source "imdb". Linking itself leaves every item the user already has exactly as it is. The daily sync, from its first run on, adopts items the user imported from IMDb earlier: an item that carries the IMDb ID of a title on the list (which only an import stores), is still "planned" and has no tags gets source "imdb" and follows the list from then on. Items added by hand are never adopted. The daily sync removes an item only if its source is "imdb", the user has not changed its status or tagged it, and it has been missing from two complete fetches of the list at least 12 hours apart. IMDb does not permit public or commercial use of its data, so this is strictly opt-in, stores only IMDb title IDs (everything else comes from TMDb), and reads a list at most once a day: there is no "sync now", and a link request within 60 seconds of a fetch of the user's list (by an earlier link request or by the daily sync) is refused with 429. Every successful request sets linked_at, also one for the list that is linked already.
 // @Tags Users
 // @Security BearerAuth
 // @Accept json
@@ -102,7 +107,7 @@ type IMDbLinkResult struct {
 // @Failure 400 {object} ErrorResponse "Not an IMDb user ID, list ID or URL; or the list is too large"
 // @Failure 401 {object} ErrorResponse "Unauthorized"
 // @Failure 404 {object} ErrorResponse "IMDb has no such list, or it is not public"
-// @Failure 429 {object} ErrorResponse "A link was attempted less than 60 seconds ago"
+// @Failure 429 {object} ErrorResponse "The list was fetched less than 60 seconds ago, by a link request or the daily sync"
 // @Header 429 {integer} Retry-After "Seconds to wait before trying again"
 // @Failure 500 {object} ErrorResponse "The link could not be stored"
 // @Failure 502 {object} ErrorResponse "IMDb could not be reached"
@@ -153,7 +158,7 @@ func (s *Server) linkIMDbHandler(c *gin.Context) {
 	}
 	if !claimed {
 		c.Header("Retry-After", strconv.Itoa(int(imdbLinkMinGap.Seconds())))
-		jsonError(c, http.StatusTooManyRequests, "An IMDb list was linked a moment ago. Try again in a minute.")
+		jsonError(c, http.StatusTooManyRequests, msgIMDbLockedOut)
 		return
 	}
 
@@ -255,7 +260,7 @@ func (s *Server) unlinkIMDbHandler(c *gin.Context) {
 	// way. Unlinking waits for them.
 	locked := func(wait time.Duration) {
 		c.Header("Retry-After", strconv.Itoa(max(1, int(math.Ceil(wait.Seconds())))))
-		jsonError(c, http.StatusTooManyRequests, "The IMDb list was read a moment ago. Try again in a minute.")
+		jsonError(c, http.StatusTooManyRequests, msgIMDbLockedOut)
 	}
 	if at := user.IMDbAttemptAt; at != nil && start.Sub(*at) < imdbLinkMinGap {
 		locked(imdbLinkMinGap - max(0, start.Sub(*at)))

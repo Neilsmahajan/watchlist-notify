@@ -314,9 +314,11 @@ Returns authenticated user's complete profile.
   list ID (`ls…`)
 - `last_attempt_at` - when the list was last fetched, successfully or not
 - `last_synced_at` - when the whole list was last read; absent until then
-- `last_status` - `ok`; `partial` (only part of the list was read or added so
-  far; the next daily sync continues); `failed` (IMDb could not be reached);
-  `not_found` (the list is gone or no longer public)
+- `linked_at` - when the list was linked. Every successful link request sets
+  it, also one for the list that is linked already
+- `last_status` - `ok`; `partial` (only part of the list was read or applied
+  so far; the next daily sync continues); `failed` (IMDb could not be
+  reached); `not_found` (the list is gone or no longer public)
 - `last_error` - a short explanation, present unless the status is `ok`
 - `total` - titles on the IMDb list
 - `added`, `removed`, `unmatched` - counts from the last run. `unmatched` are
@@ -332,9 +334,12 @@ PUT /api/me/imdb
 Links the user's **public** IMDb Watchlist, or any public IMDb list, to their
 watchlist. The list's titles are added before the request answers (it may
 take up to about 25 seconds), and a daily job keeps the watchlist in step with
-the list from then on. Linking again replaces the link, and clears every
-`imdb_missing_since` mark on the user's items first, so an item is only ever
-removed on the evidence of the list that is linked now.
+the list from then on. The request itself only adds: every item the user
+already has is left exactly as it is. Linking again replaces the link, also
+when it is the same list: `linked_at` is the time of the latest successful
+link request, and every `imdb_missing_since` mark on the user's items is
+cleared first, so an item is only ever removed on the evidence of the link
+that is in force now.
 
 **Request Body:**
 
@@ -364,7 +369,6 @@ removed on the evidence of the list that is linked now.
     "total": 242,
     "added": 230,
     "existing": 10,
-    "adopted": 8,
     "unmatched": 2,
     "complete": true
   }
@@ -372,10 +376,8 @@ removed on the evidence of the list that is linked now.
 ```
 
 - `result.added` - titles that became new watchlist items; `existing` - titles
-  the user already had
-- `result.adopted` - how many of the `existing` ones the sync took over
-  because the user had imported them from IMDb before (see **Adopts** below).
-  Every other existing item is left exactly as it is
+  the user already had. The link request leaves those as they are; the daily
+  sync may adopt some of them later (see **Adopts** below)
 - `result.complete` - `false` when the list was only partly read, when it
   holds the same title twice, or when the request ran out of time (20 seconds
   for reading the list, looking titles up and writing them, whichever of
@@ -390,7 +392,7 @@ the user):
 | ------ | --------------------------------------------------------------------------------------- |
 | `400`  | `source` is not an IMDb user ID, list ID or IMDb URL; or the list has over 10,000 titles |
 | `404`  | IMDb has no such list, or it is not public. The message says to make it public          |
-| `429`  | A link was attempted less than 60 seconds ago. `Retry-After` gives the seconds to wait  |
+| `429`  | The user's list was fetched less than 60 seconds ago, by a link request or by the daily sync. `Retry-After` gives the seconds to wait |
 | `500`  | The watchlist could not be read or prepared, or the link could not be stored            |
 | `502`  | IMDb could not be reached                                                               |
 | `503`  | The server has no TMDb key, so IMDb titles cannot be resolved                           |
@@ -405,9 +407,12 @@ A failed attempt leaves an existing link as it was.
   item gets `"source": "imdb"`, and from then on is treated like one the sync
   added, when all of these hold: the item's own stored `imdb_id` is on the
   list; its `source` is `csv` or absent; its status is still `planned`; and it
-  has no tags. Both linking and the daily sync do this. Without it, someone
-  who imported their list by CSV and later linked the same list would never
-  see a title leave here after taking it off IMDb. An item added by hand has
+  has no tags. Only the daily sync does this, never the link request: the
+  first sync after linking, the next day, adopts. (An import the user takes
+  off the IMDb list before that sync is therefore not adopted, and stays.)
+  Without adoption, someone who imported their list by CSV and later linked
+  the same list would never see a title leave here after taking it off IMDb.
+  An item added by hand has
   no `imdb_id` (the create request's `imdb_id` is not stored and an edit
   cannot set one), so it is never adopted, even when its title is on the
   list, and the sync never writes an `imdb_id` onto it. An imported item that
@@ -423,9 +428,14 @@ A failed attempt leaves an existing link as it was.
   never removed, nor are imported items the sync has not adopted, and a list
   that is private, unreachable, partly read, empty, or that holds the same
   title twice removes nothing.
-- Linking never removes anything; only the daily sync does. A daily sync
-  that is under way when the user unlinks or links again adopts nothing and
-  removes nothing.
+- Linking never adopts or removes anything; only the daily sync does, and
+  only during the first 45 seconds after it starts on a user's list. For 60
+  seconds from that same moment, link and unlink requests answer `429`, so
+  the link cannot change while a sync may still act on it. A sync that needs
+  longer than the 45 seconds (IMDb is slow, or many titles are new) still
+  adds what is new; it reports `partial` with the `last_error` "the sync ran
+  out of time; it continues at the next sync", and adopts, marks and removes
+  at the next daily sync.
 
 **IMDb's terms.** IMDb does not license its data for public or commercial
 use. This feature is therefore strictly opt-in, reads only a list its owner
@@ -447,8 +457,15 @@ is cleared. Succeeds when nothing is linked.
 
 **Response:** `204 No Content`
 
-**Errors:** `500` when the marks or the link could not be cleared. The list is
-then **still linked**; send the request again.
+**Errors:**
+
+- `429` when the user's list was fetched less than 60 seconds ago, by their
+  own link request or by the daily sync. Nothing is changed and the list is
+  **still linked**; `Retry-After` gives the seconds to wait. So a list
+  cannot be unlinked in the first minute after it was linked. The body is
+  `{"error": "..."}` with a message written to be shown to the user.
+- `500` when the marks or the link could not be cleared. The list is then
+  **still linked**; send the request again.
 
 #### Update User Preferences
 
@@ -740,7 +757,7 @@ row, count as `duplicates` and are left as they are (an import never hands an
 item to the IMDb sync); new titles become `planned` items with
 `"source": "csv"`. A file brings in at most 10,000 titles. If the same list is
 linked afterwards, the untouched imported items that are on it are adopted by
-the sync (see [Link an IMDb List](#link-an-imdb-list)).
+the first daily sync (see [Link an IMDb List](#link-an-imdb-list)).
 
 **Response:**
 

@@ -211,7 +211,7 @@ const docTemplate = `{
                         "BearerAuth": []
                     }
                 ],
-                "description": "Links the user's public IMDb Watchlist (by user ID, ur…) or any public IMDb list (ls…), adds its titles to the watchlist now, and keeps the watchlist in step with it once a day from then on. Linking again replaces the link. Titles are added as planned items with source \"imdb\". Items the user already has are left as they are, with one exception: an item that carries the IMDb ID of a title on the list (which only an earlier import stores), is still \"planned\" and has no tags is adopted, meaning its source becomes \"imdb\" and it follows the list from then on. Items added by hand are never adopted. The daily sync removes an item only if its source is \"imdb\", the user has not changed its status or tagged it, and it has been missing from two complete fetches of the list at least 12 hours apart. IMDb does not permit public or commercial use of its data, so this is strictly opt-in, stores only IMDb title IDs (everything else comes from TMDb), and reads a list at most once a day: there is no \"sync now\", and a second link attempt within 60 seconds is refused.",
+                "description": "Links the user's public IMDb Watchlist (by user ID, ur…) or any public IMDb list (ls…), adds its titles to the watchlist now, and keeps the watchlist in step with it once a day from then on. Linking again replaces the link. Titles are added as planned items with source \"imdb\". Linking itself leaves every item the user already has exactly as it is. The daily sync, from its first run on, adopts items the user imported from IMDb earlier: an item that carries the IMDb ID of a title on the list (which only an import stores), is still \"planned\" and has no tags gets source \"imdb\" and follows the list from then on. Items added by hand are never adopted. The daily sync removes an item only if its source is \"imdb\", the user has not changed its status or tagged it, and it has been missing from two complete fetches of the list at least 12 hours apart. IMDb does not permit public or commercial use of its data, so this is strictly opt-in, stores only IMDb title IDs (everything else comes from TMDb), and reads a list at most once a day: there is no \"sync now\", and a link request within 60 seconds of a fetch of the user's list (by an earlier link request or by the daily sync) is refused with 429. Every successful request sets linked_at, also one for the list that is linked already.",
                 "consumes": [
                     "application/json"
                 ],
@@ -259,7 +259,7 @@ const docTemplate = `{
                         }
                     },
                     "429": {
-                        "description": "A link was attempted less than 60 seconds ago",
+                        "description": "The list was fetched less than 60 seconds ago, by a link request or the daily sync",
                         "schema": {
                             "$ref": "#/definitions/internal_server.ErrorResponse"
                         },
@@ -296,7 +296,7 @@ const docTemplate = `{
                         "BearerAuth": []
                     }
                 ],
-                "description": "Stops syncing with the linked IMDb list. Nothing is removed from the watchlist: items the sync added or adopted stay, and are never removed automatically afterwards. Every \"missing from the list\" mark (imdb_missing_since) on the user's items is cleared. Unlinking when nothing is linked also succeeds. On a 500 the list is still linked; send the request again.",
+                "description": "Stops syncing with the linked IMDb list. Nothing is removed from the watchlist: items the sync added or adopted stay, and are never removed automatically afterwards. Every \"missing from the list\" mark (imdb_missing_since) on the user's items is cleared. Unlinking when nothing is linked also succeeds. Within 60 seconds of a fetch of the user's list, by a link request or by the daily sync, the answer is 429 with Retry-After and nothing is changed: the list is still linked; send the request again after that many seconds. On a 500 the list is still linked too.",
                 "tags": [
                     "Users"
                 ],
@@ -309,6 +309,18 @@ const docTemplate = `{
                         "description": "Unauthorized",
                         "schema": {
                             "$ref": "#/definitions/internal_server.ErrorResponse"
+                        }
+                    },
+                    "429": {
+                        "description": "The list was fetched less than a minute ago; still linked",
+                        "schema": {
+                            "$ref": "#/definitions/internal_server.ErrorResponse"
+                        },
+                        "headers": {
+                            "Retry-After": {
+                                "type": "integer",
+                                "description": "Seconds to wait before trying again"
+                            }
                         }
                     },
                     "500": {
@@ -1613,11 +1625,6 @@ const docTemplate = `{
                     "description": "Added is how many of them became new watchlist items.",
                     "type": "integer",
                     "example": 230
-                },
-                "adopted": {
-                    "description": "Adopted is how many of the existing ones the sync took over: items the\nuser had imported from IMDb and not touched since. They now follow the\nlist like the titles the sync adds, removal included.",
-                    "type": "integer",
-                    "example": 8
                 },
                 "complete": {
                     "description": "Complete is false when the list was only partly read or some titles\nare still to be looked up; the daily sync finishes the job.",

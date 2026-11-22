@@ -106,9 +106,12 @@ overlapping runs cannot both fetch), reads the list, and then:
 - **Adopts** what the user imported from IMDb before linking: an existing
   item whose own stored `imdb_id` is on the list, whose `source` is `csv` or
   absent, whose status is still `planned` and which has no tags gets
-  `source: "imdb"` and follows the rules below from then on. (Linking does
-  the same.) Someone who imported their list by CSV and then linked it would
-  otherwise never see a title leave here after taking it off IMDb. The write
+  `source: "imdb"` and follows the rules below from then on. Only this task
+  adopts; the link request does not, because it runs before the link is
+  stored, and an item must not become the sync's on the evidence of a list
+  that then is not linked. So the first sync after linking adopts. Someone
+  who imported their list by CSV and then linked it would otherwise never
+  see a title leave here after taking it off IMDb. The write
   repeats all of those conditions in its filter, so an edit the user makes
   after the plan wins, and it leaves `updated_at` alone.
 - **Never adopts** an item added by hand. Such an item has no `imdb_id`: the
@@ -136,13 +139,34 @@ overlapping runs cannot both fetch), reads the list, and then:
 - **Strikes belong to one link.** A mark carries the time the run claimed its
   fetch. A mark older than the link's `linked_at` was made for a list linked
   before: it is never grounds for removal, and the next sync clears it.
-  Linking and unlinking both clear all of a user's marks.
-- **The link is read again before pruning.** A run can spend two minutes
-  fetching and resolving, and the user can unlink or link again in that time.
-  Immediately before the adoptions and marks, and again before the removals,
-  the run reads the user's link and does none of them unless `source_id` and
-  `linked_at` are exactly what it started with (`link_changed` in the log).
-  What it added stays, and its status is stored only on the link it was for.
+  Linking and unlinking both clear all of a user's marks, and every
+  successful link request sets a new `linked_at`, also one for the list
+  that is linked already.
+- **A 45-second lease.** A run adopts, marks and removes for a user only
+  while less than 45 seconds have passed since it claimed that user's fetch.
+  For 60 seconds from the same claim the API answers `429` to
+  `PUT` and `DELETE /api/me/imdb`, and the unlink makes that check inside
+  its own database update. So a link or unlink can never land while a run
+  still has the right to change whose an item is or to remove one. The check
+  is made before every single adopt, mark and remove, each of which has its
+  own deadline of 3 seconds and never more than the rest of the lease. The
+  15 seconds between lease and lockout are the margin for clocks: it assumes
+  the worker's clock and every API instance's are within 15 seconds of each
+  other. When the lease runs out (a slow fetch, many lookups) the run stops
+  those three kinds of write, keeps what it did, and stores `partial` with
+  "the sync ran out of time; it continues at the next sync"; the log line
+  has `lease_expired` and the summary counts it as `out_of_time`. Adding is
+  not bound by the lease. The pause between two users comes before the
+  claim, so it does not use the lease up.
+- **The link is read again, after the claim.** The users were listed before
+  their fetches were claimed, and a user can unlink or link again in
+  between. So before the adoptions and marks, and again before the
+  removals, the run reads the user's link and does none of them unless
+  `source_id` and `linked_at` are exactly what it started with
+  (`link_changed` in the log). The read made after the claim is what tells
+  the run which link the lease covers; the second one is a cheap second
+  line for clocks that disagree by more than the margin. What the run added
+  stays, and its status is stored only on the link it was for.
 - A list that is private, gone, unreachable, only partly read, or empty never
   removes or marks anything, and neither does a list that holds the same
   title twice (the client cannot tell that from two pages that overlap, so it
@@ -158,8 +182,13 @@ or no list at all could be synced.
 Logs carry user IDs and counts, never email addresses or titles. Each user
 gets an `imdb: user synced` line and the run ends with an `imdb summary` line:
 `users` (linked and due), `synced`, `partial`, `failed`, `not_found`,
-`skipped` (claimed by another run, or not reached), `deferred`, `added`,
-`adopted`, `removed`, `marked_missing`, `unmatched`.
+`skipped` (claimed by another run, or not reached), `deferred`,
+`out_of_time` (of the partial ones: the 45-second lease was over before
+everything was adopted, marked or removed), `added`, `adopted`, `removed`,
+`marked_missing`, `unmatched`. If `out_of_time` is above zero for the same
+user day after day, their list takes too long to read for anything to be
+adopted or removed for them: look at the fetch time before raising the
+lease, which must stay 15 seconds under the API's lockout.
 
 **Time.** The job's three tasks share one Cloud Run task timeout: 1800 s,
 set as `TASK_TIMEOUT` in `scripts/release-worker.sh`. The sync budgets itself
