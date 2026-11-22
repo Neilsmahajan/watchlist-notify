@@ -375,6 +375,125 @@ func TestRefreshOverlappingBaselinesStoreOne(t *testing.T) {
 	}
 }
 
+// serviceCodes lists the services streaming in a title's US snapshot.
+func serviceCodes(t *testing.T, title *models.Title) []string {
+	t.Helper()
+	snap, ok := title.Snapshot("US")
+	if !ok {
+		t.Fatalf("%s has no US snapshot", title.ID)
+	}
+	var codes []string
+	for _, svc := range snap.Services() {
+		codes = append(codes, svc.Code)
+	}
+	return codes
+}
+
+// A refresh that loses the compare-and-set fetched something the store does
+// not hold. It must hand back what the winner stored, not its own discard.
+func TestRefreshSupersededReturnsTheStoredSnapshot(t *testing.T) {
+	h := newHarness(t)
+	h.fetcher.streams(matrix, netflix)
+	h.mustRefresh(matrix)
+	stale := h.store.Title(matrix.Key())
+
+	// Two refreshes read the same stored title, late enough that both also
+	// rewrite its metadata. TMDb answers them differently.
+	h.fetcher.streams(matrix, netflix, hulu)
+	h.clock = h.clock.Add(MetadataMaxAge + time.Hour)
+	winner, err := h.r.Refresh(context.Background(), matrix, stale, []string{"US"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.fetcher.streams(matrix, netflix, hulu, tmdb.Provider{ProviderID: 337, ProviderName: "Disney Plus"})
+	h.fetcher.responses[matrix.Key()].Title = "A title only the loser saw"
+	h.clock = h.clock.Add(time.Second)
+	loser, err := h.r.Refresh(context.Background(), matrix, stale, []string{"US"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if winner.Superseded != 0 || loser.Superseded != 1 {
+		t.Fatalf("winner = %+v, loser = %+v; want only the second superseded", winner, loser)
+	}
+	stored := h.store.Title(matrix.Key())
+	want := []string{"netflix", "hulu"}
+	if got := serviceCodes(t, stored); !reflect.DeepEqual(got, want) {
+		t.Fatalf("stored services = %v, want the winner's %v", got, want)
+	}
+	if got := serviceCodes(t, loser.Title); !reflect.DeepEqual(got, want) {
+		t.Errorf("the superseded refresh returned %v, want what is stored, %v", got, want)
+	}
+	storedSnap, _ := stored.Snapshot("US")
+	returned, _ := loser.Title.Snapshot("US")
+	if !returned.FetchedAt.Equal(storedSnap.FetchedAt) {
+		t.Errorf("returned snapshot version %v, want the stored %v", returned.FetchedAt, storedSnap.FetchedAt)
+	}
+	if loser.Title.Title != stored.Title {
+		t.Errorf("returned metadata title %q, want the stored %q", loser.Title.Title, stored.Title)
+	}
+}
+
+// brokenReads fails title reads, as the store does when it drops out between
+// a refresh's write and its read-back.
+type brokenReads struct{ *storetest.Store }
+
+func (*brokenReads) GetTitles(context.Context, []string, []string) (map[string]*models.Title, error) {
+	return nil, errors.New("connection reset")
+}
+
+func TestRefreshSupersededWithoutAReadBackLeavesTheRegionUnknown(t *testing.T) {
+	h := newHarness(t)
+	h.fetcher.streams(matrix, netflix)
+	h.mustRefresh(matrix)
+
+	// Someone else already stored a baseline; this refresh believes there is none.
+	h.r.store = &brokenReads{Store: h.store}
+	h.fetcher.streams(matrix, hulu)
+	res, err := h.r.Refresh(context.Background(), matrix, nil, []string{"US"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if res.Superseded != 1 {
+		t.Fatalf("result = %+v, want the write superseded", res)
+	}
+	if snap, ok := res.Title.Snapshot("US"); ok {
+		t.Errorf("the refresh returned a snapshot it neither stored nor read back: %+v", snap)
+	}
+	if got, want := h.streamingCodes(matrix), []string{"netflix"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("stored services = %v, want them untouched, %v", got, want)
+	}
+}
+
+// Ensure is how the watchlist reader fills in titles it found missing. If
+// another request stored the title in between, the reader must be shown that
+// stored snapshot.
+func TestEnsureReturnsTheStoredWinnerWhenSuperseded(t *testing.T) {
+	h := newHarness(t)
+	h.fetcher.streams(matrix, netflix)
+	h.mustRefresh(matrix)
+	h.fetcher.streams(matrix, hulu)
+
+	// The caller's read predates the stored baseline.
+	resolved := h.r.Ensure(context.Background(), []models.TitleRef{matrix}, map[string]*models.Title{}, "US")
+
+	title, ok := resolved[matrix.Key()]
+	if !ok {
+		t.Fatal("the title was left unresolved although a snapshot is stored")
+	}
+	if got, want := serviceCodes(t, title), []string{"netflix"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("Ensure returned %v, want the stored %v", got, want)
+	}
+
+	// With the read-back failing there is nothing trustworthy to return.
+	h.r.store = &brokenReads{Store: h.store}
+	resolved = h.r.Ensure(context.Background(), []models.TitleRef{matrix}, map[string]*models.Title{}, "US")
+	if title, ok := resolved[matrix.Key()]; ok {
+		t.Errorf("Ensure resolved the title to %+v without a stored snapshot to show", title.Providers)
+	}
+}
+
 func TestRefreshRewritesMetadataOnlyWhenStale(t *testing.T) {
 	h := newHarness(t)
 	h.fetcher.streams(matrix, netflix)

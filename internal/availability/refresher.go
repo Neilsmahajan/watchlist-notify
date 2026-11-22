@@ -94,7 +94,9 @@ func NewRefresher(fetcher Fetcher, store Store, logger *slog.Logger, opts ...Opt
 
 // Result describes what refreshing one title did.
 type Result struct {
-	// Title is the title as it now stands for the refreshed regions.
+	// Title is the title as it is now stored for the refreshed regions. A
+	// region whose write was superseded holds the winner's snapshot, or none
+	// at all when that could not be read back.
 	Title *models.Title
 	// Baselines counts regions that received their first snapshot.
 	Baselines int
@@ -121,7 +123,8 @@ type Result struct {
 //     an event that only became true a run later.
 //  2. The snapshot is replaced with a compare-and-set on that version. Of two
 //     overlapping runs only one wins; the loser's write is dropped, and its
-//     events carry the same IDs as the winner's.
+//     events carry the same IDs as the winner's. The loser reads the winner's
+//     snapshot back and returns that, never the one it failed to store.
 //
 // Any fetch error returns before either step, so a TMDb outage can never be
 // read as "every provider dropped the title".
@@ -155,6 +158,7 @@ func (r *Refresher) Refresh(ctx context.Context, ref models.TitleRef, stored *mo
 	}
 
 	res := Result{Title: title}
+	var superseded []string
 	for _, region := range regions {
 		// A region missing from a successful response means TMDb lists no
 		// providers there, which BuildSnapshot turns into an empty snapshot.
@@ -183,15 +187,49 @@ func (r *Refresher) Refresh(ctx context.Context, ref models.TitleRef, stored *mo
 		if err != nil {
 			return res, fmt.Errorf("save snapshot for %s in %s: %w", ref.Key(), region, err)
 		}
-		switch {
-		case !applied:
+		if !applied {
 			res.Superseded++
-		case prev == nil:
+			superseded = append(superseded, region)
+			continue
+		}
+		if prev == nil {
 			res.Baselines++
 		}
 		title.Providers[region] = fresh
 	}
+	if len(superseded) > 0 {
+		r.adoptStored(ctx, ref, title, superseded)
+	}
 	return res, nil
+}
+
+// adoptStored makes title say what is actually stored for the regions where
+// this run lost the compare-and-set. What this run fetched was thrown away,
+// so handing it to a caller would show them something the store does not
+// hold. If the winner cannot be read back, the regions are left without a
+// snapshot: unknown is the honest answer.
+func (r *Refresher) adoptStored(ctx context.Context, ref models.TitleRef, title *models.Title, regions []string) {
+	for _, region := range regions {
+		delete(title.Providers, region)
+	}
+	stored, err := r.store.GetTitles(ctx, []string{ref.Key()}, regions)
+	if err != nil {
+		r.logger.Warn("availability: superseded title not read back",
+			"title", ref.Key(), "regions", len(regions), "error", err.Error())
+		return
+	}
+	winner := stored[ref.Key()]
+	if winner == nil {
+		return
+	}
+	for _, region := range regions {
+		if snap, ok := winner.Snapshot(region); ok {
+			title.Providers[region] = snap
+		}
+	}
+	// The winner may have rewritten the metadata in the same write.
+	title.TitleMetadata = winner.TitleMetadata
+	title.UpdatedAt = winner.UpdatedAt
 }
 
 // Peek fetches a title's snapshot for one region without storing anything.
@@ -275,7 +313,13 @@ func (r *Refresher) Ensure(ctx context.Context, refs []models.TitleRef, stored m
 			}
 			return
 		}
-		resolved[ref.Key()] = res.Title
+		// A superseded refresh that could not read the winner back has
+		// nothing for the region; leave the title unresolved.
+		if _, ok := res.Title.Snapshot(region); ok {
+			resolved[ref.Key()] = res.Title
+		} else {
+			failed++
+		}
 	})
 	if unresolved := len(refs) - len(resolved); unresolved > 0 {
 		r.logger.Warn("availability: titles left unresolved",
