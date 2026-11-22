@@ -1,0 +1,839 @@
+basePath: /
+definitions:
+  github_com_neilsmahajan_watchlist-notify_internal_models.AvailabilityMatch:
+    properties:
+      available:
+        type: boolean
+      checked_at:
+        type: string
+      region:
+        type: string
+      service_code:
+        type: string
+      url:
+        type: string
+    type: object
+  github_com_neilsmahajan_watchlist-notify_internal_models.DigestSettings:
+    properties:
+      enabled:
+        type: boolean
+      interval:
+        description: '>=1'
+        type: integer
+      interval_unit:
+        description: e.g. "days", "weeks", "months"
+        type: string
+      last_sent_at:
+        type: string
+      next_scheduled_at:
+        type: string
+    type: object
+  github_com_neilsmahajan_watchlist-notify_internal_models.Preferences:
+    properties:
+      digest:
+        $ref: '#/definitions/github_com_neilsmahajan_watchlist-notify_internal_models.DigestSettings'
+      digest_consent:
+        type: boolean
+      marketing_consent:
+        type: boolean
+      notify_email:
+        type: string
+      use_account_email:
+        type: boolean
+    type: object
+  github_com_neilsmahajan_watchlist-notify_internal_models.ServiceSubscription:
+    properties:
+      active:
+        type: boolean
+      added_at:
+        type: string
+      code:
+        description: e.g. "netflix"
+        type: string
+      plan:
+        description: optional
+        type: string
+    type: object
+  github_com_neilsmahajan_watchlist-notify_internal_models.User:
+    properties:
+      created_at:
+        type: string
+      email:
+        type: string
+      id:
+        type: string
+      name:
+        type: string
+      picture:
+        type: string
+      preferences:
+        $ref: '#/definitions/github_com_neilsmahajan_watchlist-notify_internal_models.Preferences'
+      region:
+        type: string
+      services:
+        items:
+          $ref: '#/definitions/github_com_neilsmahajan_watchlist-notify_internal_models.ServiceSubscription'
+        type: array
+      updated_at:
+        type: string
+    type: object
+  github_com_neilsmahajan_watchlist-notify_internal_models.WatchlistItem:
+    properties:
+      added_at:
+        type: string
+      availability:
+        description: optional embeded or compute
+        items:
+          $ref: '#/definitions/github_com_neilsmahajan_watchlist-notify_internal_models.AvailabilityMatch'
+        type: array
+      id:
+        type: string
+      imdb_id:
+        type: string
+      last_checked_at:
+        type: string
+      status:
+        description: 'enum: planned | watching | finished'
+        type: string
+      tags:
+        items:
+          type: string
+        type: array
+      title:
+        type: string
+      tmdb_id:
+        type: integer
+      type:
+        description: 'enum: movie | show (See constants)'
+        type: string
+      updated_at:
+        type: string
+      user_id:
+        type: string
+      year:
+        type: integer
+    type: object
+  internal_server.AvailabilityItemResponse:
+    properties:
+      providers:
+        items:
+          $ref: '#/definitions/internal_server.ProviderInfo'
+        type: array
+      unmatched_user_services:
+        items:
+          type: string
+        type: array
+    type: object
+  internal_server.BatchAvailabilityRequest:
+    properties:
+      items:
+        items:
+          properties:
+            id:
+              type: integer
+            type:
+              description: '"movie" or "tv"'
+              type: string
+          required:
+          - id
+          - type
+          type: object
+        type: array
+      region:
+        type: string
+    required:
+    - items
+    type: object
+  internal_server.BatchAvailabilityResponse:
+    properties:
+      region:
+        type: string
+      results:
+        additionalProperties:
+          $ref: '#/definitions/internal_server.AvailabilityItemResponse'
+        description: 'key: "movie_123" or "tv_456"'
+        type: object
+    type: object
+  internal_server.ErrorResponse:
+    description: Standard error response structure used across all endpoints
+    properties:
+      error:
+        example: invalid request
+        type: string
+    type: object
+  internal_server.ProviderInfo:
+    properties:
+      access:
+        items:
+          type: string
+        type: array
+      code:
+        type: string
+      link:
+        type: string
+      logo_path:
+        type: string
+      name:
+        type: string
+    type: object
+host: api.watchlistnotify.com
+info:
+  contact:
+    email: contact@watchlistnotify.com
+    name: Watchlist Notify Support
+    url: https://watchlistnotify.com/contact
+  description: |-
+    API for managing movie and TV show watchlists with streaming availability notifications across multiple platforms.
+
+    Features:
+    - User profile and preferences management
+    - Watchlist CRUD operations for movies and TV shows
+    - Streaming service subscription management
+    - Real-time availability checking via TMDb
+    - Digest email notifications with customizable schedules
+    - Content search and discovery
+  license:
+    name: MIT
+    url: https://github.com/neilsmahajan/watchlist-notify/blob/main/LICENCE
+  title: Watchlist Notify API
+  version: 0.9.0
+paths:
+  /api/availability/{id}:
+    get:
+      description: Check which of the user's subscribed services have a specific movie
+        or TV show available
+      parameters:
+      - description: TMDb content ID
+        in: path
+        name: id
+        required: true
+        type: integer
+      - description: Content type
+        enum:
+        - movie
+        - tv
+        in: query
+        name: type
+        required: true
+        type: string
+      - description: ISO 3166-1 region code (defaults to user's region or US)
+        in: query
+        name: region
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: Availability details for user's services
+          schema:
+            additionalProperties: true
+            type: object
+        "400":
+          description: Invalid ID or type
+          schema:
+            $ref: '#/definitions/internal_server.ErrorResponse'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/internal_server.ErrorResponse'
+        "502":
+          description: Upstream TMDb API error
+          schema:
+            $ref: '#/definitions/internal_server.ErrorResponse'
+        "503":
+          description: Availability service unavailable
+          schema:
+            $ref: '#/definitions/internal_server.ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: Get streaming availability
+      tags:
+      - Availability
+  /api/availability/batch:
+    post:
+      consumes:
+      - application/json
+      description: Check availability for multiple movies/TV shows across user's subscribed
+        services in a single request
+      parameters:
+      - description: List of items to check (max 500)
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/internal_server.BatchAvailabilityRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: Batch availability results
+          schema:
+            $ref: '#/definitions/internal_server.BatchAvailabilityResponse'
+        "400":
+          description: Invalid request body or exceeds batch size limit
+          schema:
+            $ref: '#/definitions/internal_server.ErrorResponse'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/internal_server.ErrorResponse'
+        "503":
+          description: Availability service unavailable
+          schema:
+            $ref: '#/definitions/internal_server.ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: Batch check streaming availability
+      tags:
+      - Availability
+  /api/me:
+    get:
+      description: Returns the authenticated user's complete profile including preferences
+        and service subscriptions
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: User profile
+          schema:
+            $ref: '#/definitions/github_com_neilsmahajan_watchlist-notify_internal_models.User'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/internal_server.ErrorResponse'
+        "500":
+          description: Internal server error
+          schema:
+            $ref: '#/definitions/internal_server.ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: Get current user profile
+      tags:
+      - Users
+  /api/me/notifications/test:
+    post:
+      consumes:
+      - application/json
+      description: Send a test digest email to verify email configuration and preview
+        digest format
+      parameters:
+      - description: Test notification configuration
+        in: body
+        name: body
+        schema:
+          properties:
+            override_email:
+              type: string
+            type:
+              type: string
+          type: object
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: Test notification sent successfully
+          schema:
+            additionalProperties: true
+            type: object
+        "400":
+          description: Invalid email or request
+          schema:
+            $ref: '#/definitions/internal_server.ErrorResponse'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/internal_server.ErrorResponse'
+        "500":
+          description: Failed to send notification
+          schema:
+            $ref: '#/definitions/internal_server.ErrorResponse'
+        "503":
+          description: Notification service not configured
+          schema:
+            $ref: '#/definitions/internal_server.ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: Send test notification email
+      tags:
+      - Notifications
+  /api/me/preferences:
+    patch:
+      consumes:
+      - application/json
+      description: Update user notification preferences, digest settings, and email
+        configuration
+      parameters:
+      - description: User preferences update
+        in: body
+        name: body
+        required: true
+        schema:
+          properties:
+            digest_consent:
+              type: boolean
+            digest_enabled:
+              type: boolean
+            digest_interval:
+              type: integer
+            digest_interval_unit:
+              type: string
+            marketing_consent:
+              type: boolean
+            notify_email:
+              type: string
+            use_account_email:
+              type: boolean
+          type: object
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: Updated user profile
+          schema:
+            $ref: '#/definitions/github_com_neilsmahajan_watchlist-notify_internal_models.User'
+        "400":
+          description: Invalid request body
+          schema:
+            $ref: '#/definitions/internal_server.ErrorResponse'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/internal_server.ErrorResponse'
+        "500":
+          description: Failed to update preferences
+          schema:
+            $ref: '#/definitions/internal_server.ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: Update user preferences
+      tags:
+      - Users
+  /api/me/services:
+    get:
+      description: Get all available streaming services with the user's subscription
+        status
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: List of services with subscription status
+          schema:
+            additionalProperties: true
+            type: object
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/internal_server.ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: List streaming services
+      tags:
+      - Services
+    patch:
+      consumes:
+      - application/json
+      description: Add, remove, or toggle streaming service subscriptions for the
+        authenticated user
+      parameters:
+      - description: Service subscription changes
+        in: body
+        name: body
+        required: true
+        schema:
+          properties:
+            add:
+              items:
+                type: string
+              type: array
+            remove:
+              items:
+                type: string
+              type: array
+            toggle:
+              items:
+                properties:
+                  active:
+                    type: boolean
+                  code:
+                    type: string
+                type: object
+              type: array
+          type: object
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: Updated user profile with services
+          schema:
+            $ref: '#/definitions/github_com_neilsmahajan_watchlist-notify_internal_models.User'
+        "400":
+          description: Invalid request body or service codes
+          schema:
+            $ref: '#/definitions/internal_server.ErrorResponse'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/internal_server.ErrorResponse'
+        "500":
+          description: Failed to update services
+          schema:
+            $ref: '#/definitions/internal_server.ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: Update streaming service subscriptions
+      tags:
+      - Services
+  /api/search:
+    get:
+      description: Search for movies or TV shows via TMDb API with pagination and
+        filters
+      parameters:
+      - description: Search query string
+        in: query
+        name: query
+        required: true
+        type: string
+      - default: movie
+        description: 'Content type: movie or tv'
+        enum:
+        - movie
+        - tv
+        in: query
+        name: type
+        type: string
+      - default: 1
+        description: Page number for pagination (1-1000)
+        in: query
+        maximum: 1000
+        minimum: 1
+        name: page
+        type: integer
+      - default: false
+        description: Include adult content in results
+        in: query
+        name: include_adult
+        type: boolean
+      - default: en-US
+        description: ISO 639-1 language code
+        in: query
+        name: language
+        type: string
+      - default: US
+        description: ISO 3166-1 region code
+        in: query
+        name: region
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: Search results with pagination
+          schema:
+            additionalProperties: true
+            type: object
+        "400":
+          description: Invalid query parameters
+          schema:
+            $ref: '#/definitions/internal_server.ErrorResponse'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/internal_server.ErrorResponse'
+        "502":
+          description: Upstream TMDb API error
+          schema:
+            $ref: '#/definitions/internal_server.ErrorResponse'
+        "503":
+          description: Search service unavailable
+          schema:
+            $ref: '#/definitions/internal_server.ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: Search movies and TV shows
+      tags:
+      - Content Discovery
+  /api/watchlist:
+    get:
+      description: Get all items in the user's watchlist with optional filtering,
+        pagination, and sorting
+      parameters:
+      - default: 20
+        description: Number of items to return (0 for all, max 1000)
+        in: query
+        name: limit
+        type: integer
+      - default: 0
+        description: Number of items to skip
+        in: query
+        name: offset
+        type: integer
+      - description: Filter by status
+        enum:
+        - planned
+        - watching
+        - finished
+        in: query
+        name: status
+        type: string
+      - description: Filter by content type
+        enum:
+        - movie
+        - show
+        in: query
+        name: type
+        type: string
+      - description: Search in title
+        in: query
+        name: search
+        type: string
+      - default: -added_at
+        description: Sort field (prefix with - for descending)
+        in: query
+        name: sort
+        type: string
+      - default: false
+        description: Include total count in response
+        in: query
+        name: with_count
+        type: boolean
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: Watchlist items with pagination metadata
+          schema:
+            additionalProperties: true
+            type: object
+        "400":
+          description: Invalid query parameters
+          schema:
+            $ref: '#/definitions/internal_server.ErrorResponse'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/internal_server.ErrorResponse'
+        "500":
+          description: Failed to fetch items
+          schema:
+            $ref: '#/definitions/internal_server.ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: List watchlist items
+      tags:
+      - Watchlist
+    post:
+      consumes:
+      - application/json
+      description: Create a new movie or TV show entry in the user's watchlist
+      parameters:
+      - description: Watchlist item to create
+        in: body
+        name: body
+        required: true
+        schema:
+          properties:
+            imdb_id:
+              type: string
+            status:
+              type: string
+            tags:
+              items:
+                type: string
+              type: array
+            title:
+              type: string
+            tmdb_id:
+              type: integer
+            type:
+              type: string
+            year:
+              type: integer
+          type: object
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: Created watchlist item
+          schema:
+            $ref: '#/definitions/github_com_neilsmahajan_watchlist-notify_internal_models.WatchlistItem'
+        "400":
+          description: Invalid request body
+          schema:
+            $ref: '#/definitions/internal_server.ErrorResponse'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/internal_server.ErrorResponse'
+        "409":
+          description: Duplicate item
+          schema:
+            $ref: '#/definitions/internal_server.ErrorResponse'
+        "500":
+          description: Failed to create item
+          schema:
+            $ref: '#/definitions/internal_server.ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: Add item to watchlist
+      tags:
+      - Watchlist
+  /api/watchlist/{id}:
+    delete:
+      description: Remove an item from the user's watchlist
+      parameters:
+      - description: Watchlist item ID (MongoDB ObjectID hex string)
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: Deletion confirmation message
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "400":
+          description: Invalid ID
+          schema:
+            $ref: '#/definitions/internal_server.ErrorResponse'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/internal_server.ErrorResponse'
+        "404":
+          description: Item not found
+          schema:
+            $ref: '#/definitions/internal_server.ErrorResponse'
+        "500":
+          description: Delete failed
+          schema:
+            $ref: '#/definitions/internal_server.ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: Delete watchlist item
+      tags:
+      - Watchlist
+    patch:
+      consumes:
+      - application/json
+      description: Update an existing watchlist item's details
+      parameters:
+      - description: Watchlist item ID (MongoDB ObjectID hex string)
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: Fields to update
+        in: body
+        name: body
+        required: true
+        schema:
+          properties:
+            status:
+              type: string
+            tags:
+              items:
+                type: string
+              type: array
+            title:
+              type: string
+            tmdb_id:
+              type: integer
+            year:
+              type: integer
+          type: object
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: Updated watchlist item
+          schema:
+            $ref: '#/definitions/github_com_neilsmahajan_watchlist-notify_internal_models.WatchlistItem'
+        "400":
+          description: Invalid ID or request body
+          schema:
+            $ref: '#/definitions/internal_server.ErrorResponse'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/internal_server.ErrorResponse'
+        "404":
+          description: Item not found
+          schema:
+            $ref: '#/definitions/internal_server.ErrorResponse'
+        "409":
+          description: Duplicate item
+          schema:
+            $ref: '#/definitions/internal_server.ErrorResponse'
+        "500":
+          description: Update failed
+          schema:
+            $ref: '#/definitions/internal_server.ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: Update watchlist item
+      tags:
+      - Watchlist
+  /api/watchlist/import:
+    post:
+      consumes:
+      - multipart/form-data
+      description: Bulk import watchlist items from a CSV file (IMDb export format)
+      parameters:
+      - description: CSV file containing watchlist items (max 10MB)
+        in: formData
+        name: file
+        required: true
+        type: file
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: Import results with counts
+          schema:
+            additionalProperties: true
+            type: object
+        "400":
+          description: Invalid file or format
+          schema:
+            $ref: '#/definitions/internal_server.ErrorResponse'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/internal_server.ErrorResponse'
+        "503":
+          description: Import service unavailable
+          schema:
+            $ref: '#/definitions/internal_server.ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: Import watchlist from CSV
+      tags:
+      - Watchlist
+  /health:
+    get:
+      description: Returns the current health status of the API and database connection
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: Service health status
+          schema:
+            additionalProperties: true
+            type: object
+      summary: Health check
+      tags:
+      - System
+schemes:
+- https
+- http
+securityDefinitions:
+  BearerAuth:
+    description: Type "Bearer" followed by a space and JWT token from Auth0 authentication.
+    in: header
+    name: Authorization
+    type: apiKey
+swagger: "2.0"
