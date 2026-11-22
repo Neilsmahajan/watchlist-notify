@@ -563,6 +563,62 @@ func TestLinkIMDbOverBudgetLinksAndReportsPartial(t *testing.T) {
 	}
 }
 
+// The request's deadline covers the database too. A database that stops
+// answering while the titles are being written ends like a TMDb that is too
+// slow: the request answers in time, nothing is reported that did not
+// happen, the link is stored as partial and a later run finishes the job.
+func TestLinkIMDbDatabaseStallDuringTheWritesEndsAsPartial(t *testing.T) {
+	h := newSyncHarness(t)
+	h.have(ttID(1))
+	h.lists.put(testList, ttID(1), ttID(2), ttID(3))
+	h.store.Stall["CreateWatchlistItems"] = true
+	h.server.reconcileDeadline = 400 * time.Millisecond
+
+	body := h.link(testList, http.StatusOK)
+
+	result := body["result"].(map[string]any)
+	if result["complete"] != false || result["added"] != 0.0 || result["existing"] != 1.0 || result["total"] != 3.0 {
+		t.Errorf("result = %v; want incomplete, nothing added, the one item the user had", result)
+	}
+	if sync := body["imdb_sync"].(map[string]any); sync["last_status"] != "partial" || sync["last_error"] == "" {
+		t.Errorf("imdb_sync = %v; want partial with a reason", sync)
+	}
+	if got := len(h.items()); got != 1 {
+		t.Errorf("%d items stored although none was reported added", got-1)
+	}
+	stored := h.store.User(h.user.ID).IMDbSync
+	if stored == nil || stored.SourceID != testList || stored.LastStatus != models.IMDbStatusPartial || stored.LastSyncedAt != nil {
+		t.Errorf("stored link = %+v; want the list linked as partial although the deadline was hit", stored)
+	}
+
+	// With the database back, the next run adds what is missing.
+	delete(h.store.Stall, "CreateWatchlistItems")
+	h.server.reconcileDeadline = 0
+	h.rewind(2 * time.Minute)
+	again := h.link(testList, http.StatusOK)["result"].(map[string]any)
+	if again["complete"] != true || again["added"] != 2.0 || again["existing"] != 1.0 {
+		t.Errorf("second result = %v, want the two titles added", again)
+	}
+}
+
+// If the database does not even answer the first read, nothing was done and
+// nothing is linked.
+func TestLinkIMDbDatabaseStallBeforeAnythingIsReadLinksNothing(t *testing.T) {
+	h := newSyncHarness(t)
+	h.lists.put(testList, ttID(1), ttID(2))
+	h.store.Stall["ListWatchlistItems"] = true
+	h.server.reconcileDeadline = 400 * time.Millisecond
+
+	h.link(testList, http.StatusInternalServerError)
+
+	if link := h.store.User(h.user.ID).IMDbSync; link != nil {
+		t.Errorf("link = %+v; want none stored", link)
+	}
+	if got := len(h.items()); got != 0 {
+		t.Errorf("%d items stored by a request that failed", got)
+	}
+}
+
 // IMDb failed after the first page: the titles read are added, nothing else.
 func TestLinkIMDbPartlyReadListIsLinkedAsPartial(t *testing.T) {
 	h := newSyncHarness(t)

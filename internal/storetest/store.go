@@ -38,6 +38,13 @@ type Store struct {
 	// Fail holds an error per method name, for a single write going wrong
 	// while the rest of the database works.
 	Fail map[string]error
+	// Stall names methods that do not answer: a call waits until its context
+	// is done and then fails with the context's error, the way a query to a
+	// database that has stopped responding does. A caller that set no
+	// deadline is let through after a few seconds, with the call then done
+	// as usual, so that a test of a missing deadline fails instead of
+	// hanging.
+	Stall map[string]bool
 	// Queries counts calls per method name.
 	Queries map[string]int
 	// Writes counts calls that changed something.
@@ -60,15 +67,33 @@ func New() *Store {
 		deliveries: make(map[deliveryKey]models.DigestDelivery),
 		Queries:    make(map[string]int),
 		Fail:       make(map[string]error),
+		Stall:      make(map[string]bool),
 	}
 }
 
+// stallCap is the longest a stalled method waits for its context to end.
+const stallCap = 3 * time.Second
+
 // begin locks the store, counts the call and reports the injected error.
-func (s *Store) begin(method string) (unlock func(), err error) {
+// A stalled method first waits for its context to end (see Stall).
+func (s *Store) begin(ctx context.Context, method string) (unlock func(), err error) {
+	s.mu.Lock()
+	stalled := s.Stall[method]
+	s.mu.Unlock()
+	if stalled {
+		select {
+		case <-ctx.Done():
+		case <-time.After(stallCap):
+		}
+	}
+
 	s.mu.Lock()
 	s.Queries[method]++
-	if s.Err != nil {
+	switch {
+	case s.Err != nil:
 		return s.mu.Unlock, s.Err
+	case stalled && ctx.Err() != nil:
+		return s.mu.Unlock, ctx.Err()
 	}
 	return s.mu.Unlock, s.Fail[method]
 }
@@ -249,14 +274,14 @@ func contains(list []string, v string) bool {
 
 // --- database.Service ---
 
-func (s *Store) Health(context.Context) error {
-	unlock, err := s.begin("Health")
+func (s *Store) Health(ctx context.Context) error {
+	unlock, err := s.begin(ctx, "Health")
 	defer unlock()
 	return err
 }
 
-func (s *Store) GetUserByEmail(_ context.Context, email string) (*models.User, error) {
-	unlock, err := s.begin("GetUserByEmail")
+func (s *Store) GetUserByEmail(ctx context.Context, email string) (*models.User, error) {
+	unlock, err := s.begin(ctx, "GetUserByEmail")
 	defer unlock()
 	if err != nil {
 		return nil, err
@@ -269,8 +294,8 @@ func (s *Store) GetUserByEmail(_ context.Context, email string) (*models.User, e
 	return nil, nil
 }
 
-func (s *Store) GetUsersForDigest(_ context.Context, now time.Time) ([]*models.User, error) {
-	unlock, err := s.begin("GetUsersForDigest")
+func (s *Store) GetUsersForDigest(ctx context.Context, now time.Time) ([]*models.User, error) {
+	unlock, err := s.begin(ctx, "GetUsersForDigest")
 	defer unlock()
 	if err != nil {
 		return nil, err
@@ -297,8 +322,8 @@ func sameTime(a, b *time.Time) bool {
 	return ms(*a).Equal(ms(*b))
 }
 
-func (s *Store) CompareAndSwapDigestSchedule(_ context.Context, userID primitive.ObjectID, from, to models.DigestSchedule, requireEnabled bool) (bool, error) {
-	unlock, err := s.begin("CompareAndSwapDigestSchedule")
+func (s *Store) CompareAndSwapDigestSchedule(ctx context.Context, userID primitive.ObjectID, from, to models.DigestSchedule, requireEnabled bool) (bool, error) {
+	unlock, err := s.begin(ctx, "CompareAndSwapDigestSchedule")
 	defer unlock()
 	if err != nil {
 		return false, err
@@ -319,8 +344,8 @@ func (s *Store) CompareAndSwapDigestSchedule(_ context.Context, userID primitive
 	return true, nil
 }
 
-func (s *Store) DistinctUserRegions(context.Context) ([]string, error) {
-	unlock, err := s.begin("DistinctUserRegions")
+func (s *Store) DistinctUserRegions(ctx context.Context) ([]string, error) {
+	unlock, err := s.begin(ctx, "DistinctUserRegions")
 	defer unlock()
 	if err != nil {
 		return nil, err
@@ -357,8 +382,8 @@ func (s *Store) duplicateOf(item *models.WatchlistItem) bool {
 
 // --- IMDb link ---
 
-func (s *Store) ClaimIMDbAttempt(_ context.Context, userID primitive.ObjectID, now time.Time, minGap time.Duration) (bool, error) {
-	unlock, err := s.begin("ClaimIMDbAttempt")
+func (s *Store) ClaimIMDbAttempt(ctx context.Context, userID primitive.ObjectID, now time.Time, minGap time.Duration) (bool, error) {
+	unlock, err := s.begin(ctx, "ClaimIMDbAttempt")
 	defer unlock()
 	if err != nil {
 		return false, err
@@ -375,8 +400,8 @@ func (s *Store) ClaimIMDbAttempt(_ context.Context, userID primitive.ObjectID, n
 	return true, nil
 }
 
-func (s *Store) LinkIMDb(_ context.Context, userID primitive.ObjectID, sync models.IMDbSync) error {
-	unlock, err := s.begin("LinkIMDb")
+func (s *Store) LinkIMDb(ctx context.Context, userID primitive.ObjectID, sync models.IMDbSync) error {
+	unlock, err := s.begin(ctx, "LinkIMDb")
 	defer unlock()
 	if err != nil {
 		return err
@@ -390,8 +415,8 @@ func (s *Store) LinkIMDb(_ context.Context, userID primitive.ObjectID, sync mode
 	return nil
 }
 
-func (s *Store) GetIMDbLink(_ context.Context, userID primitive.ObjectID) (*models.IMDbSync, error) {
-	unlock, err := s.begin("GetIMDbLink")
+func (s *Store) GetIMDbLink(ctx context.Context, userID primitive.ObjectID) (*models.IMDbSync, error) {
+	unlock, err := s.begin(ctx, "GetIMDbLink")
 	defer unlock()
 	if err != nil {
 		return nil, err
@@ -403,8 +428,8 @@ func (s *Store) GetIMDbLink(_ context.Context, userID primitive.ObjectID) (*mode
 	return cloneUser(u).IMDbSync, nil
 }
 
-func (s *Store) UpdateIMDbSync(_ context.Context, userID primitive.ObjectID, sync models.IMDbSync) (bool, error) {
-	unlock, err := s.begin("UpdateIMDbSync")
+func (s *Store) UpdateIMDbSync(ctx context.Context, userID primitive.ObjectID, sync models.IMDbSync) (bool, error) {
+	unlock, err := s.begin(ctx, "UpdateIMDbSync")
 	defer unlock()
 	if err != nil {
 		return false, err
@@ -418,8 +443,8 @@ func (s *Store) UpdateIMDbSync(_ context.Context, userID primitive.ObjectID, syn
 	return true, nil
 }
 
-func (s *Store) UnlinkIMDb(_ context.Context, userID primitive.ObjectID) error {
-	unlock, err := s.begin("UnlinkIMDb")
+func (s *Store) UnlinkIMDb(ctx context.Context, userID primitive.ObjectID) error {
+	unlock, err := s.begin(ctx, "UnlinkIMDb")
 	defer unlock()
 	if err != nil {
 		return err
@@ -431,8 +456,8 @@ func (s *Store) UnlinkIMDb(_ context.Context, userID primitive.ObjectID) error {
 	return nil
 }
 
-func (s *Store) ListIMDbLinkedUsers(_ context.Context, attemptedBefore time.Time) ([]*models.User, error) {
-	unlock, err := s.begin("ListIMDbLinkedUsers")
+func (s *Store) ListIMDbLinkedUsers(ctx context.Context, attemptedBefore time.Time) ([]*models.User, error) {
+	unlock, err := s.begin(ctx, "ListIMDbLinkedUsers")
 	defer unlock()
 	if err != nil {
 		return nil, err
@@ -464,8 +489,8 @@ func (s *Store) ListIMDbLinkedUsers(_ context.Context, attemptedBefore time.Time
 
 // --- watchlist ---
 
-func (s *Store) CreateWatchlistItem(_ context.Context, item *models.WatchlistItem) error {
-	unlock, err := s.begin("CreateWatchlistItem")
+func (s *Store) CreateWatchlistItem(ctx context.Context, item *models.WatchlistItem) error {
+	unlock, err := s.begin(ctx, "CreateWatchlistItem")
 	defer unlock()
 	if err != nil {
 		return err
@@ -485,8 +510,8 @@ func (s *Store) CreateWatchlistItem(_ context.Context, item *models.WatchlistIte
 
 // CreateWatchlistItems inserts the items that are not duplicates and returns
 // them, stamped a millisecond apart like the real insert.
-func (s *Store) CreateWatchlistItems(_ context.Context, items []*models.WatchlistItem) ([]*models.WatchlistItem, error) {
-	unlock, err := s.begin("CreateWatchlistItems")
+func (s *Store) CreateWatchlistItems(ctx context.Context, items []*models.WatchlistItem) ([]*models.WatchlistItem, error) {
+	unlock, err := s.begin(ctx, "CreateWatchlistItems")
 	defer unlock()
 	if err != nil {
 		return nil, err
@@ -520,8 +545,8 @@ func (s *Store) findItem(userID, itemID primitive.ObjectID) *models.WatchlistIte
 	return nil
 }
 
-func (s *Store) SetWatchlistItemIMDbID(_ context.Context, userID, itemID primitive.ObjectID, imdbID string) (bool, error) {
-	unlock, err := s.begin("SetWatchlistItemIMDbID")
+func (s *Store) SetWatchlistItemIMDbID(ctx context.Context, userID, itemID primitive.ObjectID, imdbID string) (bool, error) {
+	unlock, err := s.begin(ctx, "SetWatchlistItemIMDbID")
 	defer unlock()
 	if err != nil {
 		return false, err
@@ -542,8 +567,8 @@ func (s *Store) SetWatchlistItemIMDbID(_ context.Context, userID, itemID primiti
 
 // MarkWatchlistItemIMDbMissing applies the same conditions as the real
 // filter: sync-added, still planned, untagged and not marked yet.
-func (s *Store) MarkWatchlistItemIMDbMissing(_ context.Context, userID, itemID primitive.ObjectID, since time.Time) (bool, error) {
-	unlock, err := s.begin("MarkWatchlistItemIMDbMissing")
+func (s *Store) MarkWatchlistItemIMDbMissing(ctx context.Context, userID, itemID primitive.ObjectID, since time.Time) (bool, error) {
+	unlock, err := s.begin(ctx, "MarkWatchlistItemIMDbMissing")
 	defer unlock()
 	if err != nil {
 		return false, err
@@ -558,8 +583,8 @@ func (s *Store) MarkWatchlistItemIMDbMissing(_ context.Context, userID, itemID p
 	return true, nil
 }
 
-func (s *Store) ClearWatchlistItemIMDbMissing(_ context.Context, userID, itemID primitive.ObjectID) (bool, error) {
-	unlock, err := s.begin("ClearWatchlistItemIMDbMissing")
+func (s *Store) ClearWatchlistItemIMDbMissing(ctx context.Context, userID, itemID primitive.ObjectID) (bool, error) {
+	unlock, err := s.begin(ctx, "ClearWatchlistItemIMDbMissing")
 	defer unlock()
 	if err != nil {
 		return false, err
@@ -573,8 +598,8 @@ func (s *Store) ClearWatchlistItemIMDbMissing(_ context.Context, userID, itemID 
 	return true, nil
 }
 
-func (s *Store) ClearIMDbMissingMarks(_ context.Context, userID primitive.ObjectID) (int, error) {
-	unlock, err := s.begin("ClearIMDbMissingMarks")
+func (s *Store) ClearIMDbMissingMarks(ctx context.Context, userID primitive.ObjectID) (int, error) {
+	unlock, err := s.begin(ctx, "ClearIMDbMissingMarks")
 	defer unlock()
 	if err != nil {
 		return 0, err
@@ -593,8 +618,8 @@ func (s *Store) ClearIMDbMissingMarks(_ context.Context, userID primitive.Object
 // DeleteSyncedWatchlistItem applies the same conditions as the real delete
 // filter: sync-added, still planned, untagged, marked missing at exactly
 // missingSince, and not edited since updatedAt.
-func (s *Store) DeleteSyncedWatchlistItem(_ context.Context, userID, itemID primitive.ObjectID, missingSince, updatedAt time.Time) (bool, error) {
-	unlock, err := s.begin("DeleteSyncedWatchlistItem")
+func (s *Store) DeleteSyncedWatchlistItem(ctx context.Context, userID, itemID primitive.ObjectID, missingSince, updatedAt time.Time) (bool, error) {
+	unlock, err := s.begin(ctx, "DeleteSyncedWatchlistItem")
 	defer unlock()
 	if err != nil {
 		return false, err
@@ -618,8 +643,8 @@ func (s *Store) DeleteSyncedWatchlistItem(_ context.Context, userID, itemID prim
 // ListWatchlistItems returns the user's items, newest first. Like the real
 // query it honours status, type, limit and offset; search is not needed by
 // any caller and is rejected.
-func (s *Store) ListWatchlistItems(_ context.Context, opts models.ListWatchlistOptions) ([]*models.WatchlistItem, error) {
-	unlock, err := s.begin("ListWatchlistItems")
+func (s *Store) ListWatchlistItems(ctx context.Context, opts models.ListWatchlistOptions) ([]*models.WatchlistItem, error) {
+	unlock, err := s.begin(ctx, "ListWatchlistItems")
 	defer unlock()
 	if err != nil {
 		return nil, err
@@ -650,8 +675,8 @@ func (s *Store) ListWatchlistItems(_ context.Context, opts models.ListWatchlistO
 	return out, nil
 }
 
-func (s *Store) DistinctWatchlistTitles(context.Context) ([]models.TitleRef, error) {
-	unlock, err := s.begin("DistinctWatchlistTitles")
+func (s *Store) DistinctWatchlistTitles(ctx context.Context) ([]models.TitleRef, error) {
+	unlock, err := s.begin(ctx, "DistinctWatchlistTitles")
 	defer unlock()
 	if err != nil {
 		return nil, err
@@ -670,8 +695,8 @@ func (s *Store) DistinctWatchlistTitles(context.Context) ([]models.TitleRef, err
 	return refs, nil
 }
 
-func (s *Store) GetTitles(_ context.Context, keys []string, regions []string) (map[string]*models.Title, error) {
-	unlock, err := s.begin("GetTitles")
+func (s *Store) GetTitles(ctx context.Context, keys []string, regions []string) (map[string]*models.Title, error) {
+	unlock, err := s.begin(ctx, "GetTitles")
 	defer unlock()
 	if err != nil {
 		return nil, err
@@ -688,8 +713,8 @@ func (s *Store) GetTitles(_ context.Context, keys []string, regions []string) (m
 	return out, nil
 }
 
-func (s *Store) GetTitlesByIMDbIDs(_ context.Context, imdbIDs []string) (map[string]*models.Title, error) {
-	unlock, err := s.begin("GetTitlesByIMDbIDs")
+func (s *Store) GetTitlesByIMDbIDs(ctx context.Context, imdbIDs []string) (map[string]*models.Title, error) {
+	unlock, err := s.begin(ctx, "GetTitlesByIMDbIDs")
 	defer unlock()
 	if err != nil {
 		return nil, err
@@ -712,8 +737,8 @@ func (s *Store) GetTitlesByIMDbIDs(_ context.Context, imdbIDs []string) (map[str
 	return out, nil
 }
 
-func (s *Store) SaveTitleSnapshot(_ context.Context, ref models.TitleRef, region string, prevVersion *time.Time, snap models.RegionSnapshot, meta *models.TitleMetadata) (bool, error) {
-	unlock, err := s.begin("SaveTitleSnapshot")
+func (s *Store) SaveTitleSnapshot(ctx context.Context, ref models.TitleRef, region string, prevVersion *time.Time, snap models.RegionSnapshot, meta *models.TitleMetadata) (bool, error) {
+	unlock, err := s.begin(ctx, "SaveTitleSnapshot")
 	defer unlock()
 	if err != nil {
 		return false, err
@@ -750,8 +775,8 @@ func (s *Store) SaveTitleSnapshot(_ context.Context, ref models.TitleRef, region
 	return true, nil
 }
 
-func (s *Store) MarkTitleNotFound(_ context.Context, ref models.TitleRef, at time.Time) error {
-	unlock, err := s.begin("MarkTitleNotFound")
+func (s *Store) MarkTitleNotFound(ctx context.Context, ref models.TitleRef, at time.Time) error {
+	unlock, err := s.begin(ctx, "MarkTitleNotFound")
 	defer unlock()
 	if err != nil {
 		return err
@@ -766,8 +791,8 @@ func (s *Store) MarkTitleNotFound(_ context.Context, ref models.TitleRef, at tim
 	return nil
 }
 
-func (s *Store) InsertAvailabilityEvents(_ context.Context, events []models.AvailabilityEvent) (int, error) {
-	unlock, err := s.begin("InsertAvailabilityEvents")
+func (s *Store) InsertAvailabilityEvents(ctx context.Context, events []models.AvailabilityEvent) (int, error) {
+	unlock, err := s.begin(ctx, "InsertAvailabilityEvents")
 	defer unlock()
 	if err != nil {
 		return 0, err
@@ -785,8 +810,8 @@ func (s *Store) InsertAvailabilityEvents(_ context.Context, events []models.Avai
 	return inserted, nil
 }
 
-func (s *Store) ListAvailabilityEvents(_ context.Context, titleKeys []string, region string, since time.Time) ([]models.AvailabilityEvent, error) {
-	unlock, err := s.begin("ListAvailabilityEvents")
+func (s *Store) ListAvailabilityEvents(ctx context.Context, titleKeys []string, region string, since time.Time) ([]models.AvailabilityEvent, error) {
+	unlock, err := s.begin(ctx, "ListAvailabilityEvents")
 	defer unlock()
 	if err != nil {
 		return nil, err
@@ -801,8 +826,8 @@ func (s *Store) ListAvailabilityEvents(_ context.Context, titleKeys []string, re
 	return out, nil
 }
 
-func (s *Store) InsertDigestDeliveries(_ context.Context, deliveries []models.DigestDelivery) (int, error) {
-	unlock, err := s.begin("InsertDigestDeliveries")
+func (s *Store) InsertDigestDeliveries(ctx context.Context, deliveries []models.DigestDelivery) (int, error) {
+	unlock, err := s.begin(ctx, "InsertDigestDeliveries")
 	defer unlock()
 	if err != nil {
 		return 0, err
@@ -821,8 +846,8 @@ func (s *Store) InsertDigestDeliveries(_ context.Context, deliveries []models.Di
 	return inserted, nil
 }
 
-func (s *Store) ListDeliveredEventIDs(_ context.Context, userID primitive.ObjectID, eventIDs []string) (map[string]bool, error) {
-	unlock, err := s.begin("ListDeliveredEventIDs")
+func (s *Store) ListDeliveredEventIDs(ctx context.Context, userID primitive.ObjectID, eventIDs []string) (map[string]bool, error) {
+	unlock, err := s.begin(ctx, "ListDeliveredEventIDs")
 	defer unlock()
 	if err != nil {
 		return nil, err
@@ -836,8 +861,8 @@ func (s *Store) ListDeliveredEventIDs(_ context.Context, userID primitive.Object
 	return delivered, nil
 }
 
-func (s *Store) DeleteDigestDeliveries(_ context.Context, userID primitive.ObjectID, eventIDs []string) (int, error) {
-	unlock, err := s.begin("DeleteDigestDeliveries")
+func (s *Store) DeleteDigestDeliveries(ctx context.Context, userID primitive.ObjectID, eventIDs []string) (int, error) {
+	unlock, err := s.begin(ctx, "DeleteDigestDeliveries")
 	defer unlock()
 	if err != nil {
 		return 0, err

@@ -156,6 +156,61 @@ func TestImportDeadlineLeavesAConsistentPartialResult(t *testing.T) {
 	}
 }
 
+// The import's deadline covers the database too. A database that stops
+// answering while the rows are being written ends like a TMDb that is too
+// slow: the request answers in time, no row is reported imported that was
+// not, and uploading again finishes the job.
+func TestImportDatabaseStallDuringTheWritesLeavesAConsistentPartialResult(t *testing.T) {
+	h := newSyncHarness(t)
+	h.have(ttID(100))
+	ids := append([]string{ttID(100)}, ttIDs(3000, 5)...)
+	h.store.Stall["CreateWatchlistItems"] = true
+	h.server.reconcileDeadline = 400 * time.Millisecond
+
+	body := h.json(h.upload(csvOf(ids...)), http.StatusOK)
+
+	if body["imported"] != 0.0 || body["duplicates"] != 1.0 {
+		t.Errorf("response = %v; want nothing imported and the one duplicate", body)
+	}
+	errs := rowErrors(body)
+	if len(errs) != 5 {
+		t.Fatalf("errors = %v, want one for each of the five rows not written", errs)
+	}
+	for _, e := range errs {
+		if !strings.Contains(e, "upload the file again") {
+			t.Errorf("error %q does not tell the user to upload again", e)
+		}
+	}
+	if got := len(h.items()); got != 1 {
+		t.Errorf("%d rows stored although none was reported imported", got-1)
+	}
+
+	// With the database back, uploading the same file again brings them in.
+	delete(h.store.Stall, "CreateWatchlistItems")
+	h.server.reconcileDeadline = 0
+	again := h.json(h.upload(csvOf(ids...)), http.StatusOK)
+	if again["imported"] != 5.0 || again["duplicates"] != 1.0 || len(rowErrors(again)) != 0 {
+		t.Errorf("second upload = %v, want five imported and one duplicate", again)
+	}
+}
+
+// If the database does not even answer the first read, the import fails as
+// a whole and says so.
+func TestImportDatabaseStallBeforeAnythingIsReadImportsNothing(t *testing.T) {
+	h := newSyncHarness(t)
+	h.store.Stall["ListWatchlistItems"] = true
+	h.server.reconcileDeadline = 400 * time.Millisecond
+
+	rec := h.upload(csvOf(ttIDs(3000, 3)...))
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, body = %s; want 500", rec.Code, rec.Body)
+	}
+	if got := len(h.items()); got != 0 {
+		t.Errorf("%d rows stored by an import that failed", got)
+	}
+}
+
 // The response keeps the shape the frontend reads: imported, duplicates and
 // errors[{row, reason}], with rows numbered from the header.
 func TestImportResponseShape(t *testing.T) {

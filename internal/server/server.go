@@ -41,6 +41,9 @@ type Server struct {
 	// resolveBudget overrides how long a link or an import may spend asking
 	// TMDb; tests shorten it.
 	resolveBudget time.Duration
+	// reconcileDeadline overrides how long a link or an import may take up
+	// to the end of its reconcile, database time included; tests shorten it.
+	reconcileDeadline time.Duration
 }
 
 const (

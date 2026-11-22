@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/csv"
 	"errors"
 	"fmt"
@@ -17,13 +18,29 @@ import (
 )
 
 const (
-	// importDeadline leaves room under the server's 30 s write timeout.
+	// The server cuts a response off 30 s after the request was read
+	// (WriteTimeout in server.go). An import has until importDeadline, 25 s
+	// from its start, and the reconcile (reading the watchlist, asking TMDb,
+	// writing the rows) must be over by importReconcileDeadline, 22 s, which
+	// leaves time to build the answer and write it.
+
+	// importDeadline is when the handler stops doing optional work
+	// (fetching availability for the new titles).
 	importDeadline = 25 * time.Second
+	// importReconcileDeadline is when the reconcile must be over, counted
+	// from the start of the request. It is a deadline on the reconcile's
+	// context, so it holds for time spent waiting on the database as much as
+	// for time spent waiting on TMDb. Rows that did not make it are
+	// reported; uploading the file again continues where it stopped.
+	importReconcileDeadline = 22 * time.Second
 	// importLookupBudget is how long an import may spend asking TMDb about
 	// titles nobody has listed before. Rows that do not fit are reported;
 	// uploading the file again continues where it stopped, because rows
 	// that made it are then duplicates and cost no lookup.
 	importLookupBudget = 16 * time.Second
+	// importWriteReserve is kept back from the TMDb lookups for the writes
+	// that follow them.
+	importWriteReserve = 4 * time.Second
 	// importEnsureBudget bounds fetching availability after the rows are
 	// in, however many there are.
 	importEnsureBudget = 6 * time.Second
@@ -95,11 +112,21 @@ func (s *Server) importWatchlistHandler(c *gin.Context) {
 	for i, row := range rows {
 		ids[i] = row.imdbID
 	}
+	// One deadline for the whole reconcile, database time included. Hitting
+	// it ends the same way as TMDb being too slow: the rows that were
+	// written are reported as imported, the others as "upload again".
+	deadline := importReconcileDeadline
+	if s.reconcileDeadline > 0 {
+		deadline = s.reconcileDeadline
+	}
+	ctx, cancel := context.WithDeadline(c.Request.Context(), start.Add(deadline))
+	defer cancel()
+
 	budget := s.resolveBudget
 	if budget <= 0 {
-		budget = importLookupBudget
+		budget = max(min(importLookupBudget, deadline-importWriteReserve-time.Since(start)), time.Second)
 	}
-	res, err := s.reconciler.Run(c.Request.Context(), imdbsync.Request{
+	res, err := s.reconciler.Run(ctx, imdbsync.Request{
 		UserID:       user.ID,
 		Mode:         imdbsync.ModeCSV, // adds only, with source "csv"
 		IDs:          ids,

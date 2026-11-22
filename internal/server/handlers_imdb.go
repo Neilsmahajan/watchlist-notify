@@ -19,13 +19,31 @@ import (
 // the server's 30 s write timeout; whatever does not fit is finished by the
 // worker's next daily sync.
 const (
-	// imdbLinkDeadline is the time the whole request aims to stay within.
+	// The server cuts a response off 30 s after the request was read
+	// (WriteTimeout in server.go), so everything a link request does has a
+	// place in that time:
+	//
+	//	 0 s .. 20 s  claim, fetch from IMDb, reconcile: reads, TMDb lookups
+	//	              and writes, all under one deadline (imdbLinkDeadline)
+	//	   .. 25 s  storing the link, on its own clock (imdbLinkStoreTimeout)
+	//	              so that it still happens when the deadline was hit
+	//	   .. 30 s  left for the answer
+	//
+	// Availability for the new titles is fetched only with what is left of
+	// the first 20 s.
+
+	// imdbLinkDeadline is when the claim, the fetch and the reconcile must
+	// be over, counted from the start of the request. It is a deadline on
+	// their context, so it holds for time spent waiting on the database as
+	// much as for time spent waiting on IMDb or TMDb.
 	imdbLinkDeadline = 20 * time.Second
 	// imdbLinkFetchBudget bounds reading the list from IMDb.
 	imdbLinkFetchBudget = 8 * time.Second
 	// imdbLinkWriteReserve is kept back from the TMDb lookups for the
 	// writes that follow them.
 	imdbLinkWriteReserve = 5 * time.Second
+	// imdbLinkStoreTimeout bounds storing the link after the reconcile.
+	imdbLinkStoreTimeout = 5 * time.Second
 	// imdbLinkEnsureBudget bounds fetching availability for the new titles.
 	imdbLinkEnsureBudget = 3 * time.Second
 	// imdbLinkMinGap is the least time between two link attempts by one
@@ -107,10 +125,21 @@ func (s *Server) linkIMDbHandler(c *gin.Context) {
 		return
 	}
 
+	// One deadline for everything up to the end of the reconcile, database
+	// time included. A database that stops answering then ends in the same
+	// way as a TMDb that is too slow: what was written stays, the rest is
+	// counted as not done yet, and the request still answers in time.
+	deadline := imdbLinkDeadline
+	if s.reconcileDeadline > 0 {
+		deadline = s.reconcileDeadline
+	}
+	ctx, cancel := context.WithDeadline(c.Request.Context(), start.Add(deadline))
+	defer cancel()
+
 	// Claiming the attempt is atomic, so two requests racing each other
 	// cannot both reach IMDb. It also makes this fetch the user's fetch of
 	// the day: the worker will not read the list again for 20 hours.
-	claimed, err := s.db.ClaimIMDbAttempt(c.Request.Context(), user.ID, start, imdbLinkMinGap)
+	claimed, err := s.db.ClaimIMDbAttempt(ctx, user.ID, start, imdbLinkMinGap)
 	if err != nil {
 		log.Printf("imdb link: claim failed: %v", err)
 		jsonError(c, http.StatusInternalServerError, "failed to link IMDb list")
@@ -122,7 +151,7 @@ func (s *Server) linkIMDbHandler(c *gin.Context) {
 		return
 	}
 
-	fetchCtx, cancelFetch := context.WithTimeout(c.Request.Context(), imdbLinkFetchBudget)
+	fetchCtx, cancelFetch := context.WithTimeout(ctx, imdbLinkFetchBudget)
 	list, fetchErr := s.imdbLists.FetchList(fetchCtx, sourceID)
 	cancelFetch()
 	switch {
@@ -144,9 +173,9 @@ func (s *Server) linkIMDbHandler(c *gin.Context) {
 
 	lookupBudget := s.resolveBudget
 	if lookupBudget <= 0 {
-		lookupBudget = max(imdbLinkDeadline-imdbLinkWriteReserve-time.Since(start), time.Second)
+		lookupBudget = max(deadline-imdbLinkWriteReserve-time.Since(start), time.Second)
 	}
-	out := s.reconciler.SyncList(c.Request.Context(), imdbsync.SyncRequest{
+	out := s.reconciler.SyncList(ctx, imdbsync.SyncRequest{
 		UserID:       user.ID,
 		Previous:     user.IMDbSync,
 		SourceID:     sourceID,
@@ -167,9 +196,11 @@ func (s *Server) linkIMDbHandler(c *gin.Context) {
 		}
 	}
 
-	// The titles are in. Store the link even if the client has gone away,
-	// or they would sit there with nothing keeping them in step.
-	linkCtx, cancelLink := context.WithTimeout(context.WithoutCancel(c.Request.Context()), 5*time.Second)
+	// The titles are in. Store the link even if the client has gone away or
+	// the deadline was hit, or they would sit there with nothing keeping
+	// them in step: a reconcile that ran out of time is stored as "partial"
+	// and the daily sync finishes it.
+	linkCtx, cancelLink := context.WithTimeout(context.WithoutCancel(c.Request.Context()), imdbLinkStoreTimeout)
 	err = s.db.LinkIMDb(linkCtx, user.ID, out.State)
 	cancelLink()
 	if err != nil {
@@ -179,7 +210,7 @@ func (s *Server) linkIMDbHandler(c *gin.Context) {
 	}
 
 	// Availability for the new titles, once, with what is left of the time.
-	s.ensureTitles(c.Request.Context(), user, out.Result.AddedTitles, min(imdbLinkEnsureBudget, imdbLinkDeadline-time.Since(start)))
+	s.ensureTitles(ctx, user, out.Result.AddedTitles, min(imdbLinkEnsureBudget, deadline-time.Since(start)))
 
 	c.JSON(http.StatusOK, IMDbLinkResponse{
 		IMDbSync: out.State,
