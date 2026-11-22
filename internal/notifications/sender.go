@@ -71,13 +71,34 @@ func New(fromEmail, messageStream string) (*Sender, error) {
 
 // RejectedError means Postmark answered and refused the message, so nothing
 // was sent.
+//
+// It carries the HTTP status and Postmark's numeric ErrorCode and nothing
+// else from the response. Postmark's error messages quote the addresses
+// involved ("... inactive recipient: someone@example.com"), and this error
+// ends up in logs, so the response text is never kept.
 type RejectedError struct {
 	StatusCode int
-	Body       string
+	// ErrorCode is Postmark's API error code (for example 300 for an invalid
+	// email request, 406 for an inactive recipient), or 0 when the response
+	// did not carry one.
+	ErrorCode int
 }
 
 func (e *RejectedError) Error() string {
-	return fmt.Sprintf("postmark rejected the email: status %d: %s", e.StatusCode, e.Body)
+	return fmt.Sprintf("postmark rejected the email: status %d, error code %d", e.StatusCode, e.ErrorCode)
+}
+
+// postmarkErrorCode reads the ErrorCode out of a Postmark error response and
+// discards the rest. Anything that is not the expected JSON yields 0.
+func postmarkErrorCode(body io.Reader) int {
+	var parsed struct {
+		ErrorCode int `json:"ErrorCode"`
+	}
+	// Error responses are a short JSON object; cap what is read.
+	if err := json.NewDecoder(io.LimitReader(body, 4096)).Decode(&parsed); err != nil {
+		return 0
+	}
+	return parsed.ErrorCode
 }
 
 // IsDefiniteFailure reports whether err from SendEmail proves that no email
@@ -102,7 +123,8 @@ func IsDefiniteFailure(err error) bool {
 }
 
 // SendEmail sends one HTML email through Postmark. A non-200 answer is
-// returned as a *RejectedError.
+// returned as a *RejectedError. No error it returns contains the recipient's
+// address or any of Postmark's response text.
 func (s *Sender) SendEmail(toEmail, subject, htmlBody string) error {
 	body := EmailBody{
 		From:          s.fromEmail,
@@ -131,9 +153,7 @@ func (s *Sender) SendEmail(toEmail, subject, htmlBody string) error {
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
-		// Postmark error bodies are a short JSON object; cap what is kept.
-		bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
-		return &RejectedError{StatusCode: resp.StatusCode, Body: strings.TrimSpace(string(bodyBytes))}
+		return &RejectedError{StatusCode: resp.StatusCode, ErrorCode: postmarkErrorCode(resp.Body)}
 	}
 	return nil
 }

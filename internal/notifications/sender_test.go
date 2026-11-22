@@ -47,19 +47,54 @@ func TestSendEmail(t *testing.T) {
 
 func TestSendEmailRejected(t *testing.T) {
 	sender := newTestSender(t, func(w http.ResponseWriter, _ *http.Request) {
-		http.Error(w, `{"ErrorCode":406,"Message":"inactive recipient"}`, http.StatusUnprocessableEntity)
+		http.Error(w, `{"ErrorCode":406,"Message":"You tried to send to an inactive recipient: to@example.com"}`, http.StatusUnprocessableEntity)
 	})
 
 	err := sender.SendEmail("to@example.com", "Hello", "<p>Hi</p>")
 	var rejected *RejectedError
-	if !errors.As(err, &rejected) || rejected.StatusCode != http.StatusUnprocessableEntity {
-		t.Fatalf("SendEmail() error = %v, want a 422 RejectedError", err)
-	}
-	if !strings.Contains(rejected.Body, "inactive recipient") {
-		t.Errorf("RejectedError.Body = %q", rejected.Body)
+	if !errors.As(err, &rejected) || rejected.StatusCode != http.StatusUnprocessableEntity || rejected.ErrorCode != 406 {
+		t.Fatalf("SendEmail() error = %#v, want a 422 RejectedError with Postmark's code 406", err)
 	}
 	if !IsDefiniteFailure(err) {
 		t.Error("a 422 from Postmark was not classified as a definite failure")
+	}
+	if got, want := err.Error(), "postmark rejected the email: status 422, error code 406"; got != want {
+		t.Errorf("Error() = %q, want %q", got, want)
+	}
+}
+
+// Postmark's error messages quote the recipient. The error is logged, so it
+// may carry the status and the numeric code and nothing else from the body.
+func TestSendEmailErrorsNeverCarryTheResponseBody(t *testing.T) {
+	bodies := map[string]string{
+		"postmark error":   `{"ErrorCode":406,"Message":"inactive recipient: to@example.com"}`,
+		"address as a key": `{"to@example.com":"bounced","ErrorCode":300}`,
+		"not json":         `<html>Bad gateway while delivering to to@example.com</html>`,
+		"truncated json":   `{"Message":"to@example.com","ErrorCode":`,
+		"empty":            ``,
+	}
+	for name, body := range bodies {
+		for _, status := range []int{http.StatusUnprocessableEntity, http.StatusInternalServerError} {
+			t.Run(fmt.Sprintf("%s/%d", name, status), func(t *testing.T) {
+				sender := newTestSender(t, func(w http.ResponseWriter, _ *http.Request) {
+					http.Error(w, body, status)
+				})
+
+				err := sender.SendEmail("to@example.com", "Hello", "<p>Hi</p>")
+
+				var rejected *RejectedError
+				if !errors.As(err, &rejected) || rejected.StatusCode != status {
+					t.Fatalf("SendEmail() error = %#v, want a RejectedError with status %d", err, status)
+				}
+				for _, text := range []string{err.Error(), fmt.Sprintf("%v %+v %#v", err, err, err)} {
+					for _, secret := range []string{"to@example.com", "@", "recipient", "bounced", "html"} {
+						if strings.Contains(text, secret) {
+							t.Errorf("the error carries %q from the response: %s", secret, text)
+						}
+					}
+				}
+			})
+		}
 	}
 }
 

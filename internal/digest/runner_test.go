@@ -341,7 +341,7 @@ func TestRunDoesNotEmailAUserWhoJustOptedOut(t *testing.T) {
 
 func TestRunReleasesTheClaimWhenTheSendDefinitelyFailed(t *testing.T) {
 	w := newWorld(t)
-	w.mailer.err = &notifications.RejectedError{StatusCode: 422, Body: `{"ErrorCode":300}`}
+	w.mailer.err = &notifications.RejectedError{StatusCode: 422, ErrorCode: 300}
 
 	sum := w.run(w.runner(ModeSend, w.user.Email))
 
