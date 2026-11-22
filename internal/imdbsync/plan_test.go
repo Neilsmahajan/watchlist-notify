@@ -437,16 +437,19 @@ func TestBuildPlan(t *testing.T) {
 	}
 }
 
-// Every removal carries the mark it was decided on, which the store's delete
-// then insists on: an item unmarked or re-marked in between is not deleted.
-func TestBuildPlanRemovalsCarryTheirMark(t *testing.T) {
+// Every removal carries the mark it was decided on and the updated_at the
+// plan saw, which the store's delete then insists on: an item unmarked,
+// re-marked or edited in between is not deleted.
+func TestBuildPlanRemovalsCarryWhatThePlanSaw(t *testing.T) {
 	gone := synced("b", ttB, 2, missingFor(3*day))
+	gone.UpdatedAt = planNow.Add(-40 * day)
 	plan := BuildPlan(Input{
 		Mode: ModeSync, Now: planNow, IDs: []string{ttA}, Complete: true,
 		Existing: []*models.WatchlistItem{synced("a", ttA, 1), gone},
 	})
-	if len(plan.Remove) != 1 || !plan.Remove[0].MissingSince.Equal(planNow.Add(-3*day)) || plan.Remove[0].ItemID != gone.ID {
-		t.Errorf("removals = %+v", plan.Remove)
+	want := []Removal{{ItemID: gone.ID, MissingSince: planNow.Add(-3 * day), UpdatedAt: planNow.Add(-40 * day)}}
+	if !reflect.DeepEqual(plan.Remove, want) {
+		t.Errorf("removals = %+v, want %+v", plan.Remove, want)
 	}
 }
 

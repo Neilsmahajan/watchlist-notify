@@ -15,6 +15,10 @@ import (
 // the filter itself, so it is checked by MongoDB at the moment of the write
 // and not only by the code that planned it. A user editing an item while the
 // sync runs therefore always wins. Every filter is scoped by user_id.
+//
+// None of these writes touches updated_at. That field belongs to the user's
+// own writes (creating and editing an item), which is what lets the delete
+// use it to notice an edit: see DeleteSyncedWatchlistItem.
 
 // noTags matches items without tags, however that is stored.
 var noTags = bson.A{
@@ -84,11 +88,18 @@ func (s *service) ClearWatchlistItemIMDbMissing(ctx context.Context, userID, ite
 
 // DeleteSyncedWatchlistItem deletes an item on behalf of the IMDb sync, and
 // only if, at the moment of the delete, the item still is what the sync is
-// allowed to remove: added by the sync, status still "planned", no tags, and
-// still carrying the missing mark the caller read. It reports whether the
-// item was deleted; false means the user (or another run) changed it first
-// and it stays.
-func (s *service) DeleteSyncedWatchlistItem(ctx context.Context, userID, itemID primitive.ObjectID, missingSince time.Time) (bool, error) {
+// allowed to remove: added by the sync, status still "planned", no tags,
+// still carrying the missing mark the caller read, and not edited since the
+// caller read it. It reports whether the item was deleted; false means the
+// user (or another run) changed it first and it stays.
+//
+// updatedAt is the item's updated_at as the caller read it. Every edit a
+// user makes sets updated_at, whichever field it changes, so requiring the
+// same value means any edit made after the plan was drawn up wins, not only
+// one to status or tags. (The field has millisecond resolution. An edit in
+// the very millisecond of the write the caller read would go unnoticed by
+// this one condition; status and tags are still checked for themselves.)
+func (s *service) DeleteSyncedWatchlistItem(ctx context.Context, userID, itemID primitive.ObjectID, missingSince, updatedAt time.Time) (bool, error) {
 	coll := s.db.Database(databaseName).Collection(collWatchlist)
 	res, err := coll.DeleteOne(ctx, bson.M{
 		"_id":                itemID,
@@ -96,6 +107,7 @@ func (s *service) DeleteSyncedWatchlistItem(ctx context.Context, userID, itemID 
 		"source":             models.SourceIMDb,
 		"status":             models.WatchlistStatusPlanned,
 		"imdb_missing_since": missingSince,
+		"updated_at":         updatedAt,
 		"$or":                noTags,
 	})
 	if err != nil {

@@ -735,7 +735,22 @@ func TestIMDbSyncItemWrites(t *testing.T) {
 		}
 	}
 
+	// seen is an item's updated_at as a plan reading it now would see it.
+	seen := func(itemID primitive.ObjectID) time.Time {
+		t.Helper()
+		return mustFindItem(t, srv, user, itemID).UpdatedAt
+	}
+	// The sync's own writes must not move updated_at: the delete relies on
+	// that field changing only when the user edits the item.
+	untouched := func(what string, itemID primitive.ObjectID, before time.Time) {
+		t.Helper()
+		if got := seen(itemID); !got.Equal(before) {
+			t.Errorf("%s moved updated_at from %v to %v", what, before, got)
+		}
+	}
+
 	// Filling in an IMDb ID.
+	manualSeen := seen(manual.ID)
 	ok, err := srv.SetWatchlistItemIMDbID(ctx, stranger, manual.ID, "tt9003001")
 	check("set IMDb ID on someone else's item", ok, err, false)
 	ok, err = srv.SetWatchlistItemIMDbID(ctx, user, manual.ID, "tt9003001")
@@ -747,6 +762,7 @@ func TestIMDbSyncItemWrites(t *testing.T) {
 	if got := mustFindItem(t, srv, user, manual.ID); got.IMDbID != "tt9003001" || got.Source != "" {
 		t.Errorf("manual item = %+v; want the IMDb ID filled in and the source untouched", got)
 	}
+	untouched("filling in an IMDb ID", manual.ID, manualSeen)
 	if got := mustFindItem(t, srv, user, manualToo.ID); got.IMDbID != "" {
 		t.Errorf("refused IMDb ID was written anyway: %+v", got)
 	}
@@ -768,37 +784,53 @@ func TestIMDbSyncItemWrites(t *testing.T) {
 		t.Fatalf("a refused mark was written: %+v", got)
 	}
 	edit(synced.ID, map[string]any{"tags": []string{}})
+	syncedSeen := seen(synced.ID)
 	ok, err = srv.MarkWatchlistItemIMDbMissing(ctx, user, synced.ID, strike)
 	check("mark", ok, err, true)
+	untouched("the mark", synced.ID, syncedSeen)
 	ok, err = srv.MarkWatchlistItemIMDbMissing(ctx, user, synced.ID, strike.Add(time.Hour))
 	check("mark again", ok, err, false)
 	if got := mustFindItem(t, srv, user, synced.ID); got.IMDbMissingSince == nil || !got.IMDbMissingSince.Equal(strike) {
 		t.Fatalf("imdb_missing_since = %v, want the first strike %v", got.IMDbMissingSince, strike)
 	}
 
-	// The delete re-checks everything at the moment it runs.
-	ok, err = srv.DeleteSyncedWatchlistItem(ctx, user, manual.ID, strike)
+	// The delete re-checks everything at the moment it runs. Each call below
+	// passes the updated_at a fresh plan would carry, so that it is the
+	// condition under test that refuses, except where the point is a plan
+	// that has gone stale.
+	ok, err = srv.DeleteSyncedWatchlistItem(ctx, user, manual.ID, strike, seen(manual.ID))
 	check("delete an item the sync did not add", ok, err, false)
-	ok, err = srv.DeleteSyncedWatchlistItem(ctx, stranger, synced.ID, strike)
+	ok, err = srv.DeleteSyncedWatchlistItem(ctx, stranger, synced.ID, strike, seen(synced.ID))
 	check("delete someone else's item", ok, err, false)
-	ok, err = srv.DeleteSyncedWatchlistItem(ctx, user, synced.ID, strike.Add(time.Hour))
+	ok, err = srv.DeleteSyncedWatchlistItem(ctx, user, synced.ID, strike.Add(time.Hour), seen(synced.ID))
 	check("delete with a stale mark", ok, err, false)
-	ok, err = srv.DeleteSyncedWatchlistItem(ctx, user, syncedToo.ID, strike)
+	ok, err = srv.DeleteSyncedWatchlistItem(ctx, user, syncedToo.ID, strike, seen(syncedToo.ID))
 	check("delete an item that is not marked", ok, err, false)
 
+	// An edit that leaves status and tags alone still wins against a delete
+	// planned before it. updated_at has millisecond resolution, hence the pause.
+	plannedAt := seen(synced.ID)
+	time.Sleep(5 * time.Millisecond)
+	edit(synced.ID, map[string]any{"title": "Synced, renamed"})
+	ok, err = srv.DeleteSyncedWatchlistItem(ctx, user, synced.ID, strike, plannedAt)
+	check("delete planned before the user renamed the item", ok, err, false)
+	if got := mustFindItem(t, srv, user, synced.ID); got == nil || got.Title != "Synced, renamed" || got.IMDbMissingSince == nil {
+		t.Fatalf("item after the refused delete = %+v; want it kept, renamed and still marked", got)
+	}
+
 	edit(synced.ID, map[string]any{"status": models.WatchlistStatusWatching})
-	ok, err = srv.DeleteSyncedWatchlistItem(ctx, user, synced.ID, strike)
+	ok, err = srv.DeleteSyncedWatchlistItem(ctx, user, synced.ID, strike, seen(synced.ID))
 	check("delete after the user changed the status", ok, err, false)
 
 	edit(synced.ID, map[string]any{"status": models.WatchlistStatusPlanned, "tags": []string{"keep"}})
-	ok, err = srv.DeleteSyncedWatchlistItem(ctx, user, synced.ID, strike)
+	ok, err = srv.DeleteSyncedWatchlistItem(ctx, user, synced.ID, strike, seen(synced.ID))
 	check("delete after the user tagged it", ok, err, false)
 	if mustFindItem(t, srv, user, synced.ID) == nil {
 		t.Fatal("a refused delete removed the item")
 	}
 
 	edit(synced.ID, map[string]any{"tags": []string{}})
-	ok, err = srv.DeleteSyncedWatchlistItem(ctx, user, synced.ID, strike)
+	ok, err = srv.DeleteSyncedWatchlistItem(ctx, user, synced.ID, strike, seen(synced.ID))
 	check("delete an untouched, marked, sync-added item", ok, err, true)
 	if mustFindItem(t, srv, user, synced.ID) != nil {
 		t.Error("the item is still there after the delete")
@@ -807,13 +839,15 @@ func TestIMDbSyncItemWrites(t *testing.T) {
 	// Seeing the title again clears the mark, and with it the way to a delete.
 	ok, err = srv.ClearWatchlistItemIMDbMissing(ctx, user, syncedToo.ID)
 	check("clear an item that is not marked", ok, err, false)
+	tooSeen := seen(syncedToo.ID)
 	ok, err = srv.MarkWatchlistItemIMDbMissing(ctx, user, syncedToo.ID, strike)
 	check("mark the second item", ok, err, true)
 	ok, err = srv.ClearWatchlistItemIMDbMissing(ctx, stranger, syncedToo.ID)
 	check("clear someone else's item", ok, err, false)
 	ok, err = srv.ClearWatchlistItemIMDbMissing(ctx, user, syncedToo.ID)
 	check("clear", ok, err, true)
-	ok, err = srv.DeleteSyncedWatchlistItem(ctx, user, syncedToo.ID, strike)
+	untouched("marking and clearing", syncedToo.ID, tooSeen)
+	ok, err = srv.DeleteSyncedWatchlistItem(ctx, user, syncedToo.ID, strike, tooSeen)
 	check("delete after the mark was cleared", ok, err, false)
 	if got := mustFindItem(t, srv, user, syncedToo.ID); got == nil || got.IMDbMissingSince != nil {
 		t.Errorf("item after clear = %+v; want it present and unmarked", got)

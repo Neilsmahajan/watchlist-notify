@@ -121,10 +121,13 @@ type Fill struct {
 }
 
 // Removal deletes an item that has been missing from the list since
-// MissingSince. The delete is conditional on that mark still being there.
+// MissingSince. The delete is conditional on that mark still being there and
+// on the item not having been edited since the plan read it: UpdatedAt is
+// the item's updated_at at that moment.
 type Removal struct {
 	ItemID       primitive.ObjectID
 	MissingSince time.Time
+	UpdatedAt    time.Time
 }
 
 // PruneDecision says whether a plan considered marking and removing items,
@@ -274,7 +277,7 @@ func BuildPlan(in Input) Plan {
 		case !marked:
 			plan.MarkMissing = append(plan.MarkMissing, item.ID)
 		case in.Now.Sub(*item.IMDbMissingSince) >= MinMissingAge:
-			plan.Remove = append(plan.Remove, Removal{ItemID: item.ID, MissingSince: *item.IMDbMissingSince})
+			plan.Remove = append(plan.Remove, Removal{ItemID: item.ID, MissingSince: *item.IMDbMissingSince, UpdatedAt: item.UpdatedAt})
 		}
 	}
 	return plan

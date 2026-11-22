@@ -116,11 +116,11 @@ func (h *hookedStore) MarkWatchlistItemIMDbMissing(ctx context.Context, userID, 
 	return h.Store.MarkWatchlistItemIMDbMissing(ctx, userID, itemID, since)
 }
 
-func (h *hookedStore) DeleteSyncedWatchlistItem(ctx context.Context, userID, itemID primitive.ObjectID, missingSince time.Time) (bool, error) {
+func (h *hookedStore) DeleteSyncedWatchlistItem(ctx context.Context, userID, itemID primitive.ObjectID, missingSince, updatedAt time.Time) (bool, error) {
 	if h.beforeDelete != nil {
 		h.beforeDelete()
 	}
-	return h.Store.DeleteSyncedWatchlistItem(ctx, userID, itemID, missingSince)
+	return h.Store.DeleteSyncedWatchlistItem(ctx, userID, itemID, missingSince, updatedAt)
 }
 
 // world is a store, a TMDb and a clock for one user.
@@ -512,6 +512,70 @@ func TestSyncNeverRemovesWhatTheUserTouched(t *testing.T) {
 				t.Errorf("removed = %d, watchlist = %v; the user's edit must win", res.Removed, w.titles())
 			}
 		})
+	}
+}
+
+// An edit that leaves status and tags alone does not make the item the
+// user's for good, but it still wins against a delete that was planned
+// before it: the plan was drawn up for an item that has since changed.
+func TestSyncDoesNotRemoveAnItemEditedAfterThePlan(t *testing.T) {
+	edits := map[string]func(*models.WatchlistItem){
+		"renamed":      func(it *models.WatchlistItem) { it.Title = "Inception (rewatch with Sam)" },
+		"year changed": func(it *models.WatchlistItem) { it.Year = 2011 },
+	}
+	for name, edit := range edits {
+		t.Run(name, func(t *testing.T) {
+			w := newWorld(t)
+			standardTMDb(w.tmdb)
+			w.sync(matrix, inceptn)
+			w.now = w.now.Add(24 * time.Hour)
+			w.sync(matrix) // strike one
+			target := w.item(inceptn).ID
+			w.store.beforeDelete = func() { w.store.EditItem(target, edit) }
+
+			w.now = w.now.Add(24 * time.Hour)
+			res := w.sync(matrix)
+
+			if len(res.Plan.Remove) != 1 {
+				t.Fatalf("plan removes %d items, want the test to reach the delete", len(res.Plan.Remove))
+			}
+			if res.Removed != 0 || len(w.store.Items(w.user)) != 2 {
+				t.Fatalf("removed = %d, watchlist = %v; an edit made after the plan must win", res.Removed, w.titles())
+			}
+
+			// The item is still the sync's and still off the list, so a later
+			// run, planning from the item as it is now, removes it.
+			w.store.beforeDelete = nil
+			w.now = w.now.Add(24 * time.Hour)
+			if res := w.sync(matrix); res.Removed != 1 {
+				t.Errorf("the next day: removed = %d, want 1", res.Removed)
+			}
+		})
+	}
+}
+
+// The sync's own writes to an item (the mark, its clearing, a filled-in
+// IMDb ID) leave updated_at alone, so they never look like a user's edit to
+// the delete that follows.
+func TestSyncWritesDoNotLookLikeUserEdits(t *testing.T) {
+	w := newWorld(t)
+	standardTMDb(w.tmdb)
+	w.sync(matrix, inceptn)
+	before := w.item(inceptn).UpdatedAt
+
+	w.now = w.now.Add(24 * time.Hour)
+	w.sync(matrix) // mark
+	w.now = w.now.Add(24 * time.Hour)
+	w.sync(matrix, inceptn) // clear
+	w.now = w.now.Add(24 * time.Hour)
+	w.sync(matrix) // mark again
+
+	if got := w.item(inceptn).UpdatedAt; !got.Equal(before) {
+		t.Fatalf("updated_at moved from %v to %v through the sync's own writes", before, got)
+	}
+	w.now = w.now.Add(24 * time.Hour)
+	if res := w.sync(matrix); res.Removed != 1 {
+		t.Errorf("removed = %d, want the twice-missing item removed", res.Removed)
 	}
 }
 

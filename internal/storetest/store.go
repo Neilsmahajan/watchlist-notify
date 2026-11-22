@@ -134,13 +134,20 @@ func (s *Store) Items(userID primitive.ObjectID) []*models.WatchlistItem {
 }
 
 // EditItem changes a stored item in place, the way a user's edit arriving
-// from another request would. It reports whether the item exists.
+// from another request would: like the real update it moves updated_at on,
+// whatever the edit changes. It reports whether the item exists.
 func (s *Store) EditItem(id primitive.ObjectID, edit func(*models.WatchlistItem)) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, item := range s.items {
 		if item.ID == id {
+			previous := ms(item.UpdatedAt)
 			edit(item)
+			// Always later than before, also for two edits in one millisecond.
+			item.UpdatedAt = ms(time.Now())
+			if !item.UpdatedAt.After(previous) {
+				item.UpdatedAt = previous.Add(time.Millisecond)
+			}
 			return true
 		}
 	}
@@ -547,9 +554,9 @@ func (s *Store) ClearWatchlistItemIMDbMissing(_ context.Context, userID, itemID 
 }
 
 // DeleteSyncedWatchlistItem applies the same conditions as the real delete
-// filter: sync-added, still planned, untagged, and marked missing at exactly
-// missingSince.
-func (s *Store) DeleteSyncedWatchlistItem(_ context.Context, userID, itemID primitive.ObjectID, missingSince time.Time) (bool, error) {
+// filter: sync-added, still planned, untagged, marked missing at exactly
+// missingSince, and not edited since updatedAt.
+func (s *Store) DeleteSyncedWatchlistItem(_ context.Context, userID, itemID primitive.ObjectID, missingSince, updatedAt time.Time) (bool, error) {
 	unlock, err := s.begin("DeleteSyncedWatchlistItem")
 	defer unlock()
 	if err != nil {
@@ -560,7 +567,8 @@ func (s *Store) DeleteSyncedWatchlistItem(_ context.Context, userID, itemID prim
 			continue
 		}
 		if item.Source != models.SourceIMDb || item.Status != models.WatchlistStatusPlanned || len(item.Tags) > 0 ||
-			item.IMDbMissingSince == nil || !item.IMDbMissingSince.Equal(ms(missingSince)) {
+			item.IMDbMissingSince == nil || !item.IMDbMissingSince.Equal(ms(missingSince)) ||
+			!ms(item.UpdatedAt).Equal(ms(updatedAt)) {
 			return false, nil
 		}
 		s.items = append(s.items[:i], s.items[i+1:]...)

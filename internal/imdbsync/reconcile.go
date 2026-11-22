@@ -29,7 +29,7 @@ type Store interface {
 	SetWatchlistItemIMDbID(ctx context.Context, userID, itemID primitive.ObjectID, imdbID string) (bool, error)
 	MarkWatchlistItemIMDbMissing(ctx context.Context, userID, itemID primitive.ObjectID, since time.Time) (bool, error)
 	ClearWatchlistItemIMDbMissing(ctx context.Context, userID, itemID primitive.ObjectID) (bool, error)
-	DeleteSyncedWatchlistItem(ctx context.Context, userID, itemID primitive.ObjectID, missingSince time.Time) (bool, error)
+	DeleteSyncedWatchlistItem(ctx context.Context, userID, itemID primitive.ObjectID, missingSince, updatedAt time.Time) (bool, error)
 }
 
 // Finder is the part of the TMDb client that maps an IMDb ID to a title.
@@ -322,7 +322,7 @@ func (r *Reconciler) apply(ctx context.Context, userID primitive.ObjectID, plan 
 		}
 	}
 	for _, removal := range plan.Remove {
-		done, err := r.store.DeleteSyncedWatchlistItem(ctx, userID, removal.ItemID, removal.MissingSince)
+		done, err := r.store.DeleteSyncedWatchlistItem(ctx, userID, removal.ItemID, removal.MissingSince, removal.UpdatedAt)
 		if err != nil {
 			return fmt.Errorf("remove item: %w", err)
 		}
