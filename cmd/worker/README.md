@@ -125,8 +125,17 @@ or no list at all could be synced.
 Logs carry user IDs and counts, never email addresses or titles. Each user
 gets an `imdb: user synced` line and the run ends with an `imdb summary` line:
 `users` (linked and due), `synced`, `partial`, `failed`, `not_found`,
-`skipped` (claimed by another run, or not reached), `added`, `removed`,
-`marked_missing`, `unmatched`.
+`skipped` (claimed by another run, or not reached), `deferred`, `added`,
+`removed`, `marked_missing`, `unmatched`.
+
+**Time.** The job's three tasks share one Cloud Run task timeout (540 s as
+deployed), so the sync budgets itself: it stops starting new users after 4
+minutes and leaves the rest, counted as `deferred`, for the next run. They are
+not marked as fetched, and users are taken longest wait first, so nobody is
+left out twice in a row. One user gets at most 2 minutes; a daily sync of a
+few hundred titles takes seconds, because only titles nobody has listed before
+are asked of TMDb. If `deferred` is ever above zero day after day, raise the
+job's `--task-timeout` and the budget in `internal/worker/imdb.go` together.
 
 **Dry run.** `IMDB_SYNC_MODE=dry-run` fetches each due list and logs the same
 lines with what the sync would do, and writes nothing: no items, no

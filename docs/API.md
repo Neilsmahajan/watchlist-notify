@@ -81,6 +81,7 @@ http://localhost:8080
 | ------------- | ----------------------- | ------------------------------- |
 | System        | `/`                     | Health and status               |
 | Users         | `/api/me`               | User profile and preferences    |
+| IMDb sync     | `/api/me/imdb`          | Link a public IMDb list         |
 | Services      | `/api/me/services`      | Streaming service subscriptions |
 | Watchlist     | `/api/watchlist`        | Watchlist CRUD operations       |
 | Search        | `/api/search`           | Content discovery               |
@@ -290,10 +291,133 @@ Returns authenticated user's complete profile.
       "next_scheduled_at": "2025-01-22T10:00:00Z"
     }
   },
+  "imdb_sync": {
+    "source_id": "ur12345678",
+    "linked_at": "2026-03-01T09:00:00Z",
+    "last_attempt_at": "2026-03-15T06:00:04Z",
+    "last_synced_at": "2026-03-15T06:00:04Z",
+    "last_status": "ok",
+    "total": 242,
+    "added": 1,
+    "removed": 0,
+    "unmatched": 2
+  },
   "created_at": "2025-01-01T10:00:00Z",
   "updated_at": "2025-01-15T10:00:00Z"
 }
 ```
+
+`imdb_sync` is present only while the user has an IMDb list linked (see
+[Link an IMDb List](#link-an-imdb-list)):
+
+- `source_id` - the linked IMDb user ID (`ur…`, that user's Watchlist) or
+  list ID (`ls…`)
+- `last_attempt_at` - when the list was last fetched, successfully or not
+- `last_synced_at` - when the whole list was last read; absent until then
+- `last_status` - `ok`; `partial` (only part of the list was read or added so
+  far; the next daily sync continues); `failed` (IMDb could not be reached);
+  `not_found` (the list is gone or no longer public)
+- `last_error` - a short explanation, present unless the status is `ok`
+- `total` - titles on the IMDb list
+- `added`, `removed`, `unmatched` - counts from the last run. `unmatched` are
+  IMDb titles TMDb has no movie or show for (episodes, video games), which
+  cannot be tracked.
+
+#### Link an IMDb List
+
+```http
+PUT /api/me/imdb
+```
+
+Links the user's **public** IMDb Watchlist, or any public IMDb list, to their
+watchlist. The list's titles are added before the request answers (it may
+take up to about 20 seconds), and a daily job keeps the watchlist in step with
+the list from then on. Linking again replaces the link.
+
+**Request Body:**
+
+```json
+{ "source": "https://www.imdb.com/user/ur12345678/watchlist" }
+```
+
+`source` is an IMDb user ID (`ur12345678`), a list ID (`ls012345678`), or an
+`imdb.com` URL containing one.
+
+**Response:** `200 OK`
+
+```json
+{
+  "imdb_sync": {
+    "source_id": "ur12345678",
+    "linked_at": "2026-03-15T10:00:00Z",
+    "last_attempt_at": "2026-03-15T10:00:00Z",
+    "last_synced_at": "2026-03-15T10:00:00Z",
+    "last_status": "ok",
+    "total": 242,
+    "added": 230,
+    "removed": 0,
+    "unmatched": 2
+  },
+  "result": {
+    "total": 242,
+    "added": 230,
+    "existing": 10,
+    "unmatched": 2,
+    "complete": true
+  }
+}
+```
+
+- `result.added` - titles that became new watchlist items; `existing` - titles
+  the user already had, which are left exactly as they are
+- `result.complete` - `false` when the list was only partly read, or some
+  titles could not be looked up within the time the request has. What was
+  resolved is added, `imdb_sync.last_status` is `partial`, and the daily sync
+  finishes the job.
+
+**Errors** (`{"error": "..."}`; the 4xx messages are written to be shown to
+the user):
+
+| Status | When                                                                                    |
+| ------ | --------------------------------------------------------------------------------------- |
+| `400`  | `source` is not an IMDb user ID, list ID or IMDb URL; or the list has over 10,000 titles |
+| `404`  | IMDb has no such list, or it is not public. The message says to make it public          |
+| `429`  | A link was attempted less than 60 seconds ago. `Retry-After` gives the seconds to wait  |
+| `502`  | IMDb could not be reached                                                               |
+| `503`  | The server has no TMDb key, so IMDb titles cannot be resolved                           |
+
+A failed attempt leaves an existing link as it was.
+
+**What the sync does**
+
+- **Adds** each title on the list the user does not have yet, as a `planned`
+  item with `"source": "imdb"`. Metadata comes from TMDb.
+- **Removes** an item only when all of these hold: the sync added it
+  (`source` is `imdb`); the user has not changed its status from `planned` or
+  tagged it; and it was missing from two fetches of the **whole** list at
+  least 12 hours apart. The first such fetch only sets `imdb_missing_since` on
+  the item. Items added by hand or by CSV import are never removed, and a list
+  that is private, unreachable, partly read or empty removes nothing.
+- Linking never removes anything; only the daily sync does.
+
+**IMDb's terms.** IMDb does not license its data for public or commercial
+use. This feature is therefore strictly opt-in, reads only a list its owner
+made public and linked themselves, stores nothing from IMDb but title IDs
+(titles, posters and everything else come from TMDb), and fetches a linked
+list at most once a day, one list at a time. Linking is that day's fetch.
+There is deliberately no "sync now" endpoint.
+
+#### Unlink the IMDb List
+
+```http
+DELETE /api/me/imdb
+```
+
+Stops the sync. Nothing is removed from the watchlist: the items the sync
+added stay (still marked `"source": "imdb"`), and nothing removes them
+automatically afterwards. Succeeds when nothing is linked.
+
+**Response:** `204 No Content`
 
 #### Update User Preferences
 
@@ -506,6 +630,13 @@ however long it is, and no upstream calls.
 }
 ```
 
+- `source` - how the item got on the list: `"imdb"` (the IMDb sync), `"csv"`
+  (a CSV import), or absent for items added by hand or before this field
+  existed.
+- `imdb_missing_since` - present on an IMDb-synced item that was missing from
+  the last complete fetch of the linked list. If it is still missing at a
+  later sync, at least 12 hours on, and the user has not changed its status or
+  tagged it, the item is removed.
 - `availability.providers` - the user's active services streaming the title
   (`subscription`, `free` or `ads` access).
 - `availability.elsewhere` - every other offer: services the user does not
@@ -572,6 +703,10 @@ Content-Type: multipart/form-data
 **CSV Format:**
 Must include `Const` column with IMDb IDs (e.g., `tt0468569`)
 
+An import only adds. Rows the user already has, and rows repeating an earlier
+row, count as `duplicates`; new titles become `planned` items with
+`"source": "csv"`. A file brings in at most 10,000 titles.
+
 **Response:**
 
 ```json
@@ -586,6 +721,15 @@ Must include `Const` column with IMDb IDs (e.g., `tt0468569`)
   ]
 }
 ```
+
+- `errors` is always an array, in file order; `row` counts the header as
+  row 1.
+- When TMDb is slow, the rows that could not be looked up in time are reported
+  in `errors` (one entry per row up to 20, otherwise a single entry giving the
+  number left). Rows that made it are stored; uploading the same file again
+  continues where it stopped, at no cost for the rows already in.
+- `400` with `"no rows imported"` when the file has rows and none could be
+  imported.
 
 ---
 
@@ -903,6 +1047,11 @@ await api.patch("/api/me/preferences", {
   `service` and `available` filters, more sort keys, `meta.total`,
   `meta.region`, `meta.facets` and a `Server-Timing` header
 - Availability is stored and refreshed daily instead of fetched per request
+- IMDb sync: `PUT` and `DELETE /api/me/imdb` link and unlink a public IMDb
+  list, `GET /api/me` reports it as `imdb_sync`, and watchlist items carry
+  `source` and `imdb_missing_since`
+- The CSV import skips rows the user already has without a TMDb lookup and
+  reports rows it ran out of time for
 - `GET /health` returns `503` when the database is unreachable
 - CORS is limited to the frontend's origin
 
