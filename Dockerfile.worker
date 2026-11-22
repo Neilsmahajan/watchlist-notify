@@ -15,14 +15,14 @@ RUN go mod download
 # Copy source
 COPY . .
 
-# Build the digest worker binary
+# Build the worker binary (availability refresh + digest)
 ENV CGO_ENABLED=0 \
     GOOS=linux \
     GOARCH=amd64
 
 RUN --mount=type=cache,target=/root/.cache/go-build \
     --mount=type=cache,target=/go/pkg/mod \
-    go build -trimpath -ldflags="-s -w" -o /bin/digest-worker ./cmd/digest-worker
+    go build -trimpath -ldflags="-s -w" -o /bin/worker ./cmd/worker
 
 # --- Runtime stage ---
 FROM gcr.io/distroless/static:nonroot
@@ -30,10 +30,10 @@ FROM gcr.io/distroless/static:nonroot
 WORKDIR /
 
 # Copy binary from builder
-COPY --from=builder /bin/digest-worker /digest-worker
+COPY --from=builder /bin/worker /worker
 
 # Run as non-root user
 USER nonroot:nonroot
 
 # Start worker
-ENTRYPOINT ["/digest-worker"]
+ENTRYPOINT ["/worker"]
