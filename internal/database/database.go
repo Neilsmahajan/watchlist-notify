@@ -16,19 +16,32 @@ import (
 	"go.mongodb.org/mongo-driver/mongo/options"
 )
 
+// Service is the application's persistence layer. Packages that need only a
+// slice of it declare their own narrower interfaces.
 type Service interface {
-	Health() map[string]string
+	// Health reports whether the database answers a ping.
+	Health(ctx context.Context) error
+
 	UpsertUser(ctx context.Context, u *models.User) error
 	GetUserByEmail(ctx context.Context, email string) (*models.User, error)
 	UpdateServices(ctx context.Context, userID primitive.ObjectID, services []models.ServiceSubscription) (*models.User, error)
 	UpdateUserPreferences(ctx context.Context, userID primitive.ObjectID, fields map[string]any) (*models.User, error)
+	GetUsersForDigest(ctx context.Context, now time.Time) ([]*models.User, error)
+	CompareAndSwapDigestSchedule(ctx context.Context, userID primitive.ObjectID, from, to models.DigestSchedule, requireEnabled bool) (bool, error)
+	DistinctUserRegions(ctx context.Context) ([]string, error)
+
 	CreateWatchlistItem(ctx context.Context, item *models.WatchlistItem) error
 	ListWatchlistItems(ctx context.Context, opts models.ListWatchlistOptions) ([]*models.WatchlistItem, error)
-	CountWatchlistItems(ctx context.Context, opts models.ListWatchlistOptions) (int64, error)
 	UpdateWatchlistItem(ctx context.Context, userID, itemID primitive.ObjectID, fields map[string]any) (*models.WatchlistItem, error)
 	DeleteWatchlistItem(ctx context.Context, userID, itemID primitive.ObjectID) error
-	UpdateDigestTimestamps(ctx context.Context, userID primitive.ObjectID, lastSent, nextScheduled time.Time) error
-	GetUsersForDigest(ctx context.Context, now time.Time) ([]*models.User, error)
+	DistinctWatchlistTitles(ctx context.Context) ([]models.TitleRef, error)
+
+	GetTitles(ctx context.Context, keys []string, regions []string) (map[string]*models.Title, error)
+	SaveTitleSnapshot(ctx context.Context, ref models.TitleRef, region string, prevVersion *time.Time, snap models.RegionSnapshot, meta *models.TitleMetadata) (bool, error)
+	MarkTitleNotFound(ctx context.Context, ref models.TitleRef, at time.Time) error
+
+	InsertAvailabilityEvents(ctx context.Context, events []models.AvailabilityEvent) (int, error)
+	ListAvailabilityEvents(ctx context.Context, titleKeys []string, region string, since time.Time) ([]models.AvailabilityEvent, error)
 }
 
 type service struct {
@@ -42,12 +55,7 @@ var (
 	databaseUsername     = os.Getenv("DB_USERNAME")
 	databaseRootPassword = os.Getenv("DB_ROOT_PASSWORD")
 	databaseName         = os.Getenv("DB_DATABASE")
-	defaultRegion        = func() string {
-		if v := os.Getenv("DEFAULT_REGION"); v != "" {
-			return v
-		}
-		return "US"
-	}()
+	defaultRegion        = DefaultRegion()
 )
 
 var (
@@ -55,6 +63,23 @@ var (
 	ErrDuplicateWatchlistItem = errors.New("watchlist item already exists for user")
 	// ErrWatchlistItemNotFound when update target doesn't exist or not owned by user
 	ErrWatchlistItemNotFound = errors.New("watchlist item not found")
+)
+
+// DefaultRegion is the region assigned to new users and always tracked by the
+// availability refresh: DEFAULT_REGION when it is a valid two-letter code,
+// otherwise models.DefaultRegion.
+func DefaultRegion() string {
+	if region, ok := models.NormalizeRegion(os.Getenv("DEFAULT_REGION")); ok {
+		return region
+	}
+	return models.DefaultRegion
+}
+
+const (
+	collUsers     = "users"
+	collWatchlist = "watchlist_items"
+	collTitles    = "titles"
+	collEvents    = "availability_events"
 )
 
 func New() Service {
@@ -82,23 +107,18 @@ func New() Service {
 	}
 }
 
-func (s *service) Health() map[string]string {
-	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+// Health pings the database. It returns the error instead of exiting, so a
+// database blip degrades the health check without taking the server down.
+func (s *service) Health(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(ctx, 1*time.Second)
 	defer cancel()
-
-	err := s.db.Ping(ctx, nil)
-	if err != nil {
-		log.Fatalf("db down: %v", err)
-	}
-
-	return map[string]string{
-		"message": "It's healthy",
-	}
+	return s.db.Ping(ctx, nil)
 }
 
-// ensureIndexes creates required indexes for phase 1 collections.
+// ensureIndexes creates the indexes the queries rely on. Index creation is
+// idempotent and additive: existing indexes are left as they are.
 func ensureIndexes(ctx context.Context, db *mongo.Database) error {
-	users := db.Collection("users")
+	users := db.Collection(collUsers)
 	// Unique email
 	_, err := users.Indexes().CreateMany(ctx, []mongo.IndexModel{
 		{
@@ -114,7 +134,7 @@ func ensureIndexes(ctx context.Context, db *mongo.Database) error {
 		return err
 	}
 	// Watchlist indexes
-	watchlist := db.Collection("watchlist_items")
+	watchlist := db.Collection(collWatchlist)
 	_, err = watchlist.Indexes().CreateMany(ctx, []mongo.IndexModel{
 		// Query patterns: user_id + status filter + sort added_at desc; listing by user only; duplicates by tmdb
 		{
@@ -137,7 +157,25 @@ func ensureIndexes(ctx context.Context, db *mongo.Database) error {
 				SetName("uniq_user_imdb_id"),
 		},
 	})
+	if err != nil {
+		return err
+	}
+
+	// Availability events. `titles` needs no index beyond _id, which is the
+	// deterministic title key; the same goes for event de-duplication, which
+	// rides on the deterministic event _id.
+	events := db.Collection(collEvents)
+	_, err = events.Indexes().CreateMany(ctx, []mongo.IndexModel{
+		{
+			// Digest query: events for a set of titles in a region since a time.
+			Keys:    bson.D{{Key: "region", Value: 1}, {Key: "title_key", Value: 1}, {Key: "detected_at", Value: 1}},
+			Options: options.Index().SetName("region_title_detected_idx"),
+		},
+		{
+			// TTL: MongoDB deletes each event once its expires_at has passed.
+			Keys:    bson.D{{Key: "expires_at", Value: 1}},
+			Options: options.Index().SetExpireAfterSeconds(0).SetName("expires_at_ttl"),
+		},
+	})
 	return err
 }
-
-// watchlist repo methods moved to watchlist_repo.go

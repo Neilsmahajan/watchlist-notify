@@ -13,7 +13,7 @@ import (
 )
 
 func (s *service) UpsertUser(ctx context.Context, u *models.User) error {
-	collection := s.db.Database(databaseName).Collection("users")
+	collection := s.db.Database(databaseName).Collection(collUsers)
 	now := time.Now()
 	setOnInsert := bson.M{
 		"created_at": now,
@@ -47,7 +47,7 @@ func (s *service) UpsertUser(ctx context.Context, u *models.User) error {
 }
 
 func (s *service) GetUserByEmail(ctx context.Context, email string) (*models.User, error) {
-	collection := s.db.Database(databaseName).Collection("users")
+	collection := s.db.Database(databaseName).Collection(collUsers)
 	var user models.User
 	err := collection.FindOne(ctx, bson.M{"email": email}).Decode(&user)
 	if err != nil {
@@ -60,7 +60,7 @@ func (s *service) GetUserByEmail(ctx context.Context, email string) (*models.Use
 }
 
 func (s *service) UpdateServices(ctx context.Context, userID primitive.ObjectID, services []models.ServiceSubscription) (*models.User, error) {
-	collection := s.db.Database(databaseName).Collection("users")
+	collection := s.db.Database(databaseName).Collection(collUsers)
 	now := time.Now()
 	for i := range services {
 		if services[i].AddedAt.IsZero() {
@@ -84,7 +84,7 @@ func (s *service) UpdateUserPreferences(ctx context.Context, userID primitive.Ob
 	if len(fields) == 0 {
 		return nil, errors.New("no fields to update")
 	}
-	collection := s.db.Database(databaseName).Collection("users")
+	collection := s.db.Database(databaseName).Collection(collUsers)
 	now := time.Now()
 	fields["updated_at"] = now
 	var updated models.User
@@ -97,15 +97,17 @@ func (s *service) UpdateUserPreferences(ctx context.Context, userID primitive.Ob
 	return &updated, nil
 }
 
+// GetUsersForDigest returns users who opted into digests and are due: their
+// next_scheduled_at has passed or was never set.
 func (s *service) GetUsersForDigest(ctx context.Context, now time.Time) ([]*models.User, error) {
-	collection := s.db.Database(databaseName).Collection("users")
+	collection := s.db.Database(databaseName).Collection(collUsers)
 
 	filter := bson.M{
 		"preferences.digest_consent": true,
 		"preferences.digest.enabled": true,
 		"$or": []bson.M{
 			{"preferences.digest.next_scheduled_at": bson.M{"$lte": now}},
-			{"preferences.digest.next_scheduled_at": bson.M{"$exists": false}},
+			{"preferences.digest.next_scheduled_at": nil}, // null or missing
 		},
 	}
 
@@ -113,8 +115,6 @@ func (s *service) GetUsersForDigest(ctx context.Context, now time.Time) ([]*mode
 	if err != nil {
 		return nil, err
 	}
-	defer cursor.Close(ctx)
-
 	var users []*models.User
 	if err := cursor.All(ctx, &users); err != nil {
 		return nil, err
@@ -122,14 +122,81 @@ func (s *service) GetUsersForDigest(ctx context.Context, now time.Time) ([]*mode
 	return users, nil
 }
 
-func (s *service) UpdateDigestTimestamps(ctx context.Context, userID primitive.ObjectID, lastSent, nextScheduled time.Time) error {
-	collection := s.db.Database(databaseName).Collection("users")
-	_, err := collection.UpdateOne(ctx, bson.M{"_id": userID}, bson.M{
-		"$set": bson.M{
-			"preferences.digest.last_sent_at":      lastSent,
-			"preferences.digest.next_scheduled_at": nextScheduled,
-			"updated_at":                           time.Now(),
-		},
-	})
-	return err
+// CompareAndSwapDigestSchedule moves a user's digest schedule from one state
+// to another, but only if the stored state still equals from. It reports
+// whether the swap happened.
+//
+// The digest job uses it twice: to claim a user before sending (from: what it
+// read, to: sent now, next send scheduled) and to hand the claim back when the
+// send definitely failed (the reverse). Because the swap is a single atomic
+// update, two overlapping job runs cannot both claim the same user.
+//
+// With requireEnabled the swap also requires digests to still be enabled and
+// consented to, so a user who opted out a moment ago is not emailed.
+func (s *service) CompareAndSwapDigestSchedule(ctx context.Context, userID primitive.ObjectID, from, to models.DigestSchedule, requireEnabled bool) (bool, error) {
+	collection := s.db.Database(databaseName).Collection(collUsers)
+
+	const (
+		lastSentField = "preferences.digest.last_sent_at"
+		nextField     = "preferences.digest.next_scheduled_at"
+	)
+	filter := bson.M{
+		"_id":         userID,
+		lastSentField: timeOrNull(from.LastSentAt),
+		nextField:     timeOrNull(from.NextScheduledAt),
+	}
+	if requireEnabled {
+		filter["preferences.digest_consent"] = true
+		filter["preferences.digest.enabled"] = true
+	}
+
+	set := bson.M{"updated_at": time.Now()}
+	unset := bson.M{}
+	for field, value := range map[string]*time.Time{lastSentField: to.LastSentAt, nextField: to.NextScheduledAt} {
+		if value == nil {
+			unset[field] = ""
+		} else {
+			set[field] = *value
+		}
+	}
+	update := bson.M{"$set": set}
+	if len(unset) > 0 {
+		update["$unset"] = unset
+	}
+
+	res, err := collection.UpdateOne(ctx, filter, update)
+	if err != nil {
+		return false, err
+	}
+	return res.MatchedCount == 1, nil
+}
+
+// timeOrNull builds an equality condition for an optional time. A nil filter
+// value matches documents where the field is null or absent.
+func timeOrNull(t *time.Time) any {
+	if t == nil {
+		return nil
+	}
+	return *t
+}
+
+// DistinctUserRegions returns the valid regions users are in.
+func (s *service) DistinctUserRegions(ctx context.Context) ([]string, error) {
+	collection := s.db.Database(databaseName).Collection(collUsers)
+	values, err := collection.Distinct(ctx, "region", bson.M{})
+	if err != nil {
+		return nil, err
+	}
+	seen := make(map[string]bool, len(values))
+	var regions []string
+	for _, v := range values {
+		raw, _ := v.(string)
+		region, ok := models.NormalizeRegion(raw)
+		if !ok || seen[region] {
+			continue
+		}
+		seen[region] = true
+		regions = append(regions, region)
+	}
+	return regions, nil
 }
