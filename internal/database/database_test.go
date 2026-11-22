@@ -32,6 +32,12 @@ func mustStartMongoContainer() (func(context.Context, ...testcontainers.Terminat
 	databaseHost = dbHost
 	databasePort = dbPort.Port()
 
+	// Package-level config is read from the environment at init, so set the
+	// values the tests need explicitly instead of relying on CI/dev env vars.
+	mongoURI = ""
+	databaseUsername = ""
+	databaseName = "watchlist_notify_test"
+
 	return dbContainer.Terminate, err
 }
 
