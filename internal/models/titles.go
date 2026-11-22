@@ -249,5 +249,7 @@ type AvailabilityEvent struct {
 	ExpiresAt    time.Time `bson:"expires_at" json:"expires_at"`
 }
 
-// EventRetention is how long availability events are kept.
-const EventRetention = 90 * 24 * time.Hour
+// EventRetention is how long availability events are kept. It has to outlast
+// the longest digest interval a user can choose (12 months): an event that
+// expired before a yearly subscriber's next digest would never reach them.
+const EventRetention = 400 * 24 * time.Hour

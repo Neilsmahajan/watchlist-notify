@@ -48,6 +48,8 @@ compares the result with the stored snapshot in the `titles` collection:
   becomes a row in `availability_events`. Event IDs are derived from the title,
   region, service, direction and the version of the snapshot being replaced,
   so a retry or an overlapping run cannot record the same change twice.
+  Events are kept for 400 days, longer than the longest digest interval a
+  user can choose (12 months).
 - Events are written before the snapshot is replaced, and the replace is
   conditional on the snapshot still being the version that was read. A crash
   between the two repeats the same events (deduplicated) on the next run; it

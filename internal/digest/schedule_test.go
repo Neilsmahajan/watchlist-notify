@@ -57,3 +57,17 @@ func TestWindowStart(t *testing.T) {
 		})
 	}
 }
+
+// An event has to still exist when the slowest digest comes round to it. The
+// longest interval the preferences accept is 12 months, and the digest also
+// reads back a quiet period before its window to recognise reappearances.
+func TestEventsOutliveTheLongestInterval(t *testing.T) {
+	yearly := models.DigestSettings{Interval: 12, IntervalUnit: models.DigestUnitMonths}
+	next := NextSendTime(yearly.Interval, yearly.IntervalUnit, &now, now)
+	yearly.LastSentAt = &now
+
+	oldestRead := WindowStart(yearly, next).Add(-ReappearanceQuietPeriod)
+	if lookback := next.Sub(oldestRead); lookback >= models.EventRetention {
+		t.Errorf("a yearly digest reads back %v but events are kept for only %v", lookback, models.EventRetention)
+	}
+}
