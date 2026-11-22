@@ -297,7 +297,10 @@ func TestBuildPlan(t *testing.T) {
 
 		// --- adopting what the user imported from IMDb before linking ---
 		{
-			name: "imported items on the list are adopted when the list is linked",
+			// The link request runs before the link is stored. Were it to
+			// adopt and the storing then fail, items would be the sync's on
+			// the evidence of a list that was never linked.
+			name: "linking adopts nothing: imported items on the list stay as they are",
 			in: Input{
 				Mode: ModeLink, IDs: []string{ttA, ttB, ttC}, Complete: true, Resolved: abc,
 				Existing: []*models.WatchlistItem{
@@ -305,10 +308,10 @@ func TestBuildPlan(t *testing.T) {
 					item("c", tmdbID(2), imdbID(ttB), source(models.SourceCSV)), // a CSV import
 				},
 			},
-			want: want{add: []string{ttC}, adopt: []string{"c", "l"}, prune: PruneSkippedMode, counts: [4]int{3, 2, 0, 0}},
+			want: want{add: []string{ttC}, prune: PruneSkippedMode, counts: [4]int{3, 2, 0, 0}},
 		},
 		{
-			name: "imported items on the list are adopted by a worker sync too",
+			name: "imported items on the list are adopted by a worker sync",
 			in: Input{
 				Mode: ModeSync, IDs: []string{ttA, ttB}, Complete: true,
 				Existing: []*models.WatchlistItem{
@@ -329,14 +332,14 @@ func TestBuildPlan(t *testing.T) {
 		{
 			name: "an imported item the user has touched is not adopted",
 			in: Input{
-				Mode: ModeLink, IDs: []string{ttA, ttB, ttC}, Complete: true,
+				Mode: ModeSync, IDs: []string{ttA, ttB, ttC}, Complete: true,
 				Existing: []*models.WatchlistItem{
 					item("w", tmdbID(1), imdbID(ttA), status(models.WatchlistStatusWatching)),
 					item("f", tmdbID(2), imdbID(ttB), source(models.SourceCSV), status(models.WatchlistStatusFinished)),
 					item("t", tmdbID(3), imdbID(ttC), source(models.SourceCSV), tagged("favourite")),
 				},
 			},
-			want: want{prune: PruneSkippedMode, counts: [4]int{3, 3, 0, 0}},
+			want: want{prune: PruneConsidered, counts: [4]int{3, 3, 0, 0}},
 		},
 		{
 			name: "an imported item that is not on the list is not adopted, marked or removed",
@@ -353,14 +356,14 @@ func TestBuildPlan(t *testing.T) {
 		{
 			name: "an item matched only by its title is never adopted",
 			in: Input{
-				Mode: ModeLink, IDs: []string{ttA, ttB}, Complete: true, Resolved: abc,
+				Mode: ModeSync, IDs: []string{ttA, ttB}, Complete: true, Resolved: abc,
 				Existing: []*models.WatchlistItem{
 					item("m", tmdbID(1)),                      // added by hand: no IMDb ID
 					item("o", tmdbID(2), imdbID("tt0000099")), // imported under another IMDb ID
 					item("n"), // added by hand, never matched to TMDb
 				},
 			},
-			want: want{prune: PruneSkippedMode, counts: [4]int{2, 2, 0, 0}},
+			want: want{prune: PruneConsidered, counts: [4]int{2, 2, 0, 0}},
 		},
 		{
 			name: "a CSV import never adopts",
@@ -384,10 +387,10 @@ func TestBuildPlan(t *testing.T) {
 		{
 			name: "the same ID twice on the list adopts once",
 			in: Input{
-				Mode: ModeLink, IDs: []string{ttA, ttA}, Complete: true,
+				Mode: ModeSync, IDs: []string{ttA, ttA}, Complete: true,
 				Existing: []*models.WatchlistItem{item("l", tmdbID(1), imdbID(ttA))},
 			},
-			want: want{adopt: []string{"l"}, prune: PruneSkippedMode, counts: [4]int{1, 1, 0, 0}, repeats: 1},
+			want: want{adopt: []string{"l"}, prune: PruneConsidered, counts: [4]int{1, 1, 0, 0}, repeats: 1},
 		},
 		{
 			name: "adoption and a strike never fall on the same item",
@@ -698,7 +701,7 @@ func TestBuildPlanOutcomes(t *testing.T) {
 // write then insists on.
 func TestBuildPlanAdoptionsCarryTheMatchedID(t *testing.T) {
 	plan := BuildPlan(Input{
-		Mode: ModeLink, Now: planNow, IDs: []string{ttB, ttA}, Complete: true,
+		Mode: ModeSync, Now: planNow, LinkedAt: planLinked, IDs: []string{ttB, ttA}, Complete: true,
 		Existing: []*models.WatchlistItem{item("l", tmdbID(1), imdbID(ttA)), item("c", tmdbID(2), imdbID(ttB), source(models.SourceCSV))},
 	})
 	want := []Adoption{{ItemID: itemID("c"), IMDbID: ttB}, {ItemID: itemID("l"), IMDbID: ttA}}

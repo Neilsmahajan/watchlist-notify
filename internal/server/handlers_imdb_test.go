@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"log/slog"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -24,6 +26,7 @@ import (
 	"github.com/neilsmahajan/watchlist-notify/internal/providers/tmdb"
 	"github.com/neilsmahajan/watchlist-notify/internal/storetest"
 	"github.com/neilsmahajan/watchlist-notify/internal/watchlist"
+	"github.com/neilsmahajan/watchlist-notify/internal/worker"
 )
 
 // --- fakes for the IMDb link and the CSV import ---
@@ -207,6 +210,25 @@ func (h *syncHarness) json(rec *httptest.ResponseRecorder, wantStatus int) map[s
 	return body
 }
 
+// dailySync runs the worker's IMDb task once, as the daily job would at the
+// given time, against the same database and the same IMDb.
+func (h *syncHarness) dailySync(at time.Time) {
+	h.t.Helper()
+	clock := func() time.Time { return at }
+	task := &worker.IMDbTask{
+		Store:         h.store,
+		Fetcher:       h.lists,
+		Syncer:        imdbsync.New(h.store, h.finder, imdbsync.WithClock(clock)),
+		DefaultRegion: "US",
+		Logger:        slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Now:           clock,
+		Sleep:         func(context.Context, time.Duration) {},
+	}
+	if err := task.Run(context.Background()); err != nil {
+		h.t.Fatalf("daily sync: %v", err)
+	}
+}
+
 // link sends PUT /api/me/imdb.
 func (h *syncHarness) link(source string, wantStatus int) map[string]any {
 	h.t.Helper()
@@ -283,7 +305,7 @@ func TestLinkIMDbAddsTheListAndStoresTheLink(t *testing.T) {
 
 	body := h.link("https://www.imdb.com/user/ur101082417/watchlist/?ref_=nv_usr_wl_all_0", http.StatusOK)
 
-	wantResult := map[string]any{"total": 3.0, "added": 1.0, "existing": 1.0, "adopted": 0.0, "unmatched": 1.0, "complete": true}
+	wantResult := map[string]any{"total": 3.0, "added": 1.0, "existing": 1.0, "unmatched": 1.0, "complete": true}
 	if !reflect.DeepEqual(body["result"], wantResult) {
 		t.Errorf("result = %v, want %v", body["result"], wantResult)
 	}
@@ -645,10 +667,12 @@ func TestLinkIMDbPartlyReadListIsLinkedAsPartial(t *testing.T) {
 	}
 }
 
-// The user imported their IMDb list by CSV before, and now links it. Their
-// untouched imports that are on the list become the sync's, and the response
-// says how many; everything else they had stays theirs.
-func TestLinkIMDbAdoptsWhatTheUserImportedBefore(t *testing.T) {
+// The user imported their IMDb list by CSV before, and now links it. The link
+// request adds what is new and leaves everything they had exactly as it is:
+// it runs before the link is stored, so it must not hand anything to the
+// sync. The first daily sync of the stored link then adopts the untouched
+// imports that are on the list.
+func TestLinkIMDbLeavesImportsToTheFirstDailySync(t *testing.T) {
 	h := newSyncHarness(t)
 	add := func(title string, tmdbID int, imdbID, source, status string, tags ...string) {
 		h.store.AddItem(&models.WatchlistItem{
@@ -663,45 +687,87 @@ func TestLinkIMDbAdoptsWhatTheUserImportedBefore(t *testing.T) {
 	add("Imported, not on the list", 605, ttID(605), models.SourceCSV, models.WatchlistStatusPlanned)
 	add("Added by hand", 606, "", "", models.WatchlistStatusPlanned)
 	h.lists.put(testWatchlist, ttID(601), ttID(602), ttID(603), ttID(604), ttID(606), ttID(607))
+	checkSources := func(when string, want map[string]string) {
+		t.Helper()
+		items := h.items()
+		for key, source := range want {
+			item := items[key]
+			if item == nil {
+				t.Fatalf("%s: no item %q in %v", when, key, items)
+			}
+			if item.Source != source {
+				t.Errorf("%s: %s: source = %q, want %q", when, key, item.Source, source)
+			}
+			if key != ttID(607) && !item.UpdatedAt.Equal(base) {
+				t.Errorf("%s: %s: updated_at moved; neither linking nor adoption is a user's edit", when, key)
+			}
+		}
+		if len(items) != len(want) {
+			t.Errorf("%s: watchlist has %d items, want %d", when, len(items), len(want))
+		}
+		if got := items["Added by hand"]; got.IMDbID != "" {
+			t.Errorf("%s: the hand-added item got an IMDb ID: %+v", when, got)
+		}
+	}
 
 	body := h.link(testWatchlist, http.StatusOK)
 
-	wantResult := map[string]any{"total": 6.0, "added": 1.0, "existing": 5.0, "adopted": 2.0, "unmatched": 0.0, "complete": true}
+	// No "adopted" in the result: the link request does not adopt.
+	wantResult := map[string]any{"total": 6.0, "added": 1.0, "existing": 5.0, "unmatched": 0.0, "complete": true}
 	if !reflect.DeepEqual(body["result"], wantResult) {
 		t.Errorf("result = %v, want %v", body["result"], wantResult)
 	}
-	wantSources := map[string]string{
+	checkSources("after linking", map[string]string{
+		ttID(601): models.SourceCSV, ttID(602): "", ttID(603): models.SourceCSV, ttID(604): "",
+		ttID(605): models.SourceCSV, "Added by hand": "",
+		ttID(607): models.SourceIMDb, // new
+	})
+	if got := h.store.Queries["AdoptWatchlistItem"]; got != 0 {
+		t.Errorf("the link request tried to adopt %d times", got)
+	}
+
+	// The next day's sync.
+	h.dailySync(time.Now().Add(24 * time.Hour))
+
+	checkSources("after the first sync", map[string]string{
 		ttID(601): models.SourceIMDb, ttID(602): models.SourceIMDb, // adopted
 		ttID(603): models.SourceCSV, ttID(604): "", // the user's: status, tags
 		ttID(605):       models.SourceCSV,  // not on the list
 		"Added by hand": "",                // never an import
-		ttID(607):       models.SourceIMDb, // new
-	}
-	items := h.items()
-	for key, want := range wantSources {
-		item := items[key]
-		if item == nil {
-			t.Fatalf("no item %q in %v", key, items)
-		}
-		if item.Source != want {
-			t.Errorf("%s: source = %q, want %q", key, item.Source, want)
-		}
-		if key != ttID(607) && !item.UpdatedAt.Equal(base) {
-			t.Errorf("%s: updated_at moved; adoption is not a user's edit", key)
-		}
-	}
-	if len(items) != len(wantSources) {
-		t.Errorf("watchlist has %d items, want %d", len(items), len(wantSources))
-	}
-	if got := items["Added by hand"]; got.IMDbID != "" {
-		t.Errorf("the hand-added item got an IMDb ID: %+v", got)
-	}
+		ttID(607):       models.SourceIMDb, // the link added it
+	})
+}
 
-	// Linking the same list again finds nothing left to adopt.
+// A link that cannot be stored must leave nothing behind that only a stored
+// link justifies: no item has become the sync's.
+func TestLinkIMDbThatCannotBeStoredAdoptsNothing(t *testing.T) {
+	h := newSyncHarness(t)
+	h.lists.put(testList, ttID(1))
+	h.link(testList, http.StatusOK)
 	h.rewind(time.Hour)
-	again := h.link(testWatchlist, http.StatusOK)["result"].(map[string]any)
-	if again["adopted"] != 0.0 || again["added"] != 0.0 || again["existing"] != 6.0 {
-		t.Errorf("second link = %v; want nothing adopted or added", again)
+	h.store.AddItem(&models.WatchlistItem{
+		UserID: h.user.ID, Title: "Imported", Type: models.WatchlistTypeMovie, TMDbID: 601, IMDbID: ttID(601),
+		Source: models.SourceCSV, Status: models.WatchlistStatusPlanned, AddedAt: base, UpdatedAt: base,
+	})
+	// The user tries another list, which holds the import; storing fails.
+	h.lists.put(testWatchlist, ttID(601))
+	h.store.Fail["LinkIMDb"] = errors.New("mongo: write concern timeout")
+
+	h.link(testWatchlist, http.StatusInternalServerError)
+
+	if got := h.store.User(h.user.ID).IMDbSync; got == nil || got.SourceID != testList {
+		t.Fatalf("link after the failed attempt = %+v, want the first list still linked", got)
+	}
+	if got := h.items()[ttID(601)]; got.Source != models.SourceCSV {
+		t.Errorf("the import's source = %q after a link that was never stored; want it still the user's", got.Source)
+	}
+	// And the sync of the list that IS linked has no claim on it.
+	delete(h.store.Fail, "LinkIMDb")
+	for day := 1; day <= 3; day++ {
+		h.dailySync(time.Now().Add(time.Duration(day) * 24 * time.Hour))
+	}
+	if got := h.items()[ttID(601)]; got == nil || got.Source != models.SourceCSV || got.IMDbMissingSince != nil {
+		t.Errorf("the import after three daily syncs of the linked list = %+v; want it untouched", got)
 	}
 }
 

@@ -350,8 +350,7 @@ func itemType(mediaType string) string {
 // fetched being the list that is linked. So the link is read again
 // immediately before the adoptions and marks, and again before the removals,
 // and they are skipped unless it is exactly the link the run started with.
-// (The link request adopts without that check: it is the request making the
-// link.)
+// The link request and the CSV import plan none of the three.
 func (r *Reconciler) apply(ctx context.Context, req Request, plan Plan, at time.Time, res *Result) error {
 	userID := req.UserID
 	if err := r.applyAdditions(ctx, userID, plan, res); err != nil {
@@ -366,7 +365,7 @@ func (r *Reconciler) apply(ctx context.Context, req Request, plan Plan, at time.
 			res.Unmarked++
 		}
 	}
-	if req.Mode == ModeSync && len(plan.Adopt)+len(plan.MarkMissing) > 0 {
+	if len(plan.Adopt)+len(plan.MarkMissing) > 0 {
 		if same, err := r.linkUnchanged(ctx, req); err != nil || !same {
 			res.LinkChanged = err == nil
 			return err

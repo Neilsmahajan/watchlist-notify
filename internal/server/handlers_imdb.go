@@ -78,10 +78,6 @@ type IMDbLinkResult struct {
 	Added int `json:"added" example:"230"`
 	// Existing is how many were already on the watchlist.
 	Existing int `json:"existing" example:"10"`
-	// Adopted is how many of the existing ones the sync took over: items the
-	// user had imported from IMDb and not touched since. They now follow the
-	// list like the titles the sync adds, removal included.
-	Adopted int `json:"adopted" example:"8"`
 	// Unmatched is how many TMDb does not know, so they cannot be tracked.
 	Unmatched int `json:"unmatched" example:"2"`
 	// Complete is false when the list was only partly read or some titles
@@ -91,7 +87,7 @@ type IMDbLinkResult struct {
 
 // linkIMDbHandler godoc
 // @Summary Link a public IMDb list
-// @Description Links the user's public IMDb Watchlist (by user ID, ur…) or any public IMDb list (ls…), adds its titles to the watchlist now, and keeps the watchlist in step with it once a day from then on. Linking again replaces the link. Titles are added as planned items with source "imdb". Items the user already has are left as they are, with one exception: an item that carries the IMDb ID of a title on the list (which only an earlier import stores), is still "planned" and has no tags is adopted, meaning its source becomes "imdb" and it follows the list from then on. Items added by hand are never adopted. The daily sync removes an item only if its source is "imdb", the user has not changed its status or tagged it, and it has been missing from two complete fetches of the list at least 12 hours apart. IMDb does not permit public or commercial use of its data, so this is strictly opt-in, stores only IMDb title IDs (everything else comes from TMDb), and reads a list at most once a day: there is no "sync now", and a second link attempt within 60 seconds is refused.
+// @Description Links the user's public IMDb Watchlist (by user ID, ur…) or any public IMDb list (ls…), adds its titles to the watchlist now, and keeps the watchlist in step with it once a day from then on. Linking again replaces the link. Titles are added as planned items with source "imdb". Linking itself leaves every item the user already has exactly as it is. The daily sync, from its first run on, adopts items the user imported from IMDb earlier: an item that carries the IMDb ID of a title on the list (which only an import stores), is still "planned" and has no tags gets source "imdb" and follows the list from then on. Items added by hand are never adopted. The daily sync removes an item only if its source is "imdb", the user has not changed its status or tagged it, and it has been missing from two complete fetches of the list at least 12 hours apart. IMDb does not permit public or commercial use of its data, so this is strictly opt-in, stores only IMDb title IDs (everything else comes from TMDb), and reads a list at most once a day: there is no "sync now", and a second link attempt within 60 seconds is refused.
 // @Tags Users
 // @Security BearerAuth
 // @Accept json
@@ -222,7 +218,6 @@ func (s *Server) linkIMDbHandler(c *gin.Context) {
 			Total:     out.State.Total,
 			Added:     out.Result.Added,
 			Existing:  out.Result.Existing,
-			Adopted:   out.Result.Adopted,
 			Unmatched: out.Result.Unmatched,
 			Complete:  out.State.LastStatus == models.IMDbStatusOK,
 		},

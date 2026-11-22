@@ -30,14 +30,14 @@ const MinMissingAge = 12 * time.Hour
 type Mode int
 
 const (
-	// ModeSync is the daily worker run. It adds and adopts, and it is the
-	// only mode that marks items missing and removes them.
+	// ModeSync is the daily worker run. It adds, and it is the only mode
+	// that changes whose an item is: it adopts imported items, marks items
+	// missing and removes them.
 	ModeSync Mode = iota
-	// ModeLink is the request that links a list. It adds, adopts and never
-	// removes,
-	// and every missing mark is cleared before anything else is written, so
-	// that both strikes against an item come from the list that is linked
-	// now.
+	// ModeLink is the request that links a list. It adds and does nothing
+	// else to existing items: no adopting, no marking, no removing. Every
+	// missing mark is cleared before anything else is written, so that both
+	// strikes against an item come from the list that is linked now.
 	ModeLink
 	// ModeCSV is an uploaded IMDb export. It adds, and never adopts or
 	// removes.
@@ -197,10 +197,10 @@ type Plan struct {
 // does not know are counted as unmatched and IDs that could not be resolved
 // are pending; neither is an error.
 //
-// Adopting happens in ModeLink and ModeSync. Items imported from IMDb before
-// the list was linked have no source or "csv", so the sync would never
-// remove them, and a user who takes a title off their IMDb list would find
-// it still here. An item is therefore adopted (its source becomes "imdb")
+// Adopting happens in ModeSync only. Items imported from IMDb before the
+// list was linked have no source or "csv", so the sync would never remove
+// them, and a user who takes a title off their IMDb list would find it still
+// here. An item is therefore adopted (its source becomes "imdb")
 // when the incoming list holds the item's own stored IMDb ID and the user
 // has not touched the item (models.WatchlistItem.Adoptable). From then on it
 // follows the removal rules like an item the sync added. Never adopted: an
@@ -209,7 +209,10 @@ type Plan struct {
 // cannot come to look like an imported one); an item the user has given a
 // status or a tag; an item that is not on the list in this run. An item is
 // never adopted and marked in the same plan: it is adopted because it is on
-// the list, and marked only when it is not.
+// the list, and marked only when it is not. The link request does not adopt:
+// it runs before the link is stored, and if storing then failed, items would
+// have become the sync's on the evidence of a list that was never linked.
+// The first daily sync of the stored link adopts instead.
 //
 // Removing happens in ModeSync only, and an item is removed only when all of
 // these hold:
@@ -246,7 +249,7 @@ func BuildPlan(in Input) Plan {
 	// onList holds the items the incoming list accounts for.
 	onList := make(map[primitive.ObjectID]bool, len(in.IDs))
 	adding := make(map[string]bool)
-	adopts := in.Mode == ModeLink || in.Mode == ModeSync
+	adopts := in.Mode == ModeSync
 
 	for _, id := range in.IDs {
 		if _, seen := plan.Outcomes[id]; seen {
