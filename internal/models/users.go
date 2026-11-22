@@ -50,8 +50,50 @@ type User struct {
 	Region      string                `bson:"region" json:"region"`
 	Services    []ServiceSubscription `bson:"services,omitempty" json:"services,omitempty"`
 	Preferences Preferences           `bson:"preferences" json:"preferences"`
-	CreatedAt   time.Time             `bson:"created_at" json:"created_at"`
-	UpdatedAt   time.Time             `bson:"updated_at" json:"updated_at"`
+	// IMDbSync is present while the user has a public IMDb list linked.
+	IMDbSync *IMDbSync `bson:"imdb_sync,omitempty" json:"imdb_sync,omitempty"`
+	// IMDbAttemptAt is when a fetch of the user's IMDb list was last started.
+	// It throttles fetches (one a day from the worker, one a minute from the
+	// link endpoint) and lives outside IMDbSync so that unlinking and linking
+	// again cannot reset it.
+	IMDbAttemptAt *time.Time `bson:"imdb_attempt_at,omitempty" json:"-"`
+	CreatedAt     time.Time  `bson:"created_at" json:"created_at"`
+	UpdatedAt     time.Time  `bson:"updated_at" json:"updated_at"`
+}
+
+// Outcomes of an IMDb sync run, stored in IMDbSync.LastStatus.
+const (
+	// IMDbStatusOK: the whole list was read and every change was applied.
+	IMDbStatusOK = "ok"
+	// IMDbStatusPartial: some of the list was read or applied; the next run
+	// continues. A partial run never removes anything.
+	IMDbStatusPartial = "partial"
+	// IMDbStatusFailed: IMDb could not be read at all.
+	IMDbStatusFailed = "failed"
+	// IMDbStatusNotFound: the list does not exist or is not public.
+	IMDbStatusNotFound = "not_found"
+)
+
+// IMDbSync is a user's link to a public IMDb list and the outcome of the
+// last sync. Only the list's ID is kept; nothing else from IMDb is stored.
+type IMDbSync struct {
+	// SourceID is an IMDb user ID (ur…, meaning that user's Watchlist) or a
+	// list ID (ls…).
+	SourceID string    `bson:"source_id" json:"source_id"`
+	LinkedAt time.Time `bson:"linked_at" json:"linked_at"`
+	// LastAttemptAt is when the list was last fetched, successfully or not.
+	LastAttemptAt *time.Time `bson:"last_attempt_at,omitempty" json:"last_attempt_at,omitempty"`
+	// LastSyncedAt is when the list was last read completely.
+	LastSyncedAt *time.Time `bson:"last_synced_at,omitempty" json:"last_synced_at,omitempty"`
+	LastStatus   string     `bson:"last_status,omitempty" json:"last_status,omitempty"` // ok | partial | failed | not_found
+	LastError    string     `bson:"last_error,omitempty" json:"last_error,omitempty"`
+	// Total is the number of entries IMDb reported for the list.
+	Total int `bson:"total" json:"total"`
+	// Added, Removed and Unmatched are counts from the last run. Unmatched
+	// are IMDb titles TMDb has no movie or show for (episodes, games, …).
+	Added     int `bson:"added" json:"added"`
+	Removed   int `bson:"removed" json:"removed"`
+	Unmatched int `bson:"unmatched" json:"unmatched"`
 }
 
 // ActiveServiceCodes returns the codes of the services the user currently has.

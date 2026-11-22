@@ -1,0 +1,1179 @@
+package server
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"log/slog"
+	"mime/multipart"
+	"net/http"
+	"net/http/httptest"
+	"reflect"
+	"sort"
+	"strconv"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/gin-gonic/gin"
+	"github.com/neilsmahajan/watchlist-notify/internal/availability"
+	"github.com/neilsmahajan/watchlist-notify/internal/imdbsync"
+	"github.com/neilsmahajan/watchlist-notify/internal/models"
+	"github.com/neilsmahajan/watchlist-notify/internal/providers/imdb"
+	"github.com/neilsmahajan/watchlist-notify/internal/providers/tmdb"
+	"github.com/neilsmahajan/watchlist-notify/internal/storetest"
+	"github.com/neilsmahajan/watchlist-notify/internal/watchlist"
+	"github.com/neilsmahajan/watchlist-notify/internal/worker"
+	"go.mongodb.org/mongo-driver/bson/primitive"
+)
+
+// --- fakes for the IMDb link and the CSV import ---
+
+// fakeIMDbLists is IMDb: it serves lists by ID and counts the fetches.
+type fakeIMDbLists struct {
+	mu      sync.Mutex
+	lists   map[string]imdb.List
+	errs    map[string]error
+	fetched []string
+}
+
+func (f *fakeIMDbLists) FetchList(_ context.Context, sourceID string) (imdb.List, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.fetched = append(f.fetched, sourceID)
+	list, ok := f.lists[sourceID]
+	if err := f.errs[sourceID]; err != nil {
+		return list, err
+	}
+	if !ok {
+		return imdb.List{SourceID: sourceID}, imdb.ErrNotFound
+	}
+	return list, nil
+}
+
+func (f *fakeIMDbLists) fetches() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.fetched)
+}
+
+// put makes a complete list of the given titles available under sourceID.
+func (f *fakeIMDbLists) put(sourceID string, ids ...string) {
+	list := imdb.List{SourceID: sourceID, Total: len(ids), Complete: true}
+	for _, id := range ids {
+		list.Entries = append(list.Entries, imdb.Entry{IMDbID: id, Title: "IMDb's title"})
+	}
+	f.lists[sourceID] = list
+}
+
+// fakeFinder is TMDb's find-by-IMDb-ID. Every "tt00NNNNN" below 9000000
+// resolves to movie NNNNN unless told otherwise; the rest are unknown.
+type fakeFinder struct {
+	mu    sync.Mutex
+	errs  map[string]error
+	calls []string
+	delay time.Duration
+	// hang holds IDs TMDb never answers for: the lookup lasts until its
+	// context ends. It makes "ran out of time" tests independent of how
+	// fast the machine is.
+	hang    map[string]bool
+	active  int
+	maxSeen int
+}
+
+func (f *fakeFinder) FindByExternalID(ctx context.Context, id, _ string) (*tmdb.Result, error) {
+	f.mu.Lock()
+	f.calls = append(f.calls, id)
+	f.active++
+	f.maxSeen = max(f.maxSeen, f.active)
+	delay, err, hang := f.delay, f.errs[id], f.hang[id]
+	f.mu.Unlock()
+	defer func() {
+		f.mu.Lock()
+		f.active--
+		f.mu.Unlock()
+	}()
+
+	if hang {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	if delay > 0 {
+		select {
+		case <-time.After(delay):
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	if err != nil {
+		return nil, err
+	}
+	n := 0
+	for _, c := range id[2:] {
+		n = n*10 + int(c-'0')
+	}
+	if n >= 9000000 {
+		return nil, nil
+	}
+	return &tmdb.Result{TMDBID: n, Title: fmt.Sprintf("Movie %d", n), Year: 2001, Type: "movie"}, nil
+}
+
+func (f *fakeFinder) lookups() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := append([]string{}, f.calls...)
+	sort.Strings(out)
+	return out
+}
+
+func (f *fakeFinder) reset() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls, f.maxSeen = nil, 0
+}
+
+// syncHarness is the API around the IMDb link and the CSV import, with an
+// in-memory store and fakes for IMDb and TMDb. Requests are authenticated as
+// viewerEmail.
+type syncHarness struct {
+	t      *testing.T
+	store  *storetest.Store
+	user   *models.User
+	lists  *fakeIMDbLists
+	finder *fakeFinder
+	// titles is the TMDb the availability refresher fetches baselines from.
+	titles *fakeTMDb
+	server *Server
+	router *gin.Engine
+}
+
+func newSyncHarness(t *testing.T) *syncHarness {
+	t.Helper()
+	gin.SetMode(gin.TestMode)
+	h := &syncHarness{
+		t:      t,
+		store:  storetest.New(),
+		lists:  &fakeIMDbLists{lists: map[string]imdb.List{}, errs: map[string]error{}},
+		finder: &fakeFinder{errs: map[string]error{}},
+		titles: &fakeTMDb{},
+	}
+	h.user = h.store.AddUser(&models.User{Email: viewerEmail, Region: "US"})
+	h.build(h.finder)
+	return h
+}
+
+// build wires the server. A nil finder is an API without a TMDb key.
+func (h *syncHarness) build(finder imdbsync.Finder) {
+	var fetcher availability.Fetcher
+	if finder != nil {
+		fetcher = h.titles
+	}
+	refresher := availability.NewRefresher(fetcher, h.store, nil)
+	h.server = &Server{
+		db:            h.store,
+		refresher:     refresher,
+		lister:        watchlist.NewLister(h.store, refresher, "US"),
+		defaultRegion: "US",
+		imdbLists:     h.lists,
+		reconciler:    imdbsync.New(h.store, finder),
+	}
+	r := gin.New()
+	api := r.Group("/api", func(c *gin.Context) { c.Set("user_email", viewerEmail) })
+	api.GET("/me", h.server.meHandler)
+	api.PUT("/me/imdb", h.server.linkIMDbHandler)
+	api.DELETE("/me/imdb", h.server.unlinkIMDbHandler)
+	api.GET("/watchlist", h.server.listWatchlistItemsHandler)
+	api.POST("/watchlist/import", h.server.importWatchlistHandler)
+	h.router = r
+}
+
+func (h *syncHarness) request(method, target, body string) *httptest.ResponseRecorder {
+	h.t.Helper()
+	req := httptest.NewRequest(method, target, strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	h.router.ServeHTTP(rec, req)
+	return rec
+}
+
+func (h *syncHarness) json(rec *httptest.ResponseRecorder, wantStatus int) map[string]any {
+	h.t.Helper()
+	if rec.Code != wantStatus {
+		h.t.Fatalf("status = %d, want %d; body: %s", rec.Code, wantStatus, rec.Body)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		h.t.Fatalf("response is not a JSON object: %v; body: %s", err, rec.Body)
+	}
+	return body
+}
+
+// dailySync runs the worker's IMDb task once, as the daily job would at the
+// given time, against the same database and the same IMDb.
+func (h *syncHarness) dailySync(at time.Time) {
+	h.t.Helper()
+	clock := func() time.Time { return at }
+	task := &worker.IMDbTask{
+		Store:         h.store,
+		Fetcher:       h.lists,
+		Syncer:        imdbsync.New(h.store, h.finder, imdbsync.WithClock(clock)),
+		DefaultRegion: "US",
+		Logger:        slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Now:           clock,
+		Sleep:         func(context.Context, time.Duration) {},
+	}
+	if err := task.Run(context.Background()); err != nil {
+		h.t.Fatalf("daily sync: %v", err)
+	}
+}
+
+// link sends PUT /api/me/imdb.
+func (h *syncHarness) link(source string, wantStatus int) map[string]any {
+	h.t.Helper()
+	body, _ := json.Marshal(map[string]string{"source": source})
+	return h.json(h.request(http.MethodPut, "/api/me/imdb", string(body)), wantStatus)
+}
+
+// rewind moves the user's last IMDb fetch into the past, as if time passed.
+func (h *syncHarness) rewind(d time.Duration) {
+	user := h.store.User(h.user.ID)
+	if user.IMDbAttemptAt != nil {
+		at := user.IMDbAttemptAt.Add(-d)
+		user.IMDbAttemptAt = &at
+	}
+	h.store.AddUser(user)
+}
+
+func (h *syncHarness) items() map[string]*models.WatchlistItem {
+	out := map[string]*models.WatchlistItem{}
+	for _, item := range h.store.Items(h.user.ID) {
+		key := item.IMDbID
+		if key == "" {
+			key = item.Title
+		}
+		out[key] = item
+	}
+	return out
+}
+
+// upload sends a CSV to POST /api/watchlist/import.
+func (h *syncHarness) upload(csv string) *httptest.ResponseRecorder {
+	h.t.Helper()
+	var buf bytes.Buffer
+	form := multipart.NewWriter(&buf)
+	part, err := form.CreateFormFile("file", "WATCHLIST.csv")
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	_, _ = part.Write([]byte(csv))
+	_ = form.Close()
+	req := httptest.NewRequest(http.MethodPost, "/api/watchlist/import", &buf)
+	req.Header.Set("Content-Type", form.FormDataContentType())
+	rec := httptest.NewRecorder()
+	h.router.ServeHTTP(rec, req)
+	return rec
+}
+
+func ttID(n int) string { return fmt.Sprintf("tt%07d", n) }
+
+func ttIDs(from, count int) []string {
+	ids := make([]string, count)
+	for i := range ids {
+		ids[i] = ttID(from + i)
+	}
+	return ids
+}
+
+const (
+	testList      = "ls042518938"
+	testWatchlist = "ur101082417"
+	unknownTitle  = "tt9000001"
+)
+
+// --- PUT /api/me/imdb ---
+
+func TestLinkIMDbAddsTheListAndStoresTheLink(t *testing.T) {
+	h := newSyncHarness(t)
+	h.lists.put(testWatchlist, ttID(603), ttID(604), unknownTitle)
+	manual := h.store.AddItem(&models.WatchlistItem{
+		UserID: h.user.ID, Title: "Already here", Type: models.WatchlistTypeMovie, TMDbID: 604,
+		Status: models.WatchlistStatusFinished, AddedAt: base, UpdatedAt: base,
+	})
+	before := time.Now().Add(-time.Second)
+
+	body := h.link("https://www.imdb.com/user/ur101082417/watchlist/?ref_=nv_usr_wl_all_0", http.StatusOK)
+
+	wantResult := map[string]any{"total": 3.0, "added": 1.0, "existing": 1.0, "unmatched": 1.0, "complete": true}
+	if !reflect.DeepEqual(body["result"], wantResult) {
+		t.Errorf("result = %v, want %v", body["result"], wantResult)
+	}
+	sync := body["imdb_sync"].(map[string]any)
+	wantKeys := []string{"added", "last_attempt_at", "last_status", "last_synced_at", "linked_at", "removed", "source_id", "total", "unmatched"}
+	if got := sortedKeys(sync); !reflect.DeepEqual(got, wantKeys) {
+		t.Errorf("imdb_sync fields = %v, want %v", got, wantKeys)
+	}
+	if sync["source_id"] != testWatchlist || sync["last_status"] != "ok" || sync["total"] != 3.0 || sync["added"] != 1.0 || sync["unmatched"] != 1.0 || sync["removed"] != 0.0 {
+		t.Errorf("imdb_sync = %v", sync)
+	}
+	for _, field := range []string{"linked_at", "last_attempt_at", "last_synced_at"} {
+		at, err := time.Parse(time.RFC3339Nano, sync[field].(string))
+		if err != nil || at.Before(before) || at.After(time.Now().Add(time.Second)) {
+			t.Errorf("%s = %v, want now", field, sync[field])
+		}
+	}
+
+	// One fetch, by the ID taken out of the URL.
+	if !reflect.DeepEqual(h.lists.fetched, []string{testWatchlist}) {
+		t.Errorf("fetched %v", h.lists.fetched)
+	}
+	// The new item carries TMDb's metadata and is marked as the sync's.
+	items := h.items()
+	added := items[ttID(603)]
+	if added == nil || added.Source != models.SourceIMDb || added.Status != models.WatchlistStatusPlanned || added.TMDbID != 603 || added.Title != "Movie 603" {
+		t.Errorf("added item = %+v", added)
+	}
+	// The item the user already had is theirs: untouched, with no IMDb ID
+	// written onto it.
+	kept := items["Already here"]
+	if kept == nil || kept.ID != manual.ID || kept.Source != "" || kept.IMDbID != "" || kept.Status != models.WatchlistStatusFinished || !kept.UpdatedAt.Equal(base) {
+		t.Errorf("hand-added item = %+v", kept)
+	}
+	if len(items) != 2 {
+		t.Errorf("watchlist has %d items, want 2", len(items))
+	}
+	// Availability for the new title was fetched once.
+	if h.titles.calls != 1 {
+		t.Errorf("availability fetched %d times, want once for the one new title", h.titles.calls)
+	}
+
+	// GET /api/me now shows the link, and never the throttle field.
+	me := h.json(h.request(http.MethodGet, "/api/me", ""), http.StatusOK)
+	if got := me["imdb_sync"]; !reflect.DeepEqual(got, body["imdb_sync"]) {
+		t.Errorf("/api/me imdb_sync = %v, want %v", got, body["imdb_sync"])
+	}
+	if _, leaked := me["imdb_attempt_at"]; leaked {
+		t.Error("/api/me exposes imdb_attempt_at")
+	}
+
+	// GET /api/watchlist shows where each item came from.
+	list := h.json(h.request(http.MethodGet, "/api/watchlist?sort=title", ""), http.StatusOK)
+	sources := map[string]any{}
+	for _, raw := range list["items"].([]any) {
+		item := raw.(map[string]any)
+		sources[item["title"].(string)] = item["source"]
+	}
+	if want := map[string]any{"Movie 603": "imdb", "Already here": nil}; !reflect.DeepEqual(sources, want) {
+		t.Errorf("sources in the watchlist = %v, want %v", sources, want)
+	}
+}
+
+func sortedKeys(m map[string]any) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func TestLinkIMDbAcceptsIDsAndURLs(t *testing.T) {
+	for source, wantID := range map[string]string{
+		"ls042518938":                           testList,
+		" ur101082417 ":                         testWatchlist,
+		"https://www.imdb.com/list/ls042518938": testList,
+		"imdb.com/user/ur101082417/watchlist":   testWatchlist,
+	} {
+		h := newSyncHarness(t)
+		h.lists.put(wantID, ttID(1))
+		body := h.link(source, http.StatusOK)
+		if got := body["imdb_sync"].(map[string]any)["source_id"]; got != wantID {
+			t.Errorf("source %q linked %v, want %s", source, got, wantID)
+		}
+	}
+}
+
+func TestLinkIMDbRejectsWhatIsNotAnIMDbList(t *testing.T) {
+	h := newSyncHarness(t)
+	h.lists.put(testList, ttID(1))
+
+	for _, source := range []string{
+		"", "tt0133093", "ls12", "my watchlist", "https://example.com/list/ls042518938",
+		"https://www.imdb.com/title/tt0133093/", "ls042518938'; --", "../../ls042518938",
+	} {
+		body := h.link(source, http.StatusBadRequest)
+		if msg, _ := body["error"].(string); !strings.Contains(msg, "ur…") || !strings.Contains(msg, "ls…") {
+			t.Errorf("source %q: error = %q, want it to say what is accepted", source, msg)
+		}
+	}
+	for _, raw := range []string{"", "not json", `{"source": 42}`, `["ls042518938"]`} {
+		if rec := h.request(http.MethodPut, "/api/me/imdb", raw); rec.Code != http.StatusBadRequest {
+			t.Errorf("body %q: status = %d, want 400", raw, rec.Code)
+		}
+	}
+
+	if h.lists.fetches() != 0 {
+		t.Errorf("invalid input reached IMDb %d times", h.lists.fetches())
+	}
+	if h.store.User(h.user.ID).IMDbSync != nil {
+		t.Error("invalid input stored a link")
+	}
+	// A rejected ID is not an attempt: the corrected one goes straight through.
+	h.link(testList, http.StatusOK)
+}
+
+func TestLinkIMDbPrivateOrMissingList(t *testing.T) {
+	h := newSyncHarness(t)
+	h.lists.put(testList, ttID(1))
+	h.link(testList, http.StatusOK)
+	linked := *h.store.User(h.user.ID).IMDbSync
+	h.rewind(2 * time.Minute)
+
+	body := h.link("ur555555555", http.StatusNotFound)
+
+	msg, _ := body["error"].(string)
+	if !strings.Contains(msg, "Make the list public on IMDb") {
+		t.Errorf("error = %q, want it to say how to fix it", msg)
+	}
+	if len(body) != 1 {
+		t.Errorf("body = %v, want only an error", body)
+	}
+	// The link that worked is still there, untouched.
+	if got := *h.store.User(h.user.ID).IMDbSync; !reflect.DeepEqual(got, linked) {
+		t.Errorf("a failed re-link changed the stored link: %+v", got)
+	}
+	if len(h.items()) != 1 {
+		t.Errorf("watchlist = %v", h.items())
+	}
+}
+
+func TestLinkIMDbUnreachable(t *testing.T) {
+	h := newSyncHarness(t)
+	h.lists.errs[testList] = errors.New("Post \"https://api.graphql.imdb.com/\": dial tcp 52.94.1.1:443: i/o timeout")
+
+	rec := h.request(http.MethodPut, "/api/me/imdb", `{"source":"ls042518938"}`)
+
+	body := h.json(rec, http.StatusBadGateway)
+	if msg, _ := body["error"].(string); msg != "IMDb could not be reached. Try again in a few minutes." {
+		t.Errorf("error = %q", msg)
+	}
+	if strings.Contains(rec.Body.String(), "graphql") || strings.Contains(rec.Body.String(), "52.94") {
+		t.Errorf("the upstream error leaked: %s", rec.Body)
+	}
+	if h.store.User(h.user.ID).IMDbSync != nil {
+		t.Error("an unreachable list was linked")
+	}
+}
+
+func TestLinkIMDbTooLarge(t *testing.T) {
+	h := newSyncHarness(t)
+	h.lists.put(testList, ttID(1))
+	h.lists.errs[testList] = fmt.Errorf("page 41: %w", imdb.ErrTooLarge)
+	h.link(testList, http.StatusBadRequest)
+	if h.store.User(h.user.ID).IMDbSync != nil || len(h.items()) != 0 {
+		t.Error("an oversized list was linked or partly imported")
+	}
+}
+
+// Every attempt that reaches IMDb counts, so that nobody can make this
+// service fetch IMDb in a loop.
+func TestLinkIMDbRefusesASecondAttemptWithinAMinute(t *testing.T) {
+	h := newSyncHarness(t)
+	h.lists.put(testList, ttID(1))
+	h.lists.put(testWatchlist, ttID(2))
+	h.link(testList, http.StatusOK)
+
+	rec := h.request(http.MethodPut, "/api/me/imdb", `{"source":"ur101082417"}`)
+
+	h.json(rec, http.StatusTooManyRequests)
+	if got := rec.Header().Get("Retry-After"); got != "60" {
+		t.Errorf("Retry-After = %q, want 60", got)
+	}
+	if h.lists.fetches() != 1 {
+		t.Errorf("IMDb was fetched %d times, want the second attempt stopped before it", h.lists.fetches())
+	}
+	if got := h.store.User(h.user.ID).IMDbSync.SourceID; got != testList {
+		t.Errorf("the refused attempt changed the link to %s", got)
+	}
+
+	// Unlinking does not reset it, and a failed attempt counts too.
+	h.request(http.MethodDelete, "/api/me/imdb", "")
+	h.link(testWatchlist, http.StatusTooManyRequests)
+	h.rewind(61 * time.Second)
+	h.link("ur555555555", http.StatusNotFound)
+	h.link(testWatchlist, http.StatusTooManyRequests)
+
+	h.rewind(61 * time.Second)
+	h.link(testWatchlist, http.StatusOK)
+	if h.lists.fetches() != 3 {
+		t.Errorf("IMDb was fetched %d times in all, want 3", h.lists.fetches())
+	}
+}
+
+// Two requests at the same moment: one links, the other is refused.
+func TestLinkIMDbConcurrentRequestsFetchOnce(t *testing.T) {
+	h := newSyncHarness(t)
+	h.lists.put(testList, ttID(1))
+
+	codes := make(chan int, 6)
+	var wg sync.WaitGroup
+	for i := 0; i < 6; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			codes <- h.request(http.MethodPut, "/api/me/imdb", `{"source":"ls042518938"}`).Code
+		}()
+	}
+	wg.Wait()
+	close(codes)
+
+	counts := map[int]int{}
+	for code := range codes {
+		counts[code]++
+	}
+	if counts[http.StatusOK] != 1 || counts[http.StatusTooManyRequests] != 5 {
+		t.Errorf("status codes = %v, want one 200 and five 429", counts)
+	}
+	if h.lists.fetches() != 1 || len(h.items()) != 1 {
+		t.Errorf("fetches = %d, items = %d; want one of each", h.lists.fetches(), len(h.items()))
+	}
+}
+
+// A list too long to resolve in the time a request has: what fits is added,
+// the link is stored as partial, and the next attempt carries on.
+func TestLinkIMDbOverBudgetLinksAndReportsPartial(t *testing.T) {
+	h := newSyncHarness(t)
+	h.lists.put(testList, ttIDs(1000, 64)...)
+	// TMDb answers for the first 16 titles and not at all for the other 48.
+	h.finder.hang = map[string]bool{}
+	for _, id := range ttIDs(1016, 48) {
+		h.finder.hang[id] = true
+	}
+	h.server.resolveBudget = 300 * time.Millisecond
+
+	body := h.link(testList, http.StatusOK)
+
+	result := body["result"].(map[string]any)
+	added := int(result["added"].(float64))
+	if result["complete"] != false || result["total"] != 64.0 || added != 16 {
+		t.Errorf("result = %v; want an incomplete result with 16 of the 64 added", result)
+	}
+	sync := body["imdb_sync"].(map[string]any)
+	if sync["last_status"] != "partial" || !strings.Contains(sync["last_error"].(string), "could not be looked up yet") {
+		t.Errorf("imdb_sync = %v", sync)
+	}
+	if len(h.items()) != added {
+		t.Errorf("%d items stored, %d reported added", len(h.items()), added)
+	}
+	stored := h.store.User(h.user.ID).IMDbSync
+	if stored == nil || stored.SourceID != testList || stored.LastStatus != models.IMDbStatusPartial || stored.Added != added {
+		t.Errorf("stored link = %+v", stored)
+	}
+
+	// The next run over the same list (the worker's, a day later) only has
+	// the rest to look up.
+	h.finder.hang = nil
+	h.finder.reset()
+	h.server.resolveBudget = 0
+	h.rewind(2 * time.Minute)
+	again := h.link(testList, http.StatusOK)["result"].(map[string]any)
+	if again["complete"] != true || int(again["added"].(float64)) != 64-added || int(again["existing"].(float64)) != added {
+		t.Errorf("second result = %v, want the remaining %d added", again, 64-added)
+	}
+	if got := len(h.finder.lookups()); got != 64-added {
+		t.Errorf("second run made %d lookups, want %d", got, 64-added)
+	}
+}
+
+// The request's deadline covers the database too. A database that stops
+// answering while the titles are being written ends like a TMDb that is too
+// slow: the request answers in time, nothing is reported that did not
+// happen, the link is stored as partial and a later run finishes the job.
+func TestLinkIMDbDatabaseStallDuringTheWritesEndsAsPartial(t *testing.T) {
+	h := newSyncHarness(t)
+	h.have(ttID(1))
+	h.lists.put(testList, ttID(1), ttID(2), ttID(3))
+	h.store.Stall["CreateWatchlistItems"] = true
+	h.server.reconcileDeadline = 400 * time.Millisecond
+
+	body := h.link(testList, http.StatusOK)
+
+	result := body["result"].(map[string]any)
+	if result["complete"] != false || result["added"] != 0.0 || result["existing"] != 1.0 || result["total"] != 3.0 {
+		t.Errorf("result = %v; want incomplete, nothing added, the one item the user had", result)
+	}
+	if sync := body["imdb_sync"].(map[string]any); sync["last_status"] != "partial" || sync["last_error"] == "" {
+		t.Errorf("imdb_sync = %v; want partial with a reason", sync)
+	}
+	if got := len(h.items()); got != 1 {
+		t.Errorf("%d items stored although none was reported added", got-1)
+	}
+	stored := h.store.User(h.user.ID).IMDbSync
+	if stored == nil || stored.SourceID != testList || stored.LastStatus != models.IMDbStatusPartial || stored.LastSyncedAt != nil {
+		t.Errorf("stored link = %+v; want the list linked as partial although the deadline was hit", stored)
+	}
+
+	// With the database back, the next run adds what is missing.
+	delete(h.store.Stall, "CreateWatchlistItems")
+	h.server.reconcileDeadline = 0
+	h.rewind(2 * time.Minute)
+	again := h.link(testList, http.StatusOK)["result"].(map[string]any)
+	if again["complete"] != true || again["added"] != 2.0 || again["existing"] != 1.0 {
+		t.Errorf("second result = %v, want the two titles added", again)
+	}
+}
+
+// If the database does not even answer the first read, nothing was done and
+// nothing is linked.
+func TestLinkIMDbDatabaseStallBeforeAnythingIsReadLinksNothing(t *testing.T) {
+	h := newSyncHarness(t)
+	h.lists.put(testList, ttID(1), ttID(2))
+	h.store.Stall["ListWatchlistItems"] = true
+	h.server.reconcileDeadline = 400 * time.Millisecond
+
+	h.link(testList, http.StatusInternalServerError)
+
+	if link := h.store.User(h.user.ID).IMDbSync; link != nil {
+		t.Errorf("link = %+v; want none stored", link)
+	}
+	if got := len(h.items()); got != 0 {
+		t.Errorf("%d items stored by a request that failed", got)
+	}
+}
+
+// The deadline covers the request's very first read too, the one that loads
+// the user: a database that hangs there costs the request its deadline, not
+// however long the database takes.
+func TestLinkIMDbDatabaseStallOnTheFirstReadAnswersInTime(t *testing.T) {
+	h := newSyncHarness(t)
+	h.lists.put(testList, ttID(1))
+	h.store.Stall["GetUserByEmail"] = true
+	h.server.reconcileDeadline = 300 * time.Millisecond
+	started := time.Now()
+
+	h.link(testList, http.StatusInternalServerError)
+
+	if took := time.Since(started); took > 2*time.Second {
+		t.Errorf("the request took %v with a deadline of 300 ms", took)
+	}
+	if h.lists.fetches() != 0 || h.store.User(h.user.ID).IMDbAttemptAt != nil || h.store.User(h.user.ID).IMDbSync != nil {
+		t.Error("a request that could not load its user fetched, claimed or linked")
+	}
+}
+
+// IMDb failed after the first page: the titles read are added, nothing else.
+func TestLinkIMDbPartlyReadListIsLinkedAsPartial(t *testing.T) {
+	h := newSyncHarness(t)
+	list := imdb.List{SourceID: testList, Total: 300}
+	for _, id := range ttIDs(1, 3) {
+		list.Entries = append(list.Entries, imdb.Entry{IMDbID: id})
+	}
+	h.lists.lists[testList] = list
+	h.lists.errs[testList] = errors.New("imdb: status 502")
+
+	body := h.link(testList, http.StatusOK)
+
+	result := body["result"].(map[string]any)
+	if result["complete"] != false || result["added"] != 3.0 || result["total"] != 300.0 {
+		t.Errorf("result = %v", result)
+	}
+	sync := body["imdb_sync"].(map[string]any)
+	if sync["last_status"] != "partial" || sync["last_synced_at"] != nil {
+		t.Errorf("imdb_sync = %v; want partial and no last_synced_at", sync)
+	}
+	if len(h.items()) != 3 {
+		t.Errorf("%d items stored, want the 3 that were read", len(h.items()))
+	}
+}
+
+// The user imported their IMDb list by CSV before, and now links it. The link
+// request adds what is new and leaves everything they had exactly as it is:
+// it runs before the link is stored, so it must not hand anything to the
+// sync. The first daily sync of the stored link then adopts the untouched
+// imports that are on the list.
+func TestLinkIMDbLeavesImportsToTheFirstDailySync(t *testing.T) {
+	h := newSyncHarness(t)
+	add := func(title string, tmdbID int, imdbID, source, status string, tags ...string) {
+		h.store.AddItem(&models.WatchlistItem{
+			UserID: h.user.ID, Title: title, Type: models.WatchlistTypeMovie, TMDbID: tmdbID, IMDbID: imdbID,
+			Source: source, Status: status, Tags: tags, AddedAt: base, UpdatedAt: base,
+		})
+	}
+	add("Imported by CSV", 601, ttID(601), models.SourceCSV, models.WatchlistStatusPlanned)
+	add("Imported long ago", 602, ttID(602), "", models.WatchlistStatusPlanned)
+	add("Imported, then watched", 603, ttID(603), models.SourceCSV, models.WatchlistStatusFinished)
+	add("Imported, then tagged", 604, ttID(604), "", models.WatchlistStatusPlanned, "favourite")
+	add("Imported, not on the list", 605, ttID(605), models.SourceCSV, models.WatchlistStatusPlanned)
+	add("Added by hand", 606, "", "", models.WatchlistStatusPlanned)
+	h.lists.put(testWatchlist, ttID(601), ttID(602), ttID(603), ttID(604), ttID(606), ttID(607))
+	checkSources := func(when string, want map[string]string) {
+		t.Helper()
+		items := h.items()
+		for key, source := range want {
+			item := items[key]
+			if item == nil {
+				t.Fatalf("%s: no item %q in %v", when, key, items)
+			}
+			if item.Source != source {
+				t.Errorf("%s: %s: source = %q, want %q", when, key, item.Source, source)
+			}
+			if key != ttID(607) && !item.UpdatedAt.Equal(base) {
+				t.Errorf("%s: %s: updated_at moved; neither linking nor adoption is a user's edit", when, key)
+			}
+		}
+		if len(items) != len(want) {
+			t.Errorf("%s: watchlist has %d items, want %d", when, len(items), len(want))
+		}
+		if got := items["Added by hand"]; got.IMDbID != "" {
+			t.Errorf("%s: the hand-added item got an IMDb ID: %+v", when, got)
+		}
+	}
+
+	body := h.link(testWatchlist, http.StatusOK)
+
+	// No "adopted" in the result: the link request does not adopt.
+	wantResult := map[string]any{"total": 6.0, "added": 1.0, "existing": 5.0, "unmatched": 0.0, "complete": true}
+	if !reflect.DeepEqual(body["result"], wantResult) {
+		t.Errorf("result = %v, want %v", body["result"], wantResult)
+	}
+	checkSources("after linking", map[string]string{
+		ttID(601): models.SourceCSV, ttID(602): "", ttID(603): models.SourceCSV, ttID(604): "",
+		ttID(605): models.SourceCSV, "Added by hand": "",
+		ttID(607): models.SourceIMDb, // new
+	})
+	if got := h.store.Queries["AdoptWatchlistItem"]; got != 0 {
+		t.Errorf("the link request tried to adopt %d times", got)
+	}
+
+	// The next day's sync.
+	h.dailySync(time.Now().Add(24 * time.Hour))
+
+	checkSources("after the first sync", map[string]string{
+		ttID(601): models.SourceIMDb, ttID(602): models.SourceIMDb, // adopted
+		ttID(603): models.SourceCSV, ttID(604): "", // the user's: status, tags
+		ttID(605):       models.SourceCSV,  // not on the list
+		"Added by hand": "",                // never an import
+		ttID(607):       models.SourceIMDb, // the link added it
+	})
+}
+
+// A link that cannot be stored must leave nothing behind that only a stored
+// link justifies: no item has become the sync's.
+func TestLinkIMDbThatCannotBeStoredAdoptsNothing(t *testing.T) {
+	h := newSyncHarness(t)
+	h.lists.put(testList, ttID(1))
+	h.link(testList, http.StatusOK)
+	h.rewind(time.Hour)
+	h.store.AddItem(&models.WatchlistItem{
+		UserID: h.user.ID, Title: "Imported", Type: models.WatchlistTypeMovie, TMDbID: 601, IMDbID: ttID(601),
+		Source: models.SourceCSV, Status: models.WatchlistStatusPlanned, AddedAt: base, UpdatedAt: base,
+	})
+	// The user tries another list, which holds the import; storing fails.
+	h.lists.put(testWatchlist, ttID(601))
+	h.store.Fail["LinkIMDb"] = errors.New("mongo: write concern timeout")
+
+	h.link(testWatchlist, http.StatusInternalServerError)
+
+	if got := h.store.User(h.user.ID).IMDbSync; got == nil || got.SourceID != testList {
+		t.Fatalf("link after the failed attempt = %+v, want the first list still linked", got)
+	}
+	if got := h.items()[ttID(601)]; got.Source != models.SourceCSV {
+		t.Errorf("the import's source = %q after a link that was never stored; want it still the user's", got.Source)
+	}
+	// And the sync of the list that IS linked has no claim on it.
+	delete(h.store.Fail, "LinkIMDb")
+	for day := 1; day <= 3; day++ {
+		h.dailySync(time.Now().Add(time.Duration(day) * 24 * time.Hour))
+	}
+	if got := h.items()[ttID(601)]; got == nil || got.Source != models.SourceCSV || got.IMDbMissingSince != nil {
+		t.Errorf("the import after three daily syncs of the linked list = %+v; want it untouched", got)
+	}
+}
+
+// Linking only ever adds. Items the sync added before stay, whatever state
+// they are in, and so does everything from a list linked earlier.
+func TestLinkIMDbNeverRemoves(t *testing.T) {
+	h := newSyncHarness(t)
+	longAgo := time.Now().Add(-72 * time.Hour)
+	h.store.AddItem(&models.WatchlistItem{
+		UserID: h.user.ID, Title: "Gone from IMDb", Type: models.WatchlistTypeMovie, TMDbID: 50, IMDbID: ttID(50),
+		Status: models.WatchlistStatusPlanned, Source: models.SourceIMDb, IMDbMissingSince: &longAgo, AddedAt: base, UpdatedAt: base,
+	})
+	h.lists.put(testWatchlist, ttID(1), ttID(2))
+	h.lists.put(testList, ttID(2), ttID(3))
+
+	h.link(testWatchlist, http.StatusOK)
+	// The first link was made an hour ago.
+	user := h.store.User(h.user.ID)
+	firstLinkedAt := user.IMDbSync.LinkedAt.Add(-time.Hour)
+	user.IMDbSync.LinkedAt = firstLinkedAt
+	h.store.AddUser(user)
+	h.rewind(time.Hour)
+	body := h.link(testList, http.StatusOK)
+
+	items := h.items()
+	if len(items) != 4 {
+		t.Fatalf("watchlist has %d items, want all four kept: %v", len(items), items)
+	}
+	for id, item := range items {
+		if item.Source != models.SourceIMDb {
+			t.Errorf("%s: source = %q", id, item.Source)
+		}
+		if item.IMDbMissingSince != nil {
+			t.Errorf("%s still carries a missing mark from before the link", id)
+		}
+	}
+	sync := body["imdb_sync"].(map[string]any)
+	if sync["source_id"] != testList || sync["removed"] != 0.0 || sync["added"] != 1.0 {
+		t.Errorf("imdb_sync after re-linking = %v", sync)
+	}
+	if got := h.store.User(h.user.ID).IMDbSync.LinkedAt; !got.After(firstLinkedAt) {
+		t.Errorf("linked_at = %v, want a new time for a new list (was %v)", got, firstLinkedAt)
+	}
+}
+
+// markedLeftover is an item the sync added and a fetch of the list linked
+// before found missing three days ago.
+func (h *syncHarness) markedLeftover() {
+	longAgo := time.Now().Add(-72 * time.Hour)
+	h.store.AddItem(&models.WatchlistItem{
+		UserID: h.user.ID, Title: "Gone from IMDb", Type: models.WatchlistTypeMovie, TMDbID: 50, IMDbID: ttID(50),
+		Status: models.WatchlistStatusPlanned, Source: models.SourceIMDb, IMDbMissingSince: &longAgo, AddedAt: base, UpdatedAt: base,
+	})
+}
+
+// The strikes of the list linked before go first. A re-link whose own writes
+// then fail is still stored (the daily sync finishes it), but it must not
+// sit on top of those strikes.
+func TestRelinkIMDbClearsOldStrikesAlthoughItsWritesFail(t *testing.T) {
+	h := newSyncHarness(t)
+	h.lists.put(testWatchlist, ttID(1))
+	h.lists.put(testList, ttID(2))
+	h.link(testWatchlist, http.StatusOK)
+	h.markedLeftover()
+	h.rewind(time.Hour)
+	h.store.Fail["CreateWatchlistItems"] = errors.New("mongo: write concern timeout")
+
+	body := h.link(testList, http.StatusOK)
+
+	if sync := body["imdb_sync"].(map[string]any); sync["source_id"] != testList || sync["last_status"] != models.IMDbStatusPartial {
+		t.Errorf("imdb_sync = %v; want the new list linked as partial", sync)
+	}
+	if item := h.items()[ttID(50)]; item == nil || item.IMDbMissingSince != nil {
+		t.Errorf("leftover item = %+v; want it kept and its strike from the old list cleared", item)
+	}
+}
+
+// If the strikes cannot be cleared the link is not stored: the old one
+// stays, nothing is added, and the user tries again.
+func TestRelinkIMDbIsNotStoredWhenOldStrikesCannotBeCleared(t *testing.T) {
+	h := newSyncHarness(t)
+	h.lists.put(testWatchlist, ttID(1))
+	h.lists.put(testList, ttID(2))
+	h.link(testWatchlist, http.StatusOK)
+	h.markedLeftover()
+	h.rewind(time.Hour)
+	before := h.store.User(h.user.ID).IMDbSync
+	h.store.Fail["ClearIMDbMissingMarks"] = errors.New("mongo: connection reset")
+
+	h.link(testList, http.StatusInternalServerError)
+
+	after := h.store.User(h.user.ID).IMDbSync
+	if after == nil || !reflect.DeepEqual(*after, *before) {
+		t.Errorf("link = %+v, want the old one untouched: %+v", after, before)
+	}
+	items := h.items()
+	if len(items) != 2 || items[ttID(2)] != nil {
+		t.Errorf("watchlist = %v; want nothing added", items)
+	}
+	if item := items[ttID(50)]; item == nil || item.IMDbMissingSince == nil {
+		t.Errorf("leftover item = %+v; want it as it was", item)
+	}
+}
+
+// Linking the list that is linked already is a link of its own, with a
+// linked_at of its own. A worker run that began before it stamps its marks
+// with a time before it, so a mark of that run that lands after the re-link
+// is stale: the next sync clears it instead of counting it as a first strike.
+func TestLinkIMDbAgainToTheSameListStartsAFreshLink(t *testing.T) {
+	h := newSyncHarness(t)
+	h.lists.put(testList, ttID(1), ttID(2))
+	h.link(testList, http.StatusOK)
+	// That was two days ago.
+	user := h.store.User(h.user.ID)
+	first := user.IMDbSync.LinkedAt.Add(-48 * time.Hour)
+	user.IMDbSync.LinkedAt = first
+	h.store.AddUser(user)
+	h.rewind(48 * time.Hour)
+
+	// Yesterday's sync found the second title gone, and marked it.
+	h.lists.put(testList, ttID(1))
+	yesterday := time.Now().Add(-24 * time.Hour)
+	h.dailySync(yesterday)
+	gone := h.items()[ttID(2)]
+	if gone == nil || gone.IMDbMissingSince == nil {
+		t.Fatalf("item taken off the list = %+v, want it marked by the sync", gone)
+	}
+
+	beforeRelink := time.Now()
+	body := h.link(testList, http.StatusOK)
+
+	linkedAt := h.store.User(h.user.ID).IMDbSync.LinkedAt
+	if linkedAt.Before(beforeRelink.Truncate(time.Millisecond)) {
+		t.Fatalf("linked_at = %v after linking the same list again, want the time of that request (not before %v; it was %v)",
+			linkedAt, beforeRelink, first)
+	}
+	if result := body["result"].(map[string]any); result["added"] != 0.0 || result["existing"] != 1.0 {
+		t.Errorf("result = %v", result)
+	}
+	if item := h.items()[ttID(2)]; item == nil || item.IMDbMissingSince != nil {
+		t.Fatalf("after the re-link the item is %+v, want it kept and its mark cleared", item)
+	}
+
+	// A worker run that was under way since before the re-link gets to its
+	// mark only now. The mark carries the time that run began.
+	stamp := beforeRelink.Add(-2 * time.Minute)
+	if done, err := h.store.MarkWatchlistItemIMDbMissing(context.Background(), h.user.ID, gone.ID, stamp); err != nil || !done {
+		t.Fatalf("the late mark: done = %v, err = %v", done, err)
+	}
+
+	// The next day's sync: the title is still not on the list, and the mark
+	// is more than MinMissingAge old.
+	h.dailySync(time.Now().Add(24 * time.Hour))
+
+	item := h.items()[ttID(2)]
+	if item == nil {
+		t.Fatal("the item was removed on a strike made before the re-link")
+	}
+	if item.IMDbMissingSince != nil {
+		t.Errorf("the stale mark is still on the item: %v", item.IMDbMissingSince)
+	}
+	if state := h.store.User(h.user.ID).IMDbSync; state == nil || state.Removed != 0 || !state.LinkedAt.Equal(linkedAt) {
+		t.Errorf("link after the sync = %+v; want nothing removed and linked_at left at %v by the worker", state, linkedAt)
+	}
+
+	// A day later it is a first strike of this link, and the day after that
+	// the item goes: two strikes, both of them this link's.
+	h.dailySync(time.Now().Add(48 * time.Hour))
+	if item := h.items()[ttID(2)]; item == nil || item.IMDbMissingSince == nil {
+		t.Fatalf("after the second sync of the new link the item is %+v, want it marked", item)
+	}
+	h.dailySync(time.Now().Add(72 * time.Hour))
+	if item := h.items()[ttID(2)]; item != nil {
+		t.Errorf("after two strikes of the new link the item is still there: %+v", item)
+	}
+}
+
+func TestLinkIMDbUnavailableWithoutTMDb(t *testing.T) {
+	h := newSyncHarness(t)
+	h.build(nil)
+	h.lists.put(testList, ttID(1))
+
+	h.link(testList, http.StatusServiceUnavailable)
+
+	if h.lists.fetches() != 0 || h.store.User(h.user.ID).IMDbAttemptAt != nil {
+		t.Error("an API that cannot resolve titles still fetched the list or claimed the attempt")
+	}
+}
+
+// --- DELETE /api/me/imdb ---
+
+// Unlinking wipes the strikes: a sync that is running cannot remove on them
+// any more, and whatever is linked next does not inherit them.
+func TestUnlinkIMDbClearsEveryStrike(t *testing.T) {
+	h := newSyncHarness(t)
+	h.lists.put(testList, ttID(1))
+	h.link(testList, http.StatusOK)
+	h.rewind(time.Hour)
+	h.markedLeftover()
+
+	rec := h.request(http.MethodDelete, "/api/me/imdb", "")
+
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204", rec.Code)
+	}
+	items := h.items()
+	if len(items) != 2 {
+		t.Fatalf("watchlist = %v; want both items kept", items)
+	}
+	for id, item := range items {
+		if item.IMDbMissingSince != nil {
+			t.Errorf("%s still carries a missing mark after unlinking", id)
+		}
+	}
+	if h.store.User(h.user.ID).IMDbSync != nil {
+		t.Error("the link is still stored")
+	}
+}
+
+// If the strikes cannot be wiped the answer is 500 and the list is still
+// linked, so the user tries again instead of believing a half-done unlink.
+func TestUnlinkIMDbKeepsTheLinkWhenStrikesCannotBeCleared(t *testing.T) {
+	h := newSyncHarness(t)
+	h.lists.put(testList, ttID(1))
+	h.link(testList, http.StatusOK)
+	h.rewind(time.Hour)
+	h.markedLeftover()
+	h.store.Fail["ClearIMDbMissingMarks"] = errors.New("mongo: connection reset")
+
+	rec := h.request(http.MethodDelete, "/api/me/imdb", "")
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500", rec.Code)
+	}
+	if link := h.store.User(h.user.ID).IMDbSync; link == nil || link.SourceID != testList {
+		t.Errorf("link = %+v; want it left in place", link)
+	}
+	if item := h.items()[ttID(50)]; item == nil || item.IMDbMissingSince == nil {
+		t.Errorf("leftover item = %+v; want it as it was", item)
+	}
+
+	// The retry goes through.
+	delete(h.store.Fail, "ClearIMDbMissingMarks")
+	if rec := h.request(http.MethodDelete, "/api/me/imdb", ""); rec.Code != http.StatusNoContent {
+		t.Errorf("retry: status = %d, want 204", rec.Code)
+	}
+	if h.store.User(h.user.ID).IMDbSync != nil || h.items()[ttID(50)].IMDbMissingSince != nil {
+		t.Error("the retry did not unlink and clear the strike")
+	}
+}
+
+// A worker run that claimed its fetch of the user's list may adopt, mark and
+// remove for 45 seconds, on the strength of the link it read. For 60 seconds
+// from that claim the API refuses to unlink, and to link, so the link cannot
+// change under the run. The refusal changes nothing; afterwards unlinking
+// works as ever.
+func TestUnlinkIMDbWaitsOutAWorkerRun(t *testing.T) {
+	h := newSyncHarness(t)
+	h.lists.put(testList, ttID(1), ttID(2))
+	h.link(testList, http.StatusOK)
+	// That was two days ago.
+	user := h.store.User(h.user.ID)
+	user.IMDbSync.LinkedAt = user.IMDbSync.LinkedAt.Add(-48 * time.Hour)
+	h.store.AddUser(user)
+	h.rewind(48 * time.Hour)
+	// Half a minute ago the daily sync claimed its fetch. It found the
+	// second title gone and marked it.
+	h.lists.put(testList, ttID(1))
+	h.dailySync(time.Now().Add(-30 * time.Second))
+	linked := h.store.User(h.user.ID).IMDbSync
+	marked := h.items()[ttID(2)]
+	if linked == nil || marked == nil || marked.IMDbMissingSince == nil {
+		t.Fatalf("after the sync: link %+v, item %+v; want a link and a marked item", linked, marked)
+	}
+	fetches, writes := h.lists.fetches(), h.store.Writes
+
+	rec := h.request(http.MethodDelete, "/api/me/imdb", "")
+
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("unlinking 30 s after a worker's claim: status = %d, want 429; body: %s", rec.Code, rec.Body)
+	}
+	if wait, err := strconv.Atoi(rec.Header().Get("Retry-After")); err != nil || wait < 20 || wait > 30 {
+		t.Errorf("Retry-After = %q, want the 30 seconds or so that are left of the minute", rec.Header().Get("Retry-After"))
+	}
+	if got := h.store.User(h.user.ID).IMDbSync; got == nil || !reflect.DeepEqual(*got, *linked) {
+		t.Errorf("link after the refused unlink = %+v, want it untouched: %+v", got, linked)
+	}
+	if got := h.items()[ttID(2)]; got == nil || got.IMDbMissingSince == nil || !got.IMDbMissingSince.Equal(*marked.IMDbMissingSince) {
+		t.Errorf("item after the refused unlink = %+v, want its mark intact", got)
+	}
+	if h.store.Writes != writes {
+		t.Errorf("the refused unlink wrote %d times; want nothing changed", h.store.Writes-writes)
+	}
+	// Linking is refused for the same minute, without a fetch.
+	h.link(testWatchlist, http.StatusTooManyRequests)
+	if got := h.store.User(h.user.ID).IMDbSync; got == nil || got.SourceID != testList || h.lists.fetches() != fetches {
+		t.Errorf("after the refused link: link %+v, %d fetches; want the first list and no fetch", got, h.lists.fetches()-fetches)
+	}
+
+	// A minute after the claim.
+	h.rewind(31 * time.Second)
+	rec = h.request(http.MethodDelete, "/api/me/imdb", "")
+
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("unlinking 61 s after a worker's claim: status = %d, want 204; body: %s", rec.Code, rec.Body)
+	}
+	if h.store.User(h.user.ID).IMDbSync != nil {
+		t.Error("the link is still stored")
+	}
+	items := h.items()
+	if len(items) != 2 || items[ttID(2)] == nil || items[ttID(2)].IMDbMissingSince != nil {
+		t.Errorf("watchlist after unlinking = %v; want both items kept and the mark cleared", items)
+	}
+}
+
+// claimingStore lets a claim land between a handler's read of the user and
+// its write.
+type claimingStore struct {
+	*storetest.Store
+	beforeUnlink func()
+}
+
+func (s *claimingStore) UnlinkIMDb(ctx context.Context, userID primitive.ObjectID, now time.Time, lockout time.Duration) (bool, error) {
+	s.beforeUnlink()
+	return s.Store.UnlinkIMDb(ctx, userID, now, lockout)
+}
+
+// Reading that nothing was claimed lately and then unlinking is not enough:
+// the worker can claim in between. The unlink itself must refuse.
+func TestUnlinkIMDbIsRefusedByAClaimMadeWhileItRuns(t *testing.T) {
+	h := newSyncHarness(t)
+	h.lists.put(testList, ttID(1))
+	h.link(testList, http.StatusOK)
+	h.rewind(48 * time.Hour)
+	h.server.db = &claimingStore{Store: h.store, beforeUnlink: func() {
+		// The daily sync gets to this user.
+		claimed, err := h.store.ClaimIMDbAttempt(context.Background(), h.user.ID, time.Now(), worker.IMDbSyncMinGap)
+		if err != nil || !claimed {
+			t.Fatalf("the worker's claim: %v, %v", claimed, err)
+		}
+	}}
+
+	rec := h.request(http.MethodDelete, "/api/me/imdb", "")
+
+	if rec.Code != http.StatusTooManyRequests || rec.Header().Get("Retry-After") != "60" {
+		t.Fatalf("status = %d, Retry-After = %q; want 429 and 60; body: %s", rec.Code, rec.Header().Get("Retry-After"), rec.Body)
+	}
+	if link := h.store.User(h.user.ID).IMDbSync; link == nil || link.SourceID != testList {
+		t.Errorf("link = %+v; want it left in place for the run that claimed", link)
+	}
+}
+
+// The API's lockout is the one the worker's lease is measured against.
+func TestTheAPILocksTheLinkForLongerThanAWorkerRunMayAct(t *testing.T) {
+	if imdbLinkMinGap != imdbsync.LinkLockout || imdbLinkMinGap < imdbsync.OwnershipLease+15*time.Second {
+		t.Errorf("the API refuses to link and unlink for %v after a claim; want imdbsync.LinkLockout (%v), 15 s more than the lease of %v",
+			imdbLinkMinGap, imdbsync.LinkLockout, imdbsync.OwnershipLease)
+	}
+}
+
+func TestUnlinkIMDbKeepsTheItems(t *testing.T) {
+	h := newSyncHarness(t)
+	h.lists.put(testList, ttID(1), ttID(2))
+	h.link(testList, http.StatusOK)
+	h.rewind(time.Hour)
+
+	rec := h.request(http.MethodDelete, "/api/me/imdb", "")
+
+	if rec.Code != http.StatusNoContent || rec.Body.Len() != 0 {
+		t.Fatalf("status = %d, body = %q; want 204 and no body", rec.Code, rec.Body)
+	}
+	if h.store.User(h.user.ID).IMDbSync != nil {
+		t.Error("the link is still stored")
+	}
+	if len(h.items()) != 2 {
+		t.Errorf("unlinking removed items: %v", h.items())
+	}
+	me := h.json(h.request(http.MethodGet, "/api/me", ""), http.StatusOK)
+	if _, linked := me["imdb_sync"]; linked {
+		t.Errorf("/api/me still shows imdb_sync: %v", me["imdb_sync"])
+	}
+
+	// Unlinking again is not an error.
+	if rec := h.request(http.MethodDelete, "/api/me/imdb", ""); rec.Code != http.StatusNoContent {
+		t.Errorf("second unlink: status = %d", rec.Code)
+	}
+}

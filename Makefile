@@ -38,14 +38,19 @@ build:
 run:
 	@go run cmd/api/main.go
 
-# Run the background worker once: refresh stored availability, then the
-# digest (a dry run unless DIGEST_MODE=send). See cmd/worker/README.md.
+# Run the background worker once: refresh stored availability, sync linked
+# IMDb lists, then the digest (a dry run unless DIGEST_MODE=send). See
+# cmd/worker/README.md.
 worker:
 	@go run ./cmd/worker
 
 # Refresh stored availability only
 worker-refresh:
 	@go run ./cmd/worker -tasks refresh
+
+# IMDb sync only, as a dry run: logs what each sync would do, writes nothing
+worker-imdb-dry-run:
+	@IMDB_SYNC_MODE=dry-run go run ./cmd/worker -tasks imdb
 
 # Digest only; logs what would be sent unless DIGEST_MODE=send
 worker-digest:
@@ -180,4 +185,4 @@ release:
 	$(MAKE) TAG=$(RELEASE_TAG) deploy
 	@echo "[release] Deployed image: $(IMAGE_URI):$(RELEASE_TAG)"
 
-.PHONY: all build run worker worker-refresh worker-digest swagger test clean watch docker-run docker-down itest docker-auth docker-build docker-push docker-build-push run-container deploy show-image release
+.PHONY: all build run worker worker-refresh worker-imdb-dry-run worker-digest swagger test clean watch docker-run docker-down itest docker-auth docker-build docker-push docker-build-push run-container deploy show-image release
