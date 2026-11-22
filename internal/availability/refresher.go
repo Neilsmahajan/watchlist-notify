@@ -52,21 +52,38 @@ type Refresher struct {
 	logger      *slog.Logger
 	now         func() time.Time
 	concurrency int
+	minAge      time.Duration
+}
+
+// Option configures a Refresher.
+type Option func(*Refresher)
+
+// WithMinAge makes RefreshAll leave alone titles that were checked less than
+// d ago in every region. It lets the job run more often than availability
+// needs refreshing (the digest wants an hourly look at who is due; provider
+// data changes daily at most) and makes re-running after a partial failure
+// cheap. Zero, the default, refreshes everything every time.
+func WithMinAge(d time.Duration) Option {
+	return func(r *Refresher) { r.minAge = d }
 }
 
 // NewRefresher returns a Refresher. fetcher may be nil when no TMDb
 // credentials are configured; every refresh then fails softly.
-func NewRefresher(fetcher Fetcher, store Store, logger *slog.Logger) *Refresher {
+func NewRefresher(fetcher Fetcher, store Store, logger *slog.Logger, opts ...Option) *Refresher {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Refresher{
+	r := &Refresher{
 		fetcher:     fetcher,
 		store:       store,
 		logger:      logger,
 		now:         time.Now,
 		concurrency: DefaultConcurrency,
 	}
+	for _, opt := range opts {
+		opt(r)
+	}
+	return r
 }
 
 // Result describes what refreshing one title did.
@@ -278,6 +295,7 @@ func TrackedRegions(userRegions []string, defaultRegion string) []string {
 // Summary is the outcome of a full refresh run.
 type Summary struct {
 	Titles     int // distinct titles on any watchlist
+	Fresh      int // left alone: checked more recently than the minimum age
 	Refreshed  int // fetched and reconciled
 	Baselines  int // region snapshots stored for the first time
 	Changed    int // titles with at least one new event
@@ -297,8 +315,9 @@ type Summary struct {
 }
 
 // RefreshAll refreshes every given title for every region with bounded
-// concurrency. Failures are counted and logged, never fatal: one bad title
-// must not stop the run.
+// concurrency, skipping titles that are still fresh (see WithMinAge).
+// Failures are counted and logged, never fatal: one bad title must not stop
+// the run.
 func (r *Refresher) RefreshAll(ctx context.Context, refs []models.TitleRef, regions []string) (Summary, error) {
 	start := r.now()
 	sum := Summary{
@@ -319,11 +338,23 @@ func (r *Refresher) RefreshAll(ctx context.Context, refs []models.TitleRef, regi
 		return sum, fmt.Errorf("load stored titles: %w", err)
 	}
 
+	due := refs
+	if r.minAge > 0 {
+		cutoff := start.Add(-r.minAge)
+		due = make([]models.TitleRef, 0, len(refs))
+		for _, ref := range refs {
+			if !checkedSince(stored[ref.Key()], regions, cutoff) {
+				due = append(due, ref)
+			}
+		}
+		sum.Fresh = len(refs) - len(due)
+	}
+
 	var (
 		mu        sync.Mutex
 		attempted int
 	)
-	forEachLimit(ctx, r.concurrency, refs, func(ref models.TitleRef) {
+	forEachLimit(ctx, r.concurrency, due, func(ref models.TitleRef) {
 		res, err := r.Refresh(ctx, ref, stored[ref.Key()], regions)
 
 		mu.Lock()
@@ -350,9 +381,27 @@ func (r *Refresher) RefreshAll(ctx context.Context, refs []models.TitleRef, regi
 			tallyMapping(&sum, snap)
 		}
 	})
-	sum.Skipped = len(refs) - attempted
+	sum.Skipped = len(due) - attempted
 	sum.Duration = r.now().Sub(start)
 	return sum, nil
+}
+
+// checkedSince reports whether TMDb was asked about the title after cutoff
+// for every region: it has a snapshot that recent for each, or was found
+// missing that recently.
+func checkedSince(title *models.Title, regions []string, cutoff time.Time) bool {
+	if title == nil {
+		return false
+	}
+	if title.NotFoundAt != nil {
+		return title.NotFoundAt.After(cutoff)
+	}
+	for _, region := range regions {
+		if snap, ok := title.Snapshot(region); !ok || !snap.FetchedAt.After(cutoff) {
+			return false
+		}
+	}
+	return true
 }
 
 func tallyMapping(sum *Summary, snap models.RegionSnapshot) {

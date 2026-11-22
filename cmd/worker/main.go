@@ -12,11 +12,13 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 
 	_ "github.com/joho/godotenv/autoload"
 	"github.com/neilsmahajan/watchlist-notify/internal/availability"
@@ -78,12 +80,36 @@ func newRefreshTask(db database.Service, logger *slog.Logger) (worker.Task, erro
 	if err != nil {
 		return nil, err
 	}
+	minAge, err := refreshMinAge(os.Getenv("REFRESH_MIN_AGE"))
+	if err != nil {
+		return nil, err
+	}
+	logger.Info("refresh configured", "min_age", minAge.String())
 	return &worker.RefreshTask{
 		Store:         db,
-		Refresher:     availability.NewRefresher(client, db, logger),
+		Refresher:     availability.NewRefresher(client, db, logger, availability.WithMinAge(minAge)),
 		DefaultRegion: database.DefaultRegion(),
 		Logger:        logger,
 	}, nil
+}
+
+// defaultRefreshMinAge keeps a title from being fetched twice in one day when
+// the job is triggered more often than daily, while still letting a daily
+// trigger that drifts by a few hours refresh everything.
+const defaultRefreshMinAge = 20 * time.Hour
+
+// refreshMinAge parses REFRESH_MIN_AGE, a Go duration such as "20h". "0"
+// refreshes every title on every run.
+func refreshMinAge(value string) (time.Duration, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return defaultRefreshMinAge, nil
+	}
+	d, err := time.ParseDuration(value)
+	if err != nil || d < 0 {
+		return 0, fmt.Errorf("REFRESH_MIN_AGE %q is not a duration such as 20h or 0", value)
+	}
+	return d, nil
 }
 
 func newDigestTask(db database.Service, logger *slog.Logger) (worker.Task, error) {

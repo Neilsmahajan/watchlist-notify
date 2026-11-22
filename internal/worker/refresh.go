@@ -56,6 +56,7 @@ func (t *RefreshTask) Run(ctx context.Context) error {
 	logger.Info("refresh summary",
 		"titles", sum.Titles,
 		"regions", regions,
+		"fresh", sum.Fresh,
 		"refreshed", sum.Refreshed,
 		"baselines", sum.Baselines,
 		"changed", sum.Changed,
@@ -76,7 +77,7 @@ func (t *RefreshTask) Run(ctx context.Context) error {
 		logger.Info("refresh: streaming providers without a service code", "providers", sum.Unmapped)
 	}
 
-	if sum.Titles > 0 && sum.Refreshed+sum.NotFound == 0 {
+	if due := sum.Titles - sum.Fresh; due > 0 && sum.Refreshed+sum.NotFound == 0 {
 		if err := ctx.Err(); err != nil {
 			return fmt.Errorf("refresh stopped before any title was refreshed: %w", err)
 		}

@@ -51,6 +51,17 @@ func (f *fakeFetcher) GetTitle(ctx context.Context, mediaType string, id int) (*
 	return nil, &tmdb.APIError{Op: "title", StatusCode: 404}
 }
 
+// total is how many title lookups the fake has served.
+func (f *fakeFetcher) total() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	n := 0
+	for _, c := range f.calls {
+		n += c
+	}
+	return n
+}
+
 // streams makes ref answer with the given providers streaming it in the US.
 func (f *fakeFetcher) streams(ref models.TitleRef, providers ...tmdb.Provider) {
 	f.mu.Lock()
@@ -430,6 +441,52 @@ func TestRefreshAllCountsAndSurvivesFailures(t *testing.T) {
 	}
 	if sum.Refreshed != 2 || sum.Baselines != 0 || sum.Changed != 1 || sum.Events != 1 || sum.Failed != 1 {
 		t.Errorf("second run summary = %+v", sum)
+	}
+}
+
+func TestRefreshAllSkipsFreshTitles(t *testing.T) {
+	h := newHarness(t)
+	h.r = NewRefresher(h.fetcher, h.store, nil, WithMinAge(20*time.Hour))
+	h.r.now = func() time.Time { return h.clock }
+	gone := models.TitleRef{MediaType: models.MediaTypeMovie, TMDbID: 2}
+	refs := []models.TitleRef{matrix, thrones, gone}
+	h.fetcher.streams(matrix, netflix)
+	h.fetcher.streams(thrones, netflix)
+
+	run := func() Summary {
+		t.Helper()
+		sum, err := h.r.RefreshAll(context.Background(), refs, []string{"US"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return sum
+	}
+
+	if sum := run(); sum.Fresh != 0 || sum.Refreshed != 2 || sum.NotFound != 1 {
+		t.Fatalf("first run summary = %+v, want everything fetched", sum)
+	}
+
+	// An hour later nothing is due, not even the title TMDb does not have.
+	h.clock = h.clock.Add(time.Hour)
+	h.fetcher.streams(matrix, netflix, hulu)
+	calls := h.fetcher.total()
+	if sum := run(); sum.Fresh != 3 || sum.Refreshed != 0 || sum.NotFound != 0 || sum.Skipped != 0 {
+		t.Errorf("run after an hour = %+v, want all three left alone", sum)
+	}
+	if h.fetcher.total() != calls {
+		t.Errorf("fresh titles cost %d TMDb calls", h.fetcher.total()-calls)
+	}
+
+	// A title checked for one region only is due once another is tracked.
+	sum, err := h.r.RefreshAll(context.Background(), []models.TitleRef{thrones}, []string{"GB", "US"})
+	if err != nil || sum.Fresh != 0 || sum.Refreshed != 1 {
+		t.Errorf("run with a new region = %+v, %v; want the title refreshed", sum, err)
+	}
+
+	// The next day everything is due again and the change is picked up.
+	h.clock = h.clock.Add(23 * time.Hour)
+	if sum := run(); sum.Fresh != 0 || sum.Refreshed != 2 || sum.NotFound != 1 || sum.Events != 1 {
+		t.Errorf("run a day later = %+v, want everything fetched and one event", sum)
 	}
 }
 

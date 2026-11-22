@@ -167,6 +167,8 @@ func TestRefreshTaskFailsOnlyWhenNothingWorked(t *testing.T) {
 		{"some failed", availability.Summary{Refreshed: 1, Failed: 1}, false},
 		{"only tombstones", availability.Summary{NotFound: 2}, false},
 		{"everything failed", availability.Summary{Failed: 2}, true},
+		{"nothing was due", availability.Summary{Fresh: 2}, false},
+		{"the one due title failed", availability.Summary{Fresh: 1, Failed: 1}, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
