@@ -80,6 +80,15 @@ type Store interface {
 	// CompareAndSwapDigestSchedule moves a user's digest schedule from one
 	// state to another and reports whether the stored state still matched.
 	CompareAndSwapDigestSchedule(ctx context.Context, userID primitive.ObjectID, from, to models.DigestSchedule, requireEnabled bool) (bool, error)
+
+	// ListDeliveredEventIDs returns which of eventIDs the user already has a
+	// delivery record for.
+	ListDeliveredEventIDs(ctx context.Context, userID primitive.ObjectID, eventIDs []string) (map[string]bool, error)
+	// InsertDigestDeliveries adds delivery records, leaving existing ones as
+	// they are, and reports how many were new.
+	InsertDigestDeliveries(ctx context.Context, deliveries []models.DigestDelivery) (int, error)
+	// DeleteDigestDeliveries removes the user's records for eventIDs.
+	DeleteDigestDeliveries(ctx context.Context, userID primitive.ObjectID, eventIDs []string) (int, error)
 }
 
 // Config controls a Runner.
@@ -196,11 +205,11 @@ type Summary struct {
 	Sent int
 	// ClaimLost: another run claimed the user first; that run sends.
 	ClaimLost int
-	// SendFailed: the send definitely failed; the claim was released so the
-	// next run retries.
+	// SendFailed: the send definitely failed; the claim and the delivery
+	// records were undone so the next run retries.
 	SendFailed int
-	// SendUncertain: the send may or may not have gone out; the claim is
-	// kept so the user is not emailed twice.
+	// SendUncertain: the send may or may not have gone out; the claim and the
+	// delivery records are kept so the user is not emailed twice.
 	SendUncertain int
 	// Errors: the user's data could not be loaded or rendered.
 	Errors int
@@ -355,26 +364,88 @@ func (r *Runner) process(ctx context.Context, user *models.User, now time.Time) 
 		return outcomeClaimLost, len(entries), nil
 	}
 
+	// Record what this digest announces before sending it. The next digest
+	// looks back past this one (see DeliveryOverlap) and relies on these
+	// records to leave out what was already said. Written first, a crash
+	// between the two steps costs the user these titles; written after, it
+	// would send them the same titles twice.
+	eventIDs := eventIDsOf(entries)
+	if _, err := r.store.InsertDigestDeliveries(ctx, deliveriesFor(user.ID, eventIDs, sentAt)); err != nil {
+		// Sending now would leave no record of it. Undo the claim instead; the
+		// next run starts this user again.
+		removed, released := r.release(ctx, user.ID, claimed, unclaimed, eventIDs)
+		return 0, 0, fmt.Errorf("record digest deliveries (records removed: %t, claim released: %t): %w", removed, released, err)
+	}
+
 	if err := r.gate.send(user, email); err != nil {
 		if !notifications.IsDefiniteFailure(err) {
-			// The request may have reached Postmark. Keeping the claim means
-			// this user might miss one digest; releasing it could send the
-			// same digest twice. Missing one is the lesser harm.
+			// The request may have reached Postmark. Keeping the claim and the
+			// delivery records means this user might miss one digest; undoing
+			// them could send the same digest twice. Missing one is the lesser
+			// harm.
 			r.logger.Error("digest: send outcome unknown, claim kept",
 				"user_id", user.ID.Hex(), "error", err.Error())
 			return outcomeSendUncertain, len(entries), nil
 		}
-		// Nothing went out. Put the schedule back so the next run retries.
-		// A detached context: the release should still happen if the run is
-		// being cancelled.
-		releaseCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
-		defer cancel()
-		released, releaseErr := r.store.CompareAndSwapDigestSchedule(releaseCtx, user.ID, claimed, unclaimed, false)
+		// Nothing went out, so nothing was delivered and the user is still due.
+		removed, released := r.release(ctx, user.ID, claimed, unclaimed, eventIDs)
 		r.logger.Error("digest: send failed",
-			"user_id", user.ID.Hex(), "error", err.Error(), "claim_released", released && releaseErr == nil)
+			"user_id", user.ID.Hex(), "error", err.Error(),
+			"deliveries_removed", removed, "claim_released", released)
 		return outcomeSendFailed, len(entries), nil
 	}
 	return outcomeSent, len(entries), nil
+}
+
+// release undoes a claim whose email is known not to have gone out: it removes
+// the delivery records and then puts the schedule back, so the next run finds
+// the user due and the events unannounced.
+//
+// The order matters. While the claim is held no other run writes records for
+// this user. Once it is released another run may claim the user and record
+// the same events; deleting after that would erase the other run's records
+// and let a third digest repeat its titles.
+//
+// Both steps use a detached context: they should still happen when the run is
+// being cancelled.
+func (r *Runner) release(ctx context.Context, userID primitive.ObjectID, claimed, unclaimed models.DigestSchedule, eventIDs []string) (removed, released bool) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer cancel()
+
+	_, err := r.store.DeleteDigestDeliveries(ctx, userID, eventIDs)
+	removed = err == nil
+	if err != nil {
+		// The records stay, so these events will read as delivered although
+		// they were not. Still release the claim: the user should not also
+		// wait a whole interval for whatever arrives next.
+		r.logger.Error("digest: delivery records not removed after a failed send; these titles will not be announced",
+			"user_id", userID.Hex(), "events", len(eventIDs), "error", err.Error())
+	}
+
+	won, err := r.store.CompareAndSwapDigestSchedule(ctx, userID, claimed, unclaimed, false)
+	return removed, won && err == nil
+}
+
+// eventIDsOf returns the events a set of entries announces.
+func eventIDsOf(entries []Entry) []string {
+	var ids []string
+	for _, entry := range entries {
+		ids = append(ids, entry.EventIDs...)
+	}
+	return ids
+}
+
+func deliveriesFor(userID primitive.ObjectID, eventIDs []string, sentAt time.Time) []models.DigestDelivery {
+	deliveries := make([]models.DigestDelivery, len(eventIDs))
+	for i, id := range eventIDs {
+		deliveries[i] = models.DigestDelivery{
+			UserID:    userID,
+			EventID:   id,
+			SentAt:    sentAt,
+			ExpiresAt: sentAt.Add(models.DeliveryRetention),
+		}
+	}
+	return deliveries
 }
 
 // entries loads what Select needs for one user and applies it.
@@ -408,7 +479,20 @@ func (r *Runner) entries(ctx context.Context, user *models.User, now time.Time) 
 	if err != nil {
 		return nil, fmt.Errorf("load availability events: %w", err)
 	}
-	if len(events) == 0 {
+	var arrivals []string
+	for _, ev := range events {
+		if ev.Change == models.ChangeAdded {
+			arrivals = append(arrivals, ev.ID)
+		}
+	}
+	if len(arrivals) == 0 {
+		return nil, nil
+	}
+	delivered, err := r.store.ListDeliveredEventIDs(ctx, user.ID, arrivals)
+	if err != nil {
+		return nil, fmt.Errorf("load digest deliveries: %w", err)
+	}
+	if len(delivered) == len(arrivals) {
 		return nil, nil
 	}
 	titles, err := r.store.GetTitles(ctx, keys, []string{region})
@@ -422,6 +506,7 @@ func (r *Runner) entries(ctx context.Context, user *models.User, now time.Time) 
 		Items:       items,
 		Titles:      titles,
 		Events:      events,
+		Delivered:   delivered,
 		WindowStart: windowStart,
 		Now:         now,
 	}), nil

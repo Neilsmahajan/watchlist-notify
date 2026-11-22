@@ -67,6 +67,12 @@ func WithMinAge(d time.Duration) Option {
 	return func(r *Refresher) { r.minAge = d }
 }
 
+// WithClock replaces the refresher's source of the current time. Tests use it
+// to place refreshes on a timeline.
+func WithClock(now func() time.Time) Option {
+	return func(r *Refresher) { r.now = now }
+}
+
 // NewRefresher returns a Refresher. fetcher may be nil when no TMDb
 // credentials are configured; every refresh then fails softly.
 func NewRefresher(fetcher Fetcher, store Store, logger *slog.Logger, opts ...Option) *Refresher {
@@ -109,7 +115,10 @@ type Result struct {
 //  1. Events are inserted first, under IDs derived from the version of the
 //     snapshot they were diffed against. A crash after this step loses
 //     nothing: the snapshot is unchanged, the next run diffs against the same
-//     version, and re-inserting the same IDs is a no-op.
+//     version, and re-inserting the same IDs is a no-op. The event keeps the
+//     detection time of the first attempt; the digest re-reads a stretch
+//     before its last send (digest.DeliveryOverlap) so that it still finds
+//     an event that only became true a run later.
 //  2. The snapshot is replaced with a compare-and-set on that version. Of two
 //     overlapping runs only one wins; the loser's write is dropped, and its
 //     events carry the same IDs as the winner's.

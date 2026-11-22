@@ -2,11 +2,14 @@ package database
 
 import (
 	"context"
+	"fmt"
 	"reflect"
 	"testing"
 	"time"
 
 	"github.com/neilsmahajan/watchlist-notify/internal/models"
+	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/bson/primitive"
 )
 
 // These tests run against the MongoDB container TestMain starts. They pin the
@@ -217,6 +220,104 @@ func TestAvailabilityEventsAreDeduplicated(t *testing.T) {
 	}
 	if none, err := srv.ListAvailabilityEvents(ctx, nil, "US", now.Add(-24*time.Hour)); err != nil || len(none) != 0 {
 		t.Errorf("events for no titles = %v, err = %v", ids(none), err)
+	}
+}
+
+func TestDigestDeliveries(t *testing.T) {
+	srv := New()
+	ctx := context.Background()
+	alice, bob := primitive.NewObjectID(), primitive.NewObjectID()
+	// Recent, so the TTL monitor leaves them alone while the test runs.
+	sentAt := time.Now().UTC().Truncate(time.Millisecond)
+	delivery := func(user primitive.ObjectID, eventID string) models.DigestDelivery {
+		return models.DigestDelivery{UserID: user, EventID: eventID, SentAt: sentAt, ExpiresAt: sentAt.Add(models.DeliveryRetention)}
+	}
+	delivered := func(user primitive.ObjectID, eventIDs ...string) map[string]bool {
+		t.Helper()
+		got, err := srv.ListDeliveredEventIDs(ctx, user, eventIDs)
+		if err != nil {
+			t.Fatalf("ListDeliveredEventIDs: %v", err)
+		}
+		return got
+	}
+
+	if n, err := srv.InsertDigestDeliveries(ctx, nil); err != nil || n != 0 {
+		t.Errorf("inserting nothing: n = %d, err = %v", n, err)
+	}
+	if got := delivered(alice, "it-ev-a", "it-ev-b"); len(got) != 0 {
+		t.Errorf("delivered before anything was recorded = %v", got)
+	}
+
+	if n, err := srv.InsertDigestDeliveries(ctx, []models.DigestDelivery{delivery(alice, "it-ev-a"), delivery(alice, "it-ev-b")}); err != nil || n != 2 {
+		t.Fatalf("first insert: n = %d, err = %v; want 2", n, err)
+	}
+	// One record per user and event: a repeat is skipped, and the new records
+	// around it still land, including the same event for another user.
+	batch := []models.DigestDelivery{delivery(alice, "it-ev-a"), delivery(alice, "it-ev-c"), delivery(bob, "it-ev-a")}
+	if n, err := srv.InsertDigestDeliveries(ctx, batch); err != nil || n != 2 {
+		t.Fatalf("overlapping insert: n = %d, err = %v; want 2 new", n, err)
+	}
+
+	if got, want := delivered(alice, "it-ev-a", "it-ev-b", "it-ev-c", "it-ev-never"), (map[string]bool{"it-ev-a": true, "it-ev-b": true, "it-ev-c": true}); !reflect.DeepEqual(got, want) {
+		t.Errorf("alice's deliveries = %v, want %v", got, want)
+	}
+	if got, want := delivered(alice, "it-ev-b"), (map[string]bool{"it-ev-b": true}); !reflect.DeepEqual(got, want) {
+		t.Errorf("deliveries are not limited to the events asked about: %v, want %v", got, want)
+	}
+	if got, want := delivered(bob, "it-ev-a", "it-ev-b"), (map[string]bool{"it-ev-a": true}); !reflect.DeepEqual(got, want) {
+		t.Errorf("bob's deliveries = %v, want %v", got, want)
+	}
+	if got := delivered(alice); len(got) != 0 {
+		t.Errorf("deliveries for no events = %v", got)
+	}
+
+	// Undoing a failed send removes that user's records for those events only.
+	if n, err := srv.DeleteDigestDeliveries(ctx, alice, []string{"it-ev-a", "it-ev-c", "it-ev-never"}); err != nil || n != 2 {
+		t.Fatalf("delete: n = %d, err = %v; want 2", n, err)
+	}
+	if n, err := srv.DeleteDigestDeliveries(ctx, alice, nil); err != nil || n != 0 {
+		t.Errorf("deleting nothing: n = %d, err = %v", n, err)
+	}
+	if got, want := delivered(alice, "it-ev-a", "it-ev-b", "it-ev-c"), (map[string]bool{"it-ev-b": true}); !reflect.DeepEqual(got, want) {
+		t.Errorf("alice's deliveries after the delete = %v, want %v", got, want)
+	}
+	if got, want := delivered(bob, "it-ev-a"), (map[string]bool{"it-ev-a": true}); !reflect.DeepEqual(got, want) {
+		t.Errorf("deleting alice's records touched bob's: %v", got)
+	}
+	// Removed records can be written again, as the retry after a failed send does.
+	if n, err := srv.InsertDigestDeliveries(ctx, []models.DigestDelivery{delivery(alice, "it-ev-a")}); err != nil || n != 1 {
+		t.Errorf("re-insert after delete: n = %d, err = %v; want 1", n, err)
+	}
+}
+
+// Both collections that grow without bound expire through a TTL index on an
+// absolute expires_at.
+func TestExpiringCollectionsHaveATTLIndex(t *testing.T) {
+	srv := New().(*service)
+	ctx := context.Background()
+	for _, name := range []string{collEvents, collDelivered} {
+		cursor, err := srv.db.Database(databaseName).Collection(name).Indexes().List(ctx)
+		if err != nil {
+			t.Fatalf("%s: list indexes: %v", name, err)
+		}
+		var indexes []bson.M
+		if err := cursor.All(ctx, &indexes); err != nil {
+			t.Fatalf("%s: read indexes: %v", name, err)
+		}
+		found := false
+		for _, index := range indexes {
+			if index["name"] != "expires_at_ttl" {
+				continue
+			}
+			found = true
+			// The numeric type MongoDB reports is not what matters here.
+			if got := fmt.Sprint(index["expireAfterSeconds"]); got != "0" {
+				t.Errorf("%s: expireAfterSeconds = %s, want 0", name, got)
+			}
+		}
+		if !found {
+			t.Errorf("%s has no expires_at_ttl index: %v", name, indexes)
+		}
 	}
 }
 

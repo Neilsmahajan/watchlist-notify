@@ -42,6 +42,10 @@ type Service interface {
 
 	InsertAvailabilityEvents(ctx context.Context, events []models.AvailabilityEvent) (int, error)
 	ListAvailabilityEvents(ctx context.Context, titleKeys []string, region string, since time.Time) ([]models.AvailabilityEvent, error)
+
+	InsertDigestDeliveries(ctx context.Context, deliveries []models.DigestDelivery) (int, error)
+	ListDeliveredEventIDs(ctx context.Context, userID primitive.ObjectID, eventIDs []string) (map[string]bool, error)
+	DeleteDigestDeliveries(ctx context.Context, userID primitive.ObjectID, eventIDs []string) (int, error)
 }
 
 type service struct {
@@ -80,6 +84,7 @@ const (
 	collWatchlist = "watchlist_items"
 	collTitles    = "titles"
 	collEvents    = "availability_events"
+	collDelivered = "digest_deliveries"
 )
 
 func New() Service {
@@ -173,6 +178,24 @@ func ensureIndexes(ctx context.Context, db *mongo.Database) error {
 		},
 		{
 			// TTL: MongoDB deletes each event once its expires_at has passed.
+			Keys:    bson.D{{Key: "expires_at", Value: 1}},
+			Options: options.Index().SetExpireAfterSeconds(0).SetName("expires_at_ttl"),
+		},
+	})
+	if err != nil {
+		return err
+	}
+
+	// Digest delivery log: which events each user has already been told about.
+	deliveries := db.Collection(collDelivered)
+	_, err = deliveries.Indexes().CreateMany(ctx, []mongo.IndexModel{
+		{
+			// One record per user and event. It answers "which of these events
+			// did this user already get" and makes recording idempotent.
+			Keys:    bson.D{{Key: "user_id", Value: 1}, {Key: "event_id", Value: 1}},
+			Options: options.Index().SetUnique(true).SetName("uniq_user_event"),
+		},
+		{
 			Keys:    bson.D{{Key: "expires_at", Value: 1}},
 			Options: options.Index().SetExpireAfterSeconds(0).SetName("expires_at_ttl"),
 		},

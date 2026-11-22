@@ -25,6 +25,9 @@ type Entry struct {
 	// ServiceCodes are the user's services that newly stream the title,
 	// ordered by display name.
 	ServiceCodes []string
+	// EventIDs are the availability events the entry announces, sorted. Once
+	// the digest is sent they are what the delivery log records.
+	EventIDs []string
 }
 
 // ServiceNames returns the display names of the entry's services.
@@ -48,6 +51,9 @@ type Selection struct {
 	// back ReappearanceQuietPeriod before WindowStart so that reappearances
 	// can be recognised; order does not matter.
 	Events []models.AvailabilityEvent
+	// Delivered holds the IDs of events this user was already sent. The window
+	// overlaps the previous digest's, so this is what stops a repeat.
+	Delivered map[string]bool
 	// WindowStart and Now bound the detections this digest covers:
 	// WindowStart < detected_at <= Now.
 	WindowStart time.Time
@@ -59,6 +65,7 @@ type Selection struct {
 //
 //   - is in the user's region and for a service the user has active,
 //   - was detected inside the window,
+//   - has not been sent to this user before,
 //   - was detected after the user put the title on their list (a title added
 //     while it was already streaming is not news),
 //   - is still true: the stored snapshot shows the title on that service now,
@@ -112,26 +119,31 @@ func Select(sel Selection) []Entry {
 		}
 
 		codes := make(map[string]bool)
+		var eventIDs []string
 		for _, ev := range added[ref.Key()] {
 			switch {
 			case !active[ev.ServiceCode]:
 			case !ev.DetectedAt.After(sel.WindowStart) || ev.DetectedAt.After(sel.Now):
+			case sel.Delivered[ev.ID]:
 			case !ev.DetectedAt.After(item.AddedAt):
 			case !snapshot.HasService(ev.ServiceCode):
 			case reappeared(ev):
 			default:
 				codes[ev.ServiceCode] = true
+				eventIDs = append(eventIDs, ev.ID)
 			}
 		}
 		if len(codes) == 0 {
 			continue
 		}
 
+		sort.Strings(eventIDs)
 		entry := Entry{
 			Item:       item,
 			Title:      item.Title,
 			Year:       item.Year,
 			PosterPath: title.PosterPath,
+			EventIDs:   eventIDs,
 		}
 		if entry.Year == 0 {
 			entry.Year = title.Year

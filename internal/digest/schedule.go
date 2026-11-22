@@ -38,11 +38,24 @@ func NextSendTime(interval int, unit string, lastSent *time.Time, now time.Time)
 	return AddInterval(base, interval, unit, 1)
 }
 
-// WindowStart is the earliest detection time a digest sent at now covers:
-// everything since the last digest, or one interval back for a first digest.
+// DeliveryOverlap is how far behind the last digest the next one looks again.
+//
+// A digest cannot simply pick up where the previous one stopped. An event is
+// stamped with the time the change was detected, but it becomes readable a
+// little later, when the write commits; and it becomes true later still if
+// the snapshot write behind it had to be retried on the next run. Either way
+// an event can turn up, or start to qualify, carrying a detection time that a
+// digest has already moved past. Reading the last DeliveryOverlap again
+// catches those. The delivery log (models.DigestDelivery) keeps the re-read
+// from announcing anything twice.
+const DeliveryOverlap = 7 * 24 * time.Hour
+
+// WindowStart is the earliest detection time a digest sent at now considers:
+// DeliveryOverlap before the last digest, or one interval back for a first
+// digest.
 func WindowStart(settings models.DigestSettings, now time.Time) time.Time {
 	if settings.LastSentAt != nil && !settings.LastSentAt.IsZero() {
-		return *settings.LastSentAt
+		return settings.LastSentAt.Add(-DeliveryOverlap)
 	}
 	return AddInterval(now, settings.Interval, settings.IntervalUnit, -1)
 }

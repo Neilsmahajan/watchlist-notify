@@ -44,7 +44,8 @@ func TestWindowStart(t *testing.T) {
 		settings models.DigestSettings
 		want     time.Time
 	}{
-		{"since the last digest", models.DigestSettings{Interval: 1, IntervalUnit: models.DigestUnitWeeks, LastSentAt: &lastSent}, lastSent},
+		{"the last digest, less the overlap", models.DigestSettings{Interval: 1, IntervalUnit: models.DigestUnitWeeks, LastSentAt: &lastSent}, day(-27)},
+		{"the overlap does not depend on the interval", models.DigestSettings{Interval: 6, IntervalUnit: models.DigestUnitMonths, LastSentAt: &lastSent}, day(-27)},
 		{"first digest looks back one interval", models.DigestSettings{Interval: 1, IntervalUnit: models.DigestUnitWeeks}, day(-7)},
 		{"first digest, daily", models.DigestSettings{Interval: 2, IntervalUnit: models.DigestUnitDays}, day(-2)},
 		{"first digest, monthly", models.DigestSettings{Interval: 1, IntervalUnit: models.DigestUnitMonths}, now.AddDate(0, -1, 0)},
@@ -60,7 +61,8 @@ func TestWindowStart(t *testing.T) {
 
 // An event has to still exist when the slowest digest comes round to it. The
 // longest interval the preferences accept is 12 months, and the digest also
-// reads back a quiet period before its window to recognise reappearances.
+// looks back an overlap past the previous digest, and a quiet period before
+// that to recognise reappearances.
 func TestEventsOutliveTheLongestInterval(t *testing.T) {
 	yearly := models.DigestSettings{Interval: 12, IntervalUnit: models.DigestUnitMonths}
 	next := NextSendTime(yearly.Interval, yearly.IntervalUnit, &now, now)

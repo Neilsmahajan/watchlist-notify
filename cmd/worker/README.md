@@ -51,9 +51,13 @@ compares the result with the stored snapshot in the `titles` collection:
   Events are kept for 400 days, longer than the longest digest interval a
   user can choose (12 months).
 - Events are written before the snapshot is replaced, and the replace is
-  conditional on the snapshot still being the version that was read. A crash
-  between the two repeats the same events (deduplicated) on the next run; it
-  never loses one.
+  conditional on the snapshot still being the version that was read. The two
+  writes are not atomic. If the second fails, the event exists but the
+  snapshot does not show the change yet, so the digest leaves the title out.
+  The next run diffs against the same snapshot, finds the same change under
+  the same ID, keeps the event that is already there (with its original
+  `detected_at`) and replaces the snapshot. The digest then picks the event
+  up, even if it has sent other mail in between (see "Digest").
 - A failed fetch, or a response without provider data, changes nothing. It
   is never read as "removed everywhere". A title TMDb no longer has is marked
   `not_found_at` and keeps its last snapshot.
@@ -72,7 +76,8 @@ A user is due when digests are enabled, consent is given and
 title on their list **newly** became streamable on a service they have:
 
 - there is an "added" event for one of their active services, in their region,
-  detected since their last digest (or within one interval, for a first one);
+  that they have not been sent before, detected no earlier than 7 days before
+  their last digest (or within one interval, for a first one);
 - it was detected after they put the title on their list;
 - the title is still on that service now;
 - the service did not drop the same title within the previous 7 days (provider
@@ -81,6 +86,16 @@ title on their list **newly** became streamable on a service they have:
 
 With nothing new, nothing is sent and the schedule is left alone, so the user
 is looked at again on the next run. One email lists at most 20 titles.
+
+**Why the window overlaps, and the delivery log.** A digest cannot start
+exactly where the last one stopped. An event is stamped with the time the
+change was detected but becomes readable only when its write commits, and
+becomes true only when the snapshot write behind it succeeds, which may be a
+run later. Either way an event can show up carrying a time the last digest has
+already passed. So each digest re-reads the 7 days before the last one, and the
+`digest_deliveries` collection records which events each user was sent (one
+row per user and event, unique, kept 400 days). An event with a row is never
+announced to that user again.
 
 ### Safety switches
 
@@ -97,10 +112,14 @@ is looked at again on the next run. One email lists at most 20 titles.
 - **At most one email per user per interval.** Before sending, the run moves
   the user's schedule forward with a compare-and-set on the values it read.
   Of two overlapping runs, one wins that write and only the winner sends.
+- **Record, then send.** The winner writes the delivery rows for the events it
+  is about to announce, and only then sends. If the rows cannot be written,
+  nothing is sent and the claim is released.
 - If Postmark definitely rejected the message (a 4xx, or the connection was
-  never made) the schedule is put back and the next run retries. If the outcome
-  is unknown (timeout, 5xx) the claim is kept: the user may miss one digest
-  rather than risk receiving the same one twice.
+  never made) the delivery rows are deleted, then the schedule is put back, and
+  the next run retries. If the outcome is unknown (timeout, 5xx) the claim and
+  the rows are kept: the user may miss one digest rather than risk receiving
+  the same one twice.
 
 Logs carry user IDs and counts, never addresses or email content. The run
 ends with a `digest summary` line: `mode`, `due`, `recipients`, `titles`,

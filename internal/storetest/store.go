@@ -29,6 +29,8 @@ type Store struct {
 	items  []*models.WatchlistItem
 	titles map[string]*models.Title
 	events map[string]models.AvailabilityEvent
+	// deliveries is keyed by user and event, like the unique index.
+	deliveries map[deliveryKey]models.DigestDelivery
 
 	// Err, when set, is returned by every method. It simulates an outage.
 	Err error
@@ -38,15 +40,21 @@ type Store struct {
 	Writes int
 }
 
+type deliveryKey struct {
+	userID  primitive.ObjectID
+	eventID string
+}
+
 var _ database.Service = (*Store)(nil)
 
 // New returns an empty store.
 func New() *Store {
 	return &Store{
-		users:   make(map[primitive.ObjectID]*models.User),
-		titles:  make(map[string]*models.Title),
-		events:  make(map[string]models.AvailabilityEvent),
-		Queries: make(map[string]int),
+		users:      make(map[primitive.ObjectID]*models.User),
+		titles:     make(map[string]*models.Title),
+		events:     make(map[string]models.AvailabilityEvent),
+		deliveries: make(map[deliveryKey]models.DigestDelivery),
+		Queries:    make(map[string]int),
 	}
 }
 
@@ -141,6 +149,21 @@ func (s *Store) AddEvent(ev models.AvailabilityEvent) {
 	defer s.mu.Unlock()
 	ev.DetectedAt = ms(ev.DetectedAt)
 	s.events[ev.ID] = ev
+}
+
+// Deliveries returns the IDs of the events the user has a delivery record
+// for, sorted.
+func (s *Store) Deliveries(userID primitive.ObjectID) []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var ids []string
+	for key := range s.deliveries {
+		if key.userID == userID {
+			ids = append(ids, key.eventID)
+		}
+	}
+	sort.Strings(ids)
+	return ids
 }
 
 func cloneTitle(t *models.Title, regions []string) *models.Title {
@@ -438,4 +461,57 @@ func (s *Store) ListAvailabilityEvents(_ context.Context, titleKeys []string, re
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].DetectedAt.Before(out[j].DetectedAt) })
 	return out, nil
+}
+
+func (s *Store) InsertDigestDeliveries(_ context.Context, deliveries []models.DigestDelivery) (int, error) {
+	unlock, err := s.begin("InsertDigestDeliveries")
+	defer unlock()
+	if err != nil {
+		return 0, err
+	}
+	inserted := 0
+	for _, d := range deliveries {
+		key := deliveryKey{d.UserID, d.EventID}
+		if _, dup := s.deliveries[key]; dup {
+			continue
+		}
+		d.SentAt, d.ExpiresAt = ms(d.SentAt), ms(d.ExpiresAt)
+		s.deliveries[key] = d
+		inserted++
+		s.Writes++
+	}
+	return inserted, nil
+}
+
+func (s *Store) ListDeliveredEventIDs(_ context.Context, userID primitive.ObjectID, eventIDs []string) (map[string]bool, error) {
+	unlock, err := s.begin("ListDeliveredEventIDs")
+	defer unlock()
+	if err != nil {
+		return nil, err
+	}
+	delivered := make(map[string]bool)
+	for _, id := range eventIDs {
+		if _, ok := s.deliveries[deliveryKey{userID, id}]; ok {
+			delivered[id] = true
+		}
+	}
+	return delivered, nil
+}
+
+func (s *Store) DeleteDigestDeliveries(_ context.Context, userID primitive.ObjectID, eventIDs []string) (int, error) {
+	unlock, err := s.begin("DeleteDigestDeliveries")
+	defer unlock()
+	if err != nil {
+		return 0, err
+	}
+	deleted := 0
+	for _, id := range eventIDs {
+		key := deliveryKey{userID, id}
+		if _, ok := s.deliveries[key]; ok {
+			delete(s.deliveries, key)
+			deleted++
+			s.Writes++
+		}
+	}
+	return deleted, nil
 }

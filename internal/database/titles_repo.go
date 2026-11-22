@@ -151,14 +151,20 @@ func (s *service) InsertAvailabilityEvents(ctx context.Context, events []models.
 	if len(events) == 0 {
 		return 0, nil
 	}
-	coll := s.db.Database(databaseName).Collection(collEvents)
 	docs := make([]any, len(events))
 	for i := range events {
 		docs[i] = events[i]
 	}
+	return insertNew(ctx, s.db.Database(databaseName).Collection(collEvents), docs)
+}
+
+// insertNew inserts docs, skipping the ones that collide with a unique index,
+// and reports how many were actually inserted. Unordered, so one duplicate
+// does not stop the documents after it.
+func insertNew(ctx context.Context, coll *mongo.Collection, docs []any) (int, error) {
 	_, err := coll.InsertMany(ctx, docs, options.InsertMany().SetOrdered(false))
 	if err == nil {
-		return len(events), nil
+		return len(docs), nil
 	}
 	var bulkErr mongo.BulkWriteException
 	if !errors.As(err, &bulkErr) || bulkErr.WriteConcernError != nil {
@@ -171,7 +177,7 @@ func (s *service) InsertAvailabilityEvents(ctx context.Context, events []models.
 		}
 		duplicates++
 	}
-	return len(events) - duplicates, nil
+	return len(docs) - duplicates, nil
 }
 
 const duplicateKeyCode = 11000

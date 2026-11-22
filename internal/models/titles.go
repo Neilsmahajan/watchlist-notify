@@ -5,6 +5,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"go.mongodb.org/mongo-driver/bson/primitive"
 )
 
 // TMDb media types. Watchlist items say "show" where TMDb says "tv".
@@ -253,3 +255,24 @@ type AvailabilityEvent struct {
 // the longest digest interval a user can choose (12 months): an event that
 // expired before a yearly subscriber's next digest would never reach them.
 const EventRetention = 400 * 24 * time.Hour
+
+// DigestDelivery records that one availability event was put in a digest for
+// one user. The digest reads these back so that an event is announced to a
+// user at most once, however the digest's time window moves.
+//
+// A record is written before the email is sent and removed again only when
+// the send is known to have failed, so "has a record" means "was sent, or may
+// have been".
+type DigestDelivery struct {
+	ID      primitive.ObjectID `bson:"_id,omitempty" json:"-"`
+	UserID  primitive.ObjectID `bson:"user_id" json:"user_id"`
+	EventID string             `bson:"event_id" json:"event_id"`
+	SentAt  time.Time          `bson:"sent_at" json:"sent_at"`
+	// ExpiresAt is when the TTL index deletes the record.
+	ExpiresAt time.Time `bson:"expires_at" json:"expires_at"`
+}
+
+// DeliveryRetention is how long a delivery record is kept. A record is always
+// written after its event was detected and kept for as long as an event is,
+// so it cannot expire while the event it guards still exists.
+const DeliveryRetention = EventRetention

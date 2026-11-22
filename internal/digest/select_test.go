@@ -117,6 +117,29 @@ func TestSelect(t *testing.T) {
 			},
 		},
 		{
+			name: "already sent to this user",
+			change: func(s *Selection) {
+				s.Delivered = map[string]bool{s.Events[0].ID: true}
+			},
+		},
+		{
+			name: "another event having been sent does not hide this one",
+			change: func(s *Selection) {
+				s.Delivered = map[string]bool{added(models.ServiceNetflix, day(-5)).ID: true}
+			},
+			want: []string{models.ServiceNetflix},
+		},
+		{
+			name: "of two arrivals only the one not yet sent is listed",
+			change: func(s *Selection) {
+				hulu := added(models.ServiceHulu, day(-2))
+				s.Events = append(s.Events, hulu)
+				s.Titles[matrixKey] = streamingOn(matrixKey, models.ServiceNetflix, models.ServiceHulu)
+				s.Delivered = map[string]bool{hulu.ID: true}
+			},
+			want: []string{models.ServiceNetflix},
+		},
+		{
 			name:   "added to the list after it became available",
 			change: func(s *Selection) { s.Items[0].AddedAt = day(-1).Add(time.Hour) },
 		},
@@ -272,5 +295,8 @@ func TestSelectEntryDetails(t *testing.T) {
 	}
 	if got, want := entries[1].ServiceNames(), []string{"HBO Max"}; !reflect.DeepEqual(got, want) {
 		t.Errorf("ServiceNames() = %v, want %v", got, want)
+	}
+	if got, want := entries[1].EventIDs, []string{ev("tv:2", models.ServiceMax).ID}; !reflect.DeepEqual(got, want) {
+		t.Errorf("EventIDs = %v, want the event the entry announces, %v", got, want)
 	}
 }

@@ -12,6 +12,7 @@ import (
 	"github.com/neilsmahajan/watchlist-notify/internal/models"
 	"github.com/neilsmahajan/watchlist-notify/internal/notifications"
 	"github.com/neilsmahajan/watchlist-notify/internal/storetest"
+	"go.mongodb.org/mongo-driver/bson/primitive"
 )
 
 // sentEmail is one call to the fake mailer.
@@ -270,8 +271,9 @@ func TestRunWithNothingNewLeavesTheUserDue(t *testing.T) {
 	}
 }
 
-// staleReads serves the list of due users as it was before anyone claimed
-// them, the way a second job run that started at the same moment sees it.
+// staleReads serves the list of due users, and the delivery log, as they were
+// before anyone claimed the users: the way a second job run that started at
+// the same moment sees them.
 type staleReads struct {
 	*storetest.Store
 	due []*models.User
@@ -279,6 +281,10 @@ type staleReads struct {
 
 func (s *staleReads) GetUsersForDigest(context.Context, time.Time) ([]*models.User, error) {
 	return s.due, nil
+}
+
+func (s *staleReads) ListDeliveredEventIDs(context.Context, primitive.ObjectID, []string) (map[string]bool, error) {
+	return map[string]bool{}, nil
 }
 
 func TestRunClaimPreventsDoubleSend(t *testing.T) {
@@ -303,11 +309,14 @@ func TestRunClaimPreventsDoubleSend(t *testing.T) {
 	}
 }
 
-func TestRunClaimsBeforeSending(t *testing.T) {
+func TestRunClaimsAndRecordsBeforeSending(t *testing.T) {
 	w := newWorld(t)
 	w.mailer.onSend = func() {
 		if s := w.schedule(); s.LastSentAt == nil || s.NextScheduledAt == nil {
 			t.Error("the email went out before the schedule was claimed")
+		}
+		if len(w.store.Deliveries(w.user.ID)) != 1 {
+			t.Error("the email went out before its delivery was recorded")
 		}
 	}
 	if sum := w.run(w.runner(ModeSend, w.user.Email)); sum.Sent != 1 {
@@ -342,11 +351,17 @@ func TestRunReleasesTheClaimWhenTheSendDefinitelyFailed(t *testing.T) {
 	if s := w.schedule(); s.LastSentAt != nil || s.NextScheduledAt != nil {
 		t.Errorf("schedule = %+v, want the claim released", s)
 	}
+	if got := w.store.Deliveries(w.user.ID); len(got) != 0 {
+		t.Errorf("delivery records = %v, want none: nothing was delivered", got)
+	}
 
 	// With Postmark accepting mail again, the next run delivers.
 	w.mailer.err = nil
 	if sum := w.run(w.runner(ModeSend, w.user.Email)); sum.Sent != 1 || len(w.mailer.sent) != 1 {
 		t.Errorf("retry summary = %+v, emails = %d", sum, len(w.mailer.sent))
+	}
+	if got := w.store.Deliveries(w.user.ID); len(got) != 1 {
+		t.Errorf("delivery records after the retry = %v, want the one event", got)
 	}
 }
 
@@ -362,11 +377,21 @@ func TestRunKeepsTheClaimWhenTheSendOutcomeIsUnknown(t *testing.T) {
 	if s := w.schedule(); s.LastSentAt == nil || s.NextScheduledAt == nil {
 		t.Errorf("schedule = %+v, want the claim kept", s)
 	}
+	if got := w.store.Deliveries(w.user.ID); len(got) != 1 {
+		t.Errorf("delivery records = %v, want the event kept as possibly delivered", got)
+	}
 
 	// The email may have gone out, so the next run must not try again.
 	w.mailer.err = nil
 	if sum := w.run(w.runner(ModeSend, w.user.Email)); sum.Sent != 0 || len(w.mailer.sent) != 0 {
 		t.Errorf("retry summary = %+v, emails = %d; want no second attempt", sum, len(w.mailer.sent))
+	}
+
+	// Nor may the digest after that one, whose window reaches back over it.
+	next := w.runner(ModeSend, w.user.Email)
+	next.now = func() time.Time { return day(7) }
+	if sum := w.run(next); sum.Due != 1 || sum.NothingNew != 1 || len(w.mailer.sent) != 0 {
+		t.Errorf("next digest: summary = %+v, emails = %d; want nothing repeated", sum, len(w.mailer.sent))
 	}
 }
 
