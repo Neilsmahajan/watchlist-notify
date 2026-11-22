@@ -195,7 +195,7 @@ func (s *Server) linkIMDbHandler(c *gin.Context) {
 
 // unlinkIMDbHandler godoc
 // @Summary Unlink the IMDb list
-// @Description Stops syncing with the linked IMDb list. Nothing is removed from the watchlist: items the sync added stay, and are never removed automatically afterwards. Unlinking when nothing is linked also succeeds.
+// @Description Stops syncing with the linked IMDb list. Nothing is removed from the watchlist: items the sync added stay, and are never removed automatically afterwards. Every "missing from the list" mark (imdb_missing_since) on the user's items is cleared. Unlinking when nothing is linked also succeeds. On a 500 the list is still linked; send the request again.
 // @Tags Users
 // @Security BearerAuth
 // @Success 204 "Unlinked"
@@ -205,6 +205,17 @@ func (s *Server) linkIMDbHandler(c *gin.Context) {
 func (s *Server) unlinkIMDbHandler(c *gin.Context) {
 	user, ok := s.getUser(c)
 	if !ok {
+		return
+	}
+	// The strikes go first. A sync that is running right now may have planned
+	// removals on them; with the marks gone its conditional deletes no longer
+	// match, and an account without a link carries no strike that a later
+	// link could inherit. If they cannot be cleared the list stays linked and
+	// the user tries again, rather than being told "unlinked" while a removal
+	// can still go through.
+	if _, err := s.db.ClearIMDbMissingMarks(c.Request.Context(), user.ID); err != nil {
+		log.Printf("imdb unlink: clearing missing marks failed: %v", err)
+		jsonError(c, http.StatusInternalServerError, "failed to unlink IMDb list")
 		return
 	}
 	if err := s.db.UnlinkIMDb(c.Request.Context(), user.ID); err != nil {

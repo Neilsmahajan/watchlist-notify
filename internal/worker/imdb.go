@@ -169,11 +169,14 @@ func (t *IMDbTask) Run(ctx context.Context) error {
 			sum.deferred++
 			continue
 		}
+		// The time of the claim is the time of this user's run: it goes on
+		// the status and on every mark the run makes (imdbsync.SyncRequest.At).
+		claimedAt := now()
 		if !t.DryRun {
 			// The claim is what enforces one fetch a day: it succeeds only
 			// if nobody fetched this user's list within the gap, whether
 			// that was another run of this job or the user linking it.
-			claimed, err := t.Store.ClaimIMDbAttempt(ctx, user.ID, now(), IMDbSyncMinGap)
+			claimed, err := t.Store.ClaimIMDbAttempt(ctx, user.ID, claimedAt, IMDbSyncMinGap)
 			if err != nil {
 				sum.failed++
 				logger.Warn("imdb: claim failed", "user_id", user.ID.Hex(), "error", err.Error())
@@ -189,7 +192,7 @@ func (t *IMDbTask) Run(ctx context.Context) error {
 		}
 		fetched = true
 
-		out := t.syncUser(ctx, user)
+		out := t.syncUser(ctx, user, claimedAt)
 		switch out.State.LastStatus {
 		case models.IMDbStatusOK:
 			sum.synced++
@@ -222,6 +225,7 @@ func (t *IMDbTask) Run(ctx context.Context) error {
 			"unmarked", out.Result.Unmarked,
 			"removed", out.Result.Removed,
 			"prune", string(out.Result.Plan.Prune),
+			"link_changed", out.Result.LinkChanged,
 			"tmdb_lookups", out.Result.Lookups,
 		)
 	}
@@ -251,7 +255,13 @@ func (t *IMDbTask) Run(ctx context.Context) error {
 
 // syncUser fetches one user's list, reconciles it and stores the outcome on
 // the user. It never returns an error: what went wrong is in the state.
-func (t *IMDbTask) syncUser(ctx context.Context, user *models.User) imdbsync.SyncResult {
+//
+// The user may unlink, or link afresh, at any moment while this runs (the
+// fetch alone can take most of a minute). The run is for the link in user,
+// as it was when the users were listed. The reconcile reads the link again
+// just before it marks or removes anything and does neither if it is not
+// that link any more, and the outcome is stored only on that link.
+func (t *IMDbTask) syncUser(ctx context.Context, user *models.User, claimedAt time.Time) imdbsync.SyncResult {
 	logger := t.Logger
 	if logger == nil {
 		logger = slog.Default()
@@ -272,6 +282,7 @@ func (t *IMDbTask) syncUser(ctx context.Context, user *models.User) imdbsync.Syn
 		Previous:     user.IMDbSync,
 		SourceID:     user.IMDbSync.SourceID,
 		Mode:         imdbsync.ModeSync,
+		At:           claimedAt,
 		List:         list,
 		FetchErr:     fetchErr,
 		LookupBudget: imdbLookupBudget,
@@ -279,6 +290,9 @@ func (t *IMDbTask) syncUser(ctx context.Context, user *models.User) imdbsync.Syn
 	})
 	if out.Err != nil {
 		logger.Warn("imdb: reconcile stopped early", "user_id", user.ID.Hex(), "error", out.Err.Error())
+	}
+	if out.Result.LinkChanged {
+		logger.Info("imdb: link changed during sync; nothing marked or removed", "user_id", user.ID.Hex())
 	}
 	if t.DryRun {
 		return out
@@ -293,8 +307,8 @@ func (t *IMDbTask) syncUser(ctx context.Context, user *models.User) imdbsync.Syn
 	case err != nil:
 		logger.Warn("imdb: status not stored", "user_id", user.ID.Hex(), "error", err.Error())
 	case !stored:
-		// The user unlinked or linked another list while this ran. Their
-		// choice stands; this run's status describes a link that is gone.
+		// The user unlinked or linked afresh while this ran. Their choice
+		// stands; this run's status describes a link that is gone.
 		logger.Info("imdb: link changed during sync; status dropped", "user_id", user.ID.Hex())
 	}
 	return out

@@ -37,6 +37,7 @@ type Store interface {
 	MarkWatchlistItemIMDbMissing(ctx context.Context, userID, itemID primitive.ObjectID, since time.Time) (bool, error)
 	ClearWatchlistItemIMDbMissing(ctx context.Context, userID, itemID primitive.ObjectID) (bool, error)
 	ClearIMDbMissingMarks(ctx context.Context, userID primitive.ObjectID) (int, error)
+	GetIMDbLink(ctx context.Context, userID primitive.ObjectID) (*models.IMDbSync, error)
 	DeleteSyncedWatchlistItem(ctx context.Context, userID, itemID primitive.ObjectID, missingSince, updatedAt time.Time) (bool, error)
 }
 
@@ -101,8 +102,13 @@ type Request struct {
 	IDs []string
 	// Complete says IDs is the whole of the linked list (see Input.Complete).
 	Complete bool
-	// LinkedAt is when the list being synced was linked (see Input.LinkedAt).
-	// ModeSync does not mark or remove without it.
+	// SourceID and LinkedAt name the link this run is for: the list, and
+	// when it was linked (see Input.LinkedAt). ModeSync does not mark or
+	// remove without them, and reads the user's link again just before it
+	// does: if the user unlinked or linked afresh while the run was fetching
+	// and resolving, what the run found says nothing about their watchlist
+	// any more, and nothing is marked or removed (Result.LinkChanged).
+	SourceID string
 	LinkedAt time.Time
 	// At is the time of the run; zero means now. A run that fetched a list
 	// passes the moment it claimed that fetch, which is before it read
@@ -140,6 +146,11 @@ type Result struct {
 	MarkedMissing int
 	Unmarked      int
 	Removed       int
+
+	// LinkChanged says the run had marks or removals planned and left them
+	// undone, because the user's link was no longer the one the run was for
+	// (see Request.SourceID). Additions made before that stay.
+	LinkChanged bool
 
 	// Lookups counts TMDb requests made.
 	Lookups int
@@ -220,7 +231,7 @@ func (r *Reconciler) Run(ctx context.Context, req Request) (Result, error) {
 		res.Removed = len(plan.Remove)
 		return res, nil
 	}
-	err = r.apply(ctx, req.UserID, plan, at, &res)
+	err = r.apply(ctx, req, plan, at, &res)
 	return res, err
 }
 
@@ -331,7 +342,14 @@ func itemType(mediaType string) string {
 // (the user changed or deleted the item a moment ago) is skipped, not forced.
 //
 // Marks are stamped with at, the time of the run (see Request.At).
-func (r *Reconciler) apply(ctx context.Context, userID primitive.ObjectID, plan Plan, at time.Time, res *Result) error {
+//
+// Additions, ID fills and unmarks are safe whatever the user did meanwhile.
+// Marks and removals are not: they rest on the list the run fetched being
+// the list that is linked. So the link is read again immediately before each
+// of the two, and they are skipped unless it is exactly the link the run
+// started with.
+func (r *Reconciler) apply(ctx context.Context, req Request, plan Plan, at time.Time, res *Result) error {
+	userID := req.UserID
 	if err := r.applyAdditions(ctx, userID, plan, res); err != nil {
 		return err
 	}
@@ -353,6 +371,12 @@ func (r *Reconciler) apply(ctx context.Context, userID primitive.ObjectID, plan 
 			res.Unmarked++
 		}
 	}
+	if len(plan.MarkMissing) > 0 {
+		if same, err := r.linkUnchanged(ctx, req); err != nil || !same {
+			res.LinkChanged = err == nil
+			return err
+		}
+	}
 	for _, itemID := range plan.MarkMissing {
 		done, err := r.store.MarkWatchlistItemIMDbMissing(ctx, userID, itemID, at)
 		if err != nil {
@@ -360,6 +384,12 @@ func (r *Reconciler) apply(ctx context.Context, userID primitive.ObjectID, plan 
 		}
 		if done {
 			res.MarkedMissing++
+		}
+	}
+	if len(plan.Remove) > 0 {
+		if same, err := r.linkUnchanged(ctx, req); err != nil || !same {
+			res.LinkChanged = err == nil
+			return err
 		}
 	}
 	for _, removal := range plan.Remove {
@@ -372,6 +402,18 @@ func (r *Reconciler) apply(ctx context.Context, userID primitive.ObjectID, plan 
 		}
 	}
 	return nil
+}
+
+// linkUnchanged reads the user's link and reports whether it is still the
+// one this run is for: the same list, linked at the same moment. Unlinking,
+// linking another list, and unlinking and linking the same list again all
+// make it false.
+func (r *Reconciler) linkUnchanged(ctx context.Context, req Request) (bool, error) {
+	link, err := r.store.GetIMDbLink(ctx, req.UserID)
+	if err != nil {
+		return false, fmt.Errorf("read link before removing: %w", err)
+	}
+	return link != nil && req.SourceID != "" && link.SourceID == req.SourceID && link.LinkedAt.Equal(req.LinkedAt), nil
 }
 
 // applyAdditions inserts the planned items in one batch. An item the store

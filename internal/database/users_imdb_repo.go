@@ -8,6 +8,7 @@ import (
 	"github.com/neilsmahajan/watchlist-notify/internal/models"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
+	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 )
 
@@ -56,15 +57,40 @@ func (s *service) LinkIMDb(ctx context.Context, userID primitive.ObjectID, sync 
 	return nil
 }
 
-// UpdateIMDbSync stores the outcome of a sync run, but only if the user is
-// still linked to the list the run was for. It reports false when they
-// unlinked, or linked another list, while the run was under way; the run's
-// outcome is then dropped rather than resurrecting the old link.
+// GetIMDbLink returns the user's link as it is stored right now, or nil when
+// they have none (or do not exist). A sync run reads it again just before it
+// marks or removes anything, to find out whether the link it started with is
+// still the one in force.
+func (s *service) GetIMDbLink(ctx context.Context, userID primitive.ObjectID) (*models.IMDbSync, error) {
+	collection := s.db.Database(databaseName).Collection(collUsers)
+	var doc struct {
+		IMDbSync *models.IMDbSync `bson:"imdb_sync"`
+	}
+	err := collection.FindOne(ctx, bson.M{"_id": userID},
+		options.FindOne().SetProjection(bson.M{"imdb_sync": 1})).Decode(&doc)
+	if errors.Is(err, mongo.ErrNoDocuments) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if doc.IMDbSync == nil || doc.IMDbSync.SourceID == "" {
+		return nil, nil
+	}
+	return doc.IMDbSync, nil
+}
+
+// UpdateIMDbSync stores the outcome of a sync run, but only if the user's
+// link is still the one the run was for: the same list, linked at the same
+// moment. It reports false when they unlinked, linked another list, or
+// unlinked and linked the same list again while the run was under way; the
+// run's outcome is then dropped rather than written over their choice.
 func (s *service) UpdateIMDbSync(ctx context.Context, userID primitive.ObjectID, sync models.IMDbSync) (bool, error) {
 	collection := s.db.Database(databaseName).Collection(collUsers)
 	res, err := collection.UpdateOne(ctx, bson.M{
 		"_id":                 userID,
 		"imdb_sync.source_id": sync.SourceID,
+		"imdb_sync.linked_at": sync.LinkedAt,
 	}, bson.M{"$set": bson.M{"imdb_sync": sync}})
 	if err != nil {
 		return false, err

@@ -1047,8 +1047,24 @@ func TestIMDbLink(t *testing.T) {
 	if ok, err := srv.UpdateIMDbSync(ctx, user.ID, elsewhere); err != nil || ok {
 		t.Errorf("outcome for another list: applied = %v, err = %v; want dropped", ok, err)
 	}
-	if got := load().IMDbSync; got.SourceID != sync.SourceID || got.LastStatus != models.IMDbStatusFailed || got.LastError != "imdb: status 503" || got.LastSyncedAt != nil {
+	// The same list linked at another moment is another link: the user
+	// unlinked and linked it again while the run was under way.
+	relinked := failed
+	relinked.LinkedAt, relinked.LastStatus = now.Add(-time.Hour), models.IMDbStatusOK
+	if ok, err := srv.UpdateIMDbSync(ctx, user.ID, relinked); err != nil || ok {
+		t.Errorf("outcome for an earlier link to the same list: applied = %v, err = %v; want dropped", ok, err)
+	}
+	if got := load().IMDbSync; got.SourceID != sync.SourceID || !got.LinkedAt.Equal(now) || got.LastStatus != models.IMDbStatusFailed || got.LastError != "imdb: status 503" || got.LastSyncedAt != nil {
 		t.Errorf("link after the updates = %+v", got)
+	}
+
+	// Reading the link on its own, as a run does before it removes anything.
+	link, err := srv.GetIMDbLink(ctx, user.ID)
+	if err != nil || link == nil || link.SourceID != sync.SourceID || !link.LinkedAt.Equal(now) || link.LastStatus != models.IMDbStatusFailed {
+		t.Errorf("GetIMDbLink = %+v, err = %v", link, err)
+	}
+	if link, err := srv.GetIMDbLink(ctx, primitive.NewObjectID()); err != nil || link != nil {
+		t.Errorf("link of an unknown user = %+v, err = %v; want none", link, err)
 	}
 
 	// Signing in again (an upsert of the profile) leaves the link alone.
@@ -1081,6 +1097,9 @@ func TestIMDbLink(t *testing.T) {
 	}
 	if load().IMDbSync != nil {
 		t.Error("a late outcome linked the user again")
+	}
+	if link, err := srv.GetIMDbLink(ctx, user.ID); err != nil || link != nil {
+		t.Errorf("link after unlinking = %+v, err = %v; want none", link, err)
 	}
 }
 

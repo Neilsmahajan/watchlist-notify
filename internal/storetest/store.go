@@ -390,6 +390,19 @@ func (s *Store) LinkIMDb(_ context.Context, userID primitive.ObjectID, sync mode
 	return nil
 }
 
+func (s *Store) GetIMDbLink(_ context.Context, userID primitive.ObjectID) (*models.IMDbSync, error) {
+	unlock, err := s.begin("GetIMDbLink")
+	defer unlock()
+	if err != nil {
+		return nil, err
+	}
+	u, ok := s.users[userID]
+	if !ok || u.IMDbSync == nil || u.IMDbSync.SourceID == "" {
+		return nil, nil
+	}
+	return cloneUser(u).IMDbSync, nil
+}
+
 func (s *Store) UpdateIMDbSync(_ context.Context, userID primitive.ObjectID, sync models.IMDbSync) (bool, error) {
 	unlock, err := s.begin("UpdateIMDbSync")
 	defer unlock()
@@ -397,7 +410,7 @@ func (s *Store) UpdateIMDbSync(_ context.Context, userID primitive.ObjectID, syn
 		return false, err
 	}
 	u, ok := s.users[userID]
-	if !ok || u.IMDbSync == nil || u.IMDbSync.SourceID != sync.SourceID {
+	if !ok || u.IMDbSync == nil || u.IMDbSync.SourceID != sync.SourceID || !ms(u.IMDbSync.LinkedAt).Equal(ms(sync.LinkedAt)) {
 		return false, nil
 	}
 	u.IMDbSync = &sync

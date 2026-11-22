@@ -33,6 +33,7 @@ type Service interface {
 	// IMDb list link and its fetch throttle (users_imdb_repo.go).
 	ClaimIMDbAttempt(ctx context.Context, userID primitive.ObjectID, now time.Time, minGap time.Duration) (bool, error)
 	LinkIMDb(ctx context.Context, userID primitive.ObjectID, sync models.IMDbSync) error
+	GetIMDbLink(ctx context.Context, userID primitive.ObjectID) (*models.IMDbSync, error)
 	UpdateIMDbSync(ctx context.Context, userID primitive.ObjectID, sync models.IMDbSync) (bool, error)
 	UnlinkIMDb(ctx context.Context, userID primitive.ObjectID) error
 	ListIMDbLinkedUsers(ctx context.Context, attemptedBefore time.Time) ([]*models.User, error)

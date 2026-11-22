@@ -724,6 +724,64 @@ func TestLinkIMDbUnavailableWithoutTMDb(t *testing.T) {
 
 // --- DELETE /api/me/imdb ---
 
+// Unlinking wipes the strikes: a sync that is running cannot remove on them
+// any more, and whatever is linked next does not inherit them.
+func TestUnlinkIMDbClearsEveryStrike(t *testing.T) {
+	h := newSyncHarness(t)
+	h.lists.put(testList, ttID(1))
+	h.link(testList, http.StatusOK)
+	h.markedLeftover()
+
+	rec := h.request(http.MethodDelete, "/api/me/imdb", "")
+
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204", rec.Code)
+	}
+	items := h.items()
+	if len(items) != 2 {
+		t.Fatalf("watchlist = %v; want both items kept", items)
+	}
+	for id, item := range items {
+		if item.IMDbMissingSince != nil {
+			t.Errorf("%s still carries a missing mark after unlinking", id)
+		}
+	}
+	if h.store.User(h.user.ID).IMDbSync != nil {
+		t.Error("the link is still stored")
+	}
+}
+
+// If the strikes cannot be wiped the answer is 500 and the list is still
+// linked, so the user tries again instead of believing a half-done unlink.
+func TestUnlinkIMDbKeepsTheLinkWhenStrikesCannotBeCleared(t *testing.T) {
+	h := newSyncHarness(t)
+	h.lists.put(testList, ttID(1))
+	h.link(testList, http.StatusOK)
+	h.markedLeftover()
+	h.store.Fail["ClearIMDbMissingMarks"] = errors.New("mongo: connection reset")
+
+	rec := h.request(http.MethodDelete, "/api/me/imdb", "")
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500", rec.Code)
+	}
+	if link := h.store.User(h.user.ID).IMDbSync; link == nil || link.SourceID != testList {
+		t.Errorf("link = %+v; want it left in place", link)
+	}
+	if item := h.items()[ttID(50)]; item == nil || item.IMDbMissingSince == nil {
+		t.Errorf("leftover item = %+v; want it as it was", item)
+	}
+
+	// The retry goes through.
+	delete(h.store.Fail, "ClearIMDbMissingMarks")
+	if rec := h.request(http.MethodDelete, "/api/me/imdb", ""); rec.Code != http.StatusNoContent {
+		t.Errorf("retry: status = %d, want 204", rec.Code)
+	}
+	if h.store.User(h.user.ID).IMDbSync != nil || h.items()[ttID(50)].IMDbMissingSince != nil {
+		t.Error("the retry did not unlink and clear the strike")
+	}
+}
+
 func TestUnlinkIMDbKeepsTheItems(t *testing.T) {
 	h := newSyncHarness(t)
 	h.lists.put(testList, ttID(1), ttID(2))

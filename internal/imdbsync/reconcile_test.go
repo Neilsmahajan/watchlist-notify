@@ -131,6 +131,9 @@ func (h *hookedStore) DeleteSyncedWatchlistItem(ctx context.Context, userID, ite
 	return h.Store.DeleteSyncedWatchlistItem(ctx, userID, itemID, missingSince, updatedAt)
 }
 
+// worldList is the IMDb list the user of a world has linked.
+const worldList = "ls042518938"
+
 // world is a store, a TMDb and a clock for one user.
 type world struct {
 	t     *testing.T
@@ -151,18 +154,30 @@ func newWorld(t *testing.T) *world {
 		now:   time.Date(2026, 3, 10, 6, 0, 0, 0, time.UTC),
 	}
 	w.linked = w.now
-	w.user = w.store.AddUser(&models.User{Email: "viewer@example.com"}).ID
+	w.user = w.store.AddUser(&models.User{
+		Email:    "viewer@example.com",
+		IMDbSync: &models.IMDbSync{SourceID: worldList, LinkedAt: w.linked},
+	}).ID
 	w.rec = New(w.store, w.tmdb, WithClock(func() time.Time { return w.now }))
 	return w
 }
 
 func (w *world) run(mode Mode, complete bool, ids ...string) Result {
 	w.t.Helper()
-	res, err := w.rec.Run(context.Background(), Request{LinkedAt: w.linked, UserID: w.user, Mode: mode, IDs: ids, Complete: complete})
+	res, err := w.rec.Run(context.Background(), Request{SourceID: worldList, LinkedAt: w.linked, UserID: w.user, Mode: mode, IDs: ids, Complete: complete})
 	if err != nil {
 		w.t.Fatalf("Run: %v", err)
 	}
 	return res
+}
+
+// relink stores another link for the user, the way a link request does, and
+// leaves w.linked alone: runs started before it are still for the old link.
+func (w *world) relink(sourceID string, at time.Time) {
+	w.t.Helper()
+	if err := w.store.LinkIMDb(context.Background(), w.user, models.IMDbSync{SourceID: sourceID, LinkedAt: at}); err != nil {
+		w.t.Fatal(err)
+	}
 }
 
 // sync is one worker run over a complete fetch.
@@ -366,7 +381,7 @@ func TestRunTreatsADuplicateKeyOnInsertAsExisting(t *testing.T) {
 		})
 	}
 
-	res, err := w.rec.Run(context.Background(), Request{LinkedAt: w.linked, UserID: w.user, Mode: ModeSync, Complete: true, IDs: []string{matrix, inceptn}})
+	res, err := w.rec.Run(context.Background(), Request{SourceID: worldList, LinkedAt: w.linked, UserID: w.user, Mode: ModeSync, Complete: true, IDs: []string{matrix, inceptn}})
 
 	if err != nil {
 		t.Fatalf("a duplicate key failed the run: %v", err)
@@ -749,6 +764,7 @@ func TestRunAppliesWhatFitInTheLookupBudget(t *testing.T) {
 	}
 
 	res, err := w.rec.Run(context.Background(), Request{
+		SourceID: worldList,
 		LinkedAt: w.linked,
 		UserID:   w.user, Mode: ModeLink, IDs: ids, Complete: true, LookupBudget: 75 * time.Millisecond,
 	})
@@ -795,7 +811,7 @@ func TestRunWithoutTMDbUsesStoredTitlesOnly(t *testing.T) {
 		t.Error("CanResolve is true without a TMDb client")
 	}
 
-	res, err := rec.Run(context.Background(), Request{LinkedAt: w.linked, UserID: w.user, Mode: ModeLink, IDs: []string{matrix, inceptn}, Complete: true})
+	res, err := rec.Run(context.Background(), Request{SourceID: worldList, LinkedAt: w.linked, UserID: w.user, Mode: ModeLink, IDs: []string{matrix, inceptn}, Complete: true})
 	if err != nil || res.Added != 1 || res.Pending != 1 {
 		t.Errorf("added = %d, pending = %d, err = %v", res.Added, res.Pending, err)
 	}
@@ -868,6 +884,7 @@ func TestSyncNeverActsOnAStrikeFromBeforeTheLink(t *testing.T) {
 
 	// Another list is linked an hour later, and the strike survives it.
 	w.linked = w.now.Add(time.Hour)
+	w.relink(worldList, w.linked)
 
 	w.now = w.now.Add(24 * time.Hour)
 	res := w.sync(matrix)
@@ -914,7 +931,7 @@ func TestMarksCarryTheTimeOfTheRun(t *testing.T) {
 	claimed := w.now.Add(-90 * time.Second)
 
 	res, err := w.rec.Run(context.Background(), Request{
-		UserID: w.user, Mode: ModeSync, IDs: []string{matrix}, Complete: true, LinkedAt: w.linked, At: claimed,
+		UserID: w.user, Mode: ModeSync, IDs: []string{matrix}, Complete: true, SourceID: worldList, LinkedAt: w.linked, At: claimed,
 	})
 
 	if err != nil || res.MarkedMissing != 1 {
@@ -935,6 +952,176 @@ func TestMarksCarryTheTimeOfTheRun(t *testing.T) {
 	}
 }
 
+// --- the link changes while a run is under way ---
+
+// A run fetches and resolves for a while, and the user can unlink or link
+// afresh in that time. What the run found then says nothing about their
+// watchlist: it marks nothing and removes nothing. What it added stays.
+func TestSyncDoesNotPruneForALinkThatIsNoLongerInForce(t *testing.T) {
+	changes := map[string]func(w *world){
+		"unlinked": func(w *world) {
+			if err := w.store.UnlinkIMDb(context.Background(), w.user); err != nil {
+				w.t.Fatal(err)
+			}
+		},
+		// At the very moment the first one was, so that only the list differs.
+		"another list linked":         func(w *world) { w.relink("ur101082417", w.linked) },
+		"the same list linked afresh": func(w *world) { w.relink(worldList, w.now) },
+	}
+	for name, change := range changes {
+		for _, strike := range []string{"strike one", "strike two"} {
+			t.Run(name+" before "+strike, func(t *testing.T) {
+				w := newWorld(t)
+				standardTMDb(w.tmdb)
+				w.sync(matrix, inceptn)
+				w.now = w.now.Add(24 * time.Hour)
+				want := map[string]string{matrix: syncedAs, inceptn: syncedAs, thrones: syncedAs}
+				if strike == "strike two" {
+					w.sync(matrix) // strike one for Inception, under the link as it was
+					w.now = w.now.Add(24 * time.Hour)
+					want[inceptn] = syncedAs + "/missing"
+				}
+				// The change lands while the run is busy adding a new title.
+				w.store.beforeCreate = func() { change(w) }
+
+				res := w.sync(matrix, thrones)
+
+				if !res.LinkChanged || res.MarkedMissing != 0 || res.Removed != 0 || res.Added != 1 {
+					t.Errorf("link changed = %v, marked = %d, removed = %d, added = %d; want true, 0, 0, 1",
+						res.LinkChanged, res.MarkedMissing, res.Removed, res.Added)
+				}
+				w.expect(want)
+			})
+		}
+	}
+}
+
+// The link is read again before the removals too, not only before the marks.
+func TestSyncReadsTheLinkAgainBeforeRemoving(t *testing.T) {
+	w := newWorld(t)
+	standardTMDb(w.tmdb)
+	w.sync(matrix, inceptn, thrones)
+	w.now = w.now.Add(24 * time.Hour)
+	w.sync(matrix, thrones) // strike one for Inception
+	w.now = w.now.Add(24 * time.Hour)
+	// Today Game of Thrones is gone too: one mark and one removal are planned,
+	// and the user unlinks between the two.
+	w.store.beforeMark = func() {
+		if err := w.store.UnlinkIMDb(context.Background(), w.user); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	res := w.sync(matrix)
+
+	if len(res.Plan.Remove) != 1 || len(res.Plan.MarkMissing) != 1 {
+		t.Fatalf("plan = %d marks, %d removals; want one of each", len(res.Plan.MarkMissing), len(res.Plan.Remove))
+	}
+	if !res.LinkChanged || res.Removed != 0 {
+		t.Errorf("link changed = %v, removed = %d; want the removal left undone", res.LinkChanged, res.Removed)
+	}
+	if w.item(inceptn) == nil {
+		t.Error("Inception was removed after the user unlinked")
+	}
+}
+
+// If the link cannot be read, nothing is marked or removed on a guess.
+func TestSyncDoesNotPruneWhenTheLinkCannotBeRead(t *testing.T) {
+	w := newWorld(t)
+	standardTMDb(w.tmdb)
+	w.sync(matrix, inceptn, thrones)
+	w.now = w.now.Add(24 * time.Hour)
+	w.sync(matrix, thrones)
+	w.now = w.now.Add(24 * time.Hour)
+	w.store.Fail["GetIMDbLink"] = errors.New("mongo: connection reset")
+
+	res, err := w.rec.Run(context.Background(), Request{SourceID: worldList, LinkedAt: w.linked, UserID: w.user, Mode: ModeSync, IDs: []string{matrix}, Complete: true})
+
+	if err == nil {
+		t.Fatal("no error although the link could not be read")
+	}
+	if res.MarkedMissing != 0 || res.Removed != 0 || res.LinkChanged {
+		t.Errorf("marked = %d, removed = %d, link changed = %v; want 0, 0, false", res.MarkedMissing, res.Removed, res.LinkChanged)
+	}
+	w.expect(map[string]string{matrix: syncedAs, inceptn: syncedAs + "/missing", thrones: syncedAs})
+}
+
+// A run with nothing to mark or remove has no reason to read the link.
+func TestSyncReadsTheLinkOnlyWhenItWouldPrune(t *testing.T) {
+	w := newWorld(t)
+	standardTMDb(w.tmdb)
+	w.sync(matrix, inceptn)
+	w.now = w.now.Add(24 * time.Hour)
+	w.sync(matrix, inceptn, thrones)
+	if got := w.store.Queries["GetIMDbLink"]; got != 0 {
+		t.Errorf("the link was read %d times by runs that pruned nothing", got)
+	}
+	w.now = w.now.Add(24 * time.Hour)
+	w.sync(matrix, inceptn)
+	if got := w.store.Queries["GetIMDbLink"]; got != 1 {
+		t.Errorf("the link was read %d times, want once before the mark", got)
+	}
+}
+
+// A run that is not told which list it is for cannot match any link.
+func TestSyncWithoutASourceNeverMarksOrRemoves(t *testing.T) {
+	w := newWorld(t)
+	standardTMDb(w.tmdb)
+	w.sync(matrix, inceptn)
+	w.now = w.now.Add(24 * time.Hour)
+
+	res, err := w.rec.Run(context.Background(), Request{LinkedAt: w.linked, UserID: w.user, Mode: ModeSync, IDs: []string{matrix}, Complete: true})
+
+	if err != nil || res.MarkedMissing != 0 || !res.LinkChanged {
+		t.Errorf("marked = %d, link changed = %v, err = %v", res.MarkedMissing, res.LinkChanged, err)
+	}
+}
+
+// Unlinking wipes the user's strikes before it removes the link. A removal
+// a running sync had already planned, and checked the link for, then finds
+// its item unmarked and does not happen.
+func TestSyncRemovalLosesToStrikesBeingWiped(t *testing.T) {
+	w := newWorld(t)
+	standardTMDb(w.tmdb)
+	w.sync(matrix, inceptn)
+	w.now = w.now.Add(24 * time.Hour)
+	w.sync(matrix)
+	w.now = w.now.Add(24 * time.Hour)
+	w.store.beforeDelete = func() {
+		if _, err := w.store.ClearIMDbMissingMarks(context.Background(), w.user); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	res := w.sync(matrix)
+
+	if len(res.Plan.Remove) != 1 || res.Removed != 0 {
+		t.Errorf("planned %d removals, made %d; want 1 planned and none made", len(res.Plan.Remove), res.Removed)
+	}
+	w.expect(map[string]string{matrix: syncedAs, inceptn: syncedAs})
+}
+
+// SyncList does not call a run "synced" when its removals were left undone.
+func TestSyncListReportsAChangedLinkAsPartial(t *testing.T) {
+	w := newWorld(t)
+	standardTMDb(w.tmdb)
+	w.sync(matrix, inceptn)
+	w.now = w.now.Add(24 * time.Hour)
+	previous := &models.IMDbSync{SourceID: worldList, LinkedAt: w.linked}
+	w.relink(worldList, w.now.Add(-time.Hour))
+
+	out := w.rec.SyncList(context.Background(), SyncRequest{
+		UserID: w.user, Previous: previous, SourceID: worldList, Mode: ModeSync, List: completeList(matrix),
+	})
+
+	if !out.Result.LinkChanged || out.State.LastStatus != models.IMDbStatusPartial || out.State.LastSyncedAt != nil {
+		t.Errorf("link changed = %v, state = %+v; want partial and not synced", out.Result.LinkChanged, out.State)
+	}
+	if out.Result.MarkedMissing != 0 {
+		t.Errorf("marked = %d under a link that is no longer in force", out.Result.MarkedMissing)
+	}
+}
+
 // --- failures ---
 
 func TestRunStopsBeforeWritingWhenTheWatchlistCannotBeRead(t *testing.T) {
@@ -942,7 +1129,7 @@ func TestRunStopsBeforeWritingWhenTheWatchlistCannotBeRead(t *testing.T) {
 	standardTMDb(w.tmdb)
 	w.store.Err = errors.New("mongo: connection reset")
 
-	_, err := w.rec.Run(context.Background(), Request{LinkedAt: w.linked, UserID: w.user, Mode: ModeSync, IDs: []string{matrix}, Complete: true})
+	_, err := w.rec.Run(context.Background(), Request{SourceID: worldList, LinkedAt: w.linked, UserID: w.user, Mode: ModeSync, IDs: []string{matrix}, Complete: true})
 
 	if err == nil {
 		t.Fatal("no error although the watchlist could not be read")
@@ -962,7 +1149,7 @@ func TestRunRemovesNothingAfterAFailedWrite(t *testing.T) {
 	w.now = w.now.Add(24 * time.Hour)
 	w.store.createErr = errors.New("mongo: write concern timeout")
 
-	res, err := w.rec.Run(context.Background(), Request{LinkedAt: w.linked, UserID: w.user, Mode: ModeSync, IDs: []string{matrix, thrones}, Complete: true})
+	res, err := w.rec.Run(context.Background(), Request{SourceID: worldList, LinkedAt: w.linked, UserID: w.user, Mode: ModeSync, IDs: []string{matrix, thrones}, Complete: true})
 
 	if err == nil {
 		t.Fatal("no error although the insert failed")
@@ -987,6 +1174,7 @@ func TestDryRunWritesNothing(t *testing.T) {
 	before := w.titles()
 
 	res, err := w.rec.Run(context.Background(), Request{
+		SourceID: worldList,
 		LinkedAt: w.linked,
 		UserID:   w.user, Mode: ModeSync, IDs: []string{matrix, thrones}, Complete: true, DryRun: true,
 	})

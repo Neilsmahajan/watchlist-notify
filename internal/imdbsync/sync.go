@@ -102,6 +102,7 @@ func (r *Reconciler) SyncList(ctx context.Context, req SyncRequest) SyncResult {
 		Mode:         req.Mode,
 		IDs:          ids,
 		Complete:     complete,
+		SourceID:     state.SourceID,
 		LinkedAt:     state.LinkedAt,
 		At:           at,
 		LookupBudget: req.LookupBudget,
@@ -121,7 +122,10 @@ func (r *Reconciler) SyncList(ctx context.Context, req SyncRequest) SyncResult {
 		state.LastStatus, state.LastError = models.IMDbStatusPartial, msgRepeated
 	case !complete:
 		state.LastStatus, state.LastError = models.IMDbStatusPartial, msgPartList
-	case err != nil:
+	case err != nil || res.LinkChanged:
+		// LinkChanged: the user unlinked or linked afresh while this ran, so
+		// the removals were left undone. The caller stores a status only on
+		// the link the run was for, so this one is normally never seen.
 		state.LastStatus, state.LastError = models.IMDbStatusPartial, msgNotApplied
 	case res.Pending > 0:
 		state.LastStatus = models.IMDbStatusPartial
@@ -129,7 +133,7 @@ func (r *Reconciler) SyncList(ctx context.Context, req SyncRequest) SyncResult {
 	default:
 		state.LastStatus, state.LastError = models.IMDbStatusOK, ""
 	}
-	if complete && err == nil {
+	if complete && err == nil && !res.LinkChanged {
 		state.LastSyncedAt = &at
 	}
 	return SyncResult{Result: res, State: state, Err: err}

@@ -423,6 +423,96 @@ func TestIMDbTaskDoesNotResurrectALinkRemovedMidSync(t *testing.T) {
 	}
 }
 
+// The user unlinks, links another list, or unlinks and links the same list
+// again while the worker is reading their list. The run then marks nothing
+// and removes nothing, keeps what it added, and does not write its status
+// over the link that is there now.
+func TestIMDbTaskDoesNotPruneWhenTheLinkChangesMidSync(t *testing.T) {
+	changes := map[string]func(w *imdbWorld, user primitive.ObjectID) *models.IMDbSync{
+		"unlinked": func(w *imdbWorld, user primitive.ObjectID) *models.IMDbSync {
+			if err := w.store.UnlinkIMDb(context.Background(), user); err != nil {
+				w.t.Fatal(err)
+			}
+			return nil
+		},
+		"another list linked": func(w *imdbWorld, user primitive.ObjectID) *models.IMDbSync {
+			link := models.IMDbSync{SourceID: "ls0000009", LinkedAt: w.now, LastStatus: models.IMDbStatusOK, Total: 7}
+			if err := w.store.LinkIMDb(context.Background(), user, link); err != nil {
+				w.t.Fatal(err)
+			}
+			return &link
+		},
+		"the same list linked afresh": func(w *imdbWorld, user primitive.ObjectID) *models.IMDbSync {
+			link := models.IMDbSync{SourceID: "ur0000001", LinkedAt: w.now, LastStatus: models.IMDbStatusOK, Total: 7}
+			if err := w.store.LinkIMDb(context.Background(), user, link); err != nil {
+				w.t.Fatal(err)
+			}
+			return &link
+		},
+	}
+	for name, change := range changes {
+		for _, strike := range []string{"strike one", "strike two"} {
+			t.Run(name+" before "+strike, func(t *testing.T) {
+				w := newIMDbWorld(t)
+				alice := w.link("alice@example.com", "ur0000001", 30*time.Hour, tt1, tt2)
+				if err := w.run(); err != nil {
+					t.Fatal(err)
+				}
+				w.lists.lists["ur0000001"] = []string{tt1}
+				if strike == "strike two" {
+					w.nextDay()
+					_ = w.run()
+					w.wantSummary(`"marked_missing":1`)
+				}
+				w.nextDay()
+				w.lists.lists["ur0000001"] = []string{tt1, tt3}
+				var linkNow *models.IMDbSync
+				w.lists.onFetch = func(string) { linkNow = change(w, alice) }
+
+				_ = w.run()
+
+				w.wantSummary(`"marked_missing":0`, `"removed":0`, `"added":1`, `"synced":0`)
+				if got := w.itemIDs(alice); !reflect.DeepEqual(got, []string{tt1, tt2, tt3}) {
+					t.Errorf("watchlist = %v; want nothing removed and the new title added", got)
+				}
+				if !strings.Contains(w.logs.String(), "link changed during sync; nothing marked or removed") {
+					t.Errorf("the log does not say why nothing was removed:\n%s", w.logs.String())
+				}
+				stored := w.store.User(alice).IMDbSync
+				if (stored == nil) != (linkNow == nil) || (stored != nil && !reflect.DeepEqual(*stored, *linkNow)) {
+					t.Errorf("link after the run = %+v; want the user's own change untouched: %+v", stored, linkNow)
+				}
+			})
+		}
+	}
+}
+
+// A mark carries the time the worker claimed the fetch, which is before the
+// fetch: a link made while the list was being read is newer than the mark.
+func TestIMDbTaskStampsMarksWithTheClaim(t *testing.T) {
+	w := newIMDbWorld(t)
+	alice := w.link("alice@example.com", "ur0000001", 30*time.Hour, tt1, tt2)
+	if err := w.run(); err != nil {
+		t.Fatal(err)
+	}
+	w.lists.lists["ur0000001"] = []string{tt1}
+	w.nextDay()
+	claimed := w.now
+	w.lists.onFetch = func(string) { w.now = w.now.Add(40 * time.Second) } // a slow fetch
+
+	_ = w.run()
+
+	w.wantSummary(`"marked_missing":1`)
+	for _, item := range w.store.Items(alice) {
+		if item.IMDbID == tt2 && (item.IMDbMissingSince == nil || !item.IMDbMissingSince.Equal(claimed)) {
+			t.Errorf("missing since %v, want the time of the claim %v", item.IMDbMissingSince, claimed)
+		}
+	}
+	if got := w.store.User(alice).IMDbSync.LastAttemptAt; got == nil || !got.Equal(claimed) {
+		t.Errorf("last attempt at %v, want the time of the claim %v", got, claimed)
+	}
+}
+
 func TestIMDbTaskDryRunWritesNothing(t *testing.T) {
 	w := newIMDbWorld(t)
 	alice := w.link("alice@example.com", "ur0000001", 30*time.Hour, tt1, tt2)
