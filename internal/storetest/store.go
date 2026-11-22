@@ -513,6 +513,8 @@ func (s *Store) SetWatchlistItemIMDbID(_ context.Context, userID, itemID primiti
 	return true, nil
 }
 
+// MarkWatchlistItemIMDbMissing applies the same conditions as the real
+// filter: sync-added, still planned, untagged and not marked yet.
 func (s *Store) MarkWatchlistItemIMDbMissing(_ context.Context, userID, itemID primitive.ObjectID, since time.Time) (bool, error) {
 	unlock, err := s.begin("MarkWatchlistItemIMDbMissing")
 	defer unlock()
@@ -520,7 +522,8 @@ func (s *Store) MarkWatchlistItemIMDbMissing(_ context.Context, userID, itemID p
 		return false, err
 	}
 	item := s.findItem(userID, itemID)
-	if item == nil || item.Source != models.SourceIMDb || item.IMDbMissingSince != nil {
+	if item == nil || item.Source != models.SourceIMDb || item.Status != models.WatchlistStatusPlanned ||
+		len(item.Tags) > 0 || item.IMDbMissingSince != nil {
 		return false, nil
 	}
 	item.IMDbMissingSince = msPtr(&since)

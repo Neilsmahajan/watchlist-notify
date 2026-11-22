@@ -94,6 +94,7 @@ func (f *fakeTMDb) lookups() []string {
 type hookedStore struct {
 	*storetest.Store
 	beforeCreate func()
+	beforeMark   func()
 	beforeDelete func()
 	createErr    error
 }
@@ -106,6 +107,13 @@ func (h *hookedStore) CreateWatchlistItems(ctx context.Context, items []*models.
 		h.beforeCreate()
 	}
 	return h.Store.CreateWatchlistItems(ctx, items)
+}
+
+func (h *hookedStore) MarkWatchlistItemIMDbMissing(ctx context.Context, userID, itemID primitive.ObjectID, since time.Time) (bool, error) {
+	if h.beforeMark != nil {
+		h.beforeMark()
+	}
+	return h.Store.MarkWatchlistItemIMDbMissing(ctx, userID, itemID, since)
 }
 
 func (h *hookedStore) DeleteSyncedWatchlistItem(ctx context.Context, userID, itemID primitive.ObjectID, missingSince time.Time) (bool, error) {
@@ -460,6 +468,26 @@ func TestSyncNeverRemovesWhatTheUserTouched(t *testing.T) {
 			}
 			if got := w.item(inceptn); got.IMDbMissingSince != nil {
 				t.Errorf("the mark is still on an item the user owns")
+			}
+		})
+
+		// The plan already says "mark" when the user's edit lands. The mark
+		// itself must refuse, so the user's item never carries a strike.
+		t.Run(name+" between the plan and the mark", func(t *testing.T) {
+			w := newWorld(t)
+			standardTMDb(w.tmdb)
+			w.sync(matrix, inceptn)
+			target := w.item(inceptn).ID
+			w.store.beforeMark = func() { w.store.EditItem(target, edit) }
+
+			w.now = w.now.Add(24 * time.Hour)
+			res := w.sync(matrix)
+
+			if len(res.Plan.MarkMissing) != 1 {
+				t.Fatalf("plan marks %d items, want the test to reach the mark", len(res.Plan.MarkMissing))
+			}
+			if res.MarkedMissing != 0 || w.item(inceptn).IMDbMissingSince != nil {
+				t.Errorf("marked = %d, item = %+v; the user's edit must win", res.MarkedMissing, w.item(inceptn))
 			}
 		})
 

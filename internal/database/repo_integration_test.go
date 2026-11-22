@@ -757,6 +757,17 @@ func TestIMDbSyncItemWrites(t *testing.T) {
 	check("mark an item the sync did not add", ok, err, false)
 	ok, err = srv.MarkWatchlistItemIMDbMissing(ctx, stranger, synced.ID, strike)
 	check("mark someone else's item", ok, err, false)
+	// An item the user has made theirs takes no strike, like it takes no delete.
+	edit(synced.ID, map[string]any{"status": models.WatchlistStatusWatching})
+	ok, err = srv.MarkWatchlistItemIMDbMissing(ctx, user, synced.ID, strike)
+	check("mark after the user changed the status", ok, err, false)
+	edit(synced.ID, map[string]any{"status": models.WatchlistStatusPlanned, "tags": []string{"keep"}})
+	ok, err = srv.MarkWatchlistItemIMDbMissing(ctx, user, synced.ID, strike)
+	check("mark after the user tagged it", ok, err, false)
+	if got := mustFindItem(t, srv, user, synced.ID); got.IMDbMissingSince != nil {
+		t.Fatalf("a refused mark was written: %+v", got)
+	}
+	edit(synced.ID, map[string]any{"tags": []string{}})
 	ok, err = srv.MarkWatchlistItemIMDbMissing(ctx, user, synced.ID, strike)
 	check("mark", ok, err, true)
 	ok, err = srv.MarkWatchlistItemIMDbMissing(ctx, user, synced.ID, strike.Add(time.Hour))

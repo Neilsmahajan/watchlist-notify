@@ -45,15 +45,21 @@ func (s *service) SetWatchlistItemIMDbID(ctx context.Context, userID, itemID pri
 }
 
 // MarkWatchlistItemIMDbMissing sets imdb_missing_since on an item the sync
-// added, unless it is already marked: the first strike keeps its time. It
-// reports whether the mark was written.
+// may later remove: one it added, that is still "planned" and has no tags.
+// These are the same conditions the delete checks, so an edit the user makes
+// between the plan and this write wins here too, and an item the user has
+// made theirs never carries a strike. An item that is already marked keeps
+// its mark: the first strike keeps its time. It reports whether the mark was
+// written.
 func (s *service) MarkWatchlistItemIMDbMissing(ctx context.Context, userID, itemID primitive.ObjectID, since time.Time) (bool, error) {
 	coll := s.db.Database(databaseName).Collection(collWatchlist)
 	res, err := coll.UpdateOne(ctx, bson.M{
 		"_id":                itemID,
 		"user_id":            userID,
 		"source":             models.SourceIMDb,
+		"status":             models.WatchlistStatusPlanned,
 		"imdb_missing_since": nil,
+		"$or":                noTags,
 	}, bson.M{"$set": bson.M{"imdb_missing_since": since}})
 	if err != nil {
 		return false, err
