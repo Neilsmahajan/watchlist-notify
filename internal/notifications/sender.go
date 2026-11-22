@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"strings"
@@ -68,6 +69,40 @@ func New(fromEmail, messageStream string) (*Sender, error) {
 	}, nil
 }
 
+// RejectedError means Postmark answered and refused the message, so nothing
+// was sent.
+type RejectedError struct {
+	StatusCode int
+	Body       string
+}
+
+func (e *RejectedError) Error() string {
+	return fmt.Sprintf("postmark rejected the email: status %d: %s", e.StatusCode, e.Body)
+}
+
+// IsDefiniteFailure reports whether err from SendEmail proves that no email
+// went out: Postmark refused it with a client error, or the connection was
+// never established. Anything else (a timeout, a dropped connection, a 5xx)
+// leaves the outcome unknown, and callers that must not send twice have to
+// assume the email may have been delivered.
+func IsDefiniteFailure(err error) bool {
+	if err == nil {
+		return false
+	}
+	var rejected *RejectedError
+	if errors.As(err, &rejected) {
+		return rejected.StatusCode >= 400 && rejected.StatusCode < 500
+	}
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) {
+		return true
+	}
+	var opErr *net.OpError
+	return errors.As(err, &opErr) && opErr.Op == "dial"
+}
+
+// SendEmail sends one HTML email through Postmark. A non-200 answer is
+// returned as a *RejectedError.
 func (s *Sender) SendEmail(toEmail, subject, htmlBody string) error {
 	body := EmailBody{
 		From:          s.fromEmail,
@@ -81,7 +116,7 @@ func (s *Sender) SendEmail(toEmail, subject, htmlBody string) error {
 		return err
 	}
 
-	req, err := http.NewRequest("POST", s.baseURL, bytes.NewBuffer(jsonBody))
+	req, err := http.NewRequest(http.MethodPost, s.baseURL, bytes.NewReader(jsonBody))
 	if err != nil {
 		return err
 	}
@@ -93,20 +128,12 @@ func (s *Sender) SendEmail(toEmail, subject, htmlBody string) error {
 	if err != nil {
 		return err
 	}
-	defer func(Body io.ReadCloser) {
-		err := Body.Close()
-		if err != nil {
-			fmt.Printf("Warning: Failed to close response body: %v\n", err)
-		}
-	}(resp.Body)
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
-		bodyBytes, err := io.ReadAll(resp.Body)
-		if err != nil {
-			return fmt.Errorf("failed to send email, status: %s, and failed to read body: %v", resp.Status, err)
-		}
-		return fmt.Errorf("failed to send email, status: %s, body: %s", resp.Status, string(bodyBytes))
+		// Postmark error bodies are a short JSON object; cap what is kept.
+		bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+		return &RejectedError{StatusCode: resp.StatusCode, Body: strings.TrimSpace(string(bodyBytes))}
 	}
-
 	return nil
 }
