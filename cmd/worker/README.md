@@ -128,14 +128,26 @@ gets an `imdb: user synced` line and the run ends with an `imdb summary` line:
 `skipped` (claimed by another run, or not reached), `deferred`, `added`,
 `removed`, `marked_missing`, `unmatched`.
 
-**Time.** The job's three tasks share one Cloud Run task timeout (540 s as
-deployed), so the sync budgets itself: it stops starting new users after 4
-minutes and leaves the rest, counted as `deferred`, for the next run. They are
-not marked as fetched, and users are taken longest wait first, so nobody is
-left out twice in a row. One user gets at most 2 minutes; a daily sync of a
-few hundred titles takes seconds, because only titles nobody has listed before
-are asked of TMDb. If `deferred` is ever above zero day after day, raise the
-job's `--task-timeout` and the budget in `internal/worker/imdb.go` together.
+**Time.** The job's three tasks share one Cloud Run task timeout: 1800 s,
+set as `TASK_TIMEOUT` in `scripts/release-worker.sh`. The sync budgets itself
+inside it: it stops starting new users after 4 minutes and leaves the rest,
+counted as `deferred`, for the next run. They are not marked as fetched, and
+users are taken longest wait first, so nobody is left out twice in a row. One
+user gets at most 2 minutes; a daily sync of a few hundred titles takes
+seconds, because only titles nobody has listed before are asked of TMDb. At
+worst the task runs about 7 minutes (422 s: the sums are next to the budgets
+in `internal/worker/imdb.go`), which leaves the refresh before it and the
+digest after it about 23 minutes. If `deferred` is ever above zero day after
+day, raise `TASK_TIMEOUT` and the budget in `internal/worker/imdb.go`
+together; a test fails when the two no longer agree.
+
+A release sets the timeout on the job. A job that was deployed before this
+change keeps its old 540 s until the next release, or until it is set by
+hand:
+
+```bash
+gcloud run jobs update digest-worker --region "${REGION}" --task-timeout 1800s
+```
 
 **Dry run.** `IMDB_SYNC_MODE=dry-run` fetches each due list and logs the same
 lines with what the sync would do, and writes nothing: no items, no

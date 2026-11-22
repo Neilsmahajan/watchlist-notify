@@ -22,12 +22,42 @@ import (
 // a few hours still syncs everyone.
 const IMDbSyncMinGap = 20 * time.Hour
 
+// Time. The job runs its tasks one after another (refresh, imdb, digest) and
+// Cloud Run kills the whole job at its task timeout, so this task must not
+// take the time the digest needs.
+//
+// The longest this task can run:
+//
+//	240 s  imdbTaskBudget: the last user is started just before it is up
+//	  2 s  imdbPause before that user
+//	120 s  imdbUserTimeout: that user's fetch, lookups and writes
+//	 15 s  imdbWriteTimeout: storing that user's status
+//	 45 s  imdbBaselineBudget: availability for the titles the run added
+//	-----
+//	422 s  imdbWorstCase, about 7 minutes
+//
+// The job is deployed with a task timeout of 1800 s (JobTaskTimeout, set in
+// scripts/release-worker.sh). That leaves 1378 s, about 23 minutes, for the
+// refresh before this task and the digest after it; the refresh takes a
+// couple of minutes today. With the 540 s the job had before, a slow refresh
+// and a worst-case sync left the digest nothing. A test checks that the
+// script and these numbers still agree.
 const (
-	// imdbTaskBudget is how long a run keeps starting new users. The job
-	// runs the digest after this task and Cloud Run stops the whole job at
-	// its task timeout (540 s as deployed), so the sync must not take the
-	// time the digest needs. Users it does not get to are not claimed: the
-	// next run starts with whoever has waited longest.
+	// JobTaskTimeout is the Cloud Run task timeout the worker job is
+	// deployed with. scripts/release-worker.sh sets it; this constant only
+	// states it, for the sums above and the test that checks them.
+	JobTaskTimeout = 30 * time.Minute
+	// imdbWorstCase is the longest the task can run (see above).
+	imdbWorstCase = imdbTaskBudget + imdbPause + imdbUserTimeout + imdbWriteTimeout + imdbBaselineBudget
+	// jobTimeLeftForOthers is the least the refresh and the digest must be
+	// left with, together, when this task takes as long as it can.
+	jobTimeLeftForOthers = 20 * time.Minute
+)
+
+const (
+	// imdbTaskBudget is how long a run keeps starting new users. Users it
+	// does not get to are not claimed: the next run starts with whoever has
+	// waited longest.
 	imdbTaskBudget = 4 * time.Minute
 	// One user's sync may take this long in all, of which this much reading
 	// the list and this much asking TMDb. The rest is left for the writes.

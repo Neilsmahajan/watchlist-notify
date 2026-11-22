@@ -5,7 +5,9 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"os"
 	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -510,6 +512,45 @@ func TestIMDbTaskStampsMarksWithTheClaim(t *testing.T) {
 	}
 	if got := w.store.User(alice).IMDbSync.LastAttemptAt; got == nil || !got.Equal(claimed) {
 		t.Errorf("last attempt at %v, want the time of the claim %v", got, claimed)
+	}
+}
+
+// The job's tasks share one Cloud Run task timeout. The release script sets
+// it, and it has to leave the refresh and the digest their time even when
+// the IMDb sync takes as long as its budgets allow.
+func TestJobTaskTimeoutCoversTheIMDbTask(t *testing.T) {
+	if imdbWorstCase != 422*time.Second {
+		t.Errorf("worst case = %v; the sums in the comment next to the budgets say 422 s", imdbWorstCase)
+	}
+	if left := JobTaskTimeout - imdbWorstCase; left < jobTimeLeftForOthers {
+		t.Errorf("a worst-case IMDb sync leaves the refresh and the digest %v of %v, want at least %v",
+			left, JobTaskTimeout, jobTimeLeftForOthers)
+	}
+
+	script, err := os.ReadFile("../../scripts/release-worker.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	variable := regexp.MustCompile(`(?m)^TASK_TIMEOUT="(\d+)s"$`).FindSubmatch(script)
+	if variable == nil {
+		t.Fatal(`scripts/release-worker.sh no longer sets TASK_TIMEOUT="<seconds>s"`)
+	}
+	deployed, err := time.ParseDuration(string(variable[1]) + "s")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if deployed != JobTaskTimeout {
+		t.Errorf("the release script deploys with a task timeout of %v, the budgets assume %v", deployed, JobTaskTimeout)
+	}
+	// Both the create and the update of the job must use it, and nothing else.
+	uses := regexp.MustCompile(`--task-timeout\s+(\S+)`).FindAllSubmatch(script, -1)
+	if len(uses) != 2 {
+		t.Fatalf("the release script sets --task-timeout %d times, want on create and on update", len(uses))
+	}
+	for _, use := range uses {
+		if got := strings.Trim(string(use[1]), `\)`); got != `"${TASK_TIMEOUT}"` {
+			t.Errorf("--task-timeout %s; want \"${TASK_TIMEOUT}\"", got)
+		}
 	}
 }
 
