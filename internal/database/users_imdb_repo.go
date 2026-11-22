@@ -85,13 +85,15 @@ func (s *service) UnlinkIMDb(ctx context.Context, userID primitive.ObjectID) err
 
 // ListIMDbLinkedUsers returns the users with a linked IMDb list whose last
 // fetch attempt started at or before attemptedBefore (or who were never
-// fetched), oldest account first.
+// fetched). Whoever has waited longest comes first, never-fetched users
+// before everyone, so a run that cannot get to all of them does not keep
+// leaving out the same ones.
 func (s *service) ListIMDbLinkedUsers(ctx context.Context, attemptedBefore time.Time) ([]*models.User, error) {
 	collection := s.db.Database(databaseName).Collection(collUsers)
 	cursor, err := collection.Find(ctx, bson.M{
 		"imdb_sync.source_id": bson.M{"$gt": ""},
 		"$or":                 notAttemptedSince(attemptedBefore),
-	}, options.Find().SetSort(bson.D{{Key: "_id", Value: 1}}))
+	}, options.Find().SetSort(bson.D{{Key: "imdb_attempt_at", Value: 1}, {Key: "_id", Value: 1}}))
 	if err != nil {
 		return nil, err
 	}

@@ -191,8 +191,8 @@ const (
 
 func TestIMDbTaskSyncsDueUsersOneAfterAnother(t *testing.T) {
 	w := newIMDbWorld(t)
-	alice := w.link("alice@example.com", "ur0000001", 21*time.Hour, tt1, tt2)
-	bob := w.link("bob@example.com", "ls0000002", 30*time.Hour, tt2, tt3, "tt0009001")
+	alice := w.link("alice@example.com", "ur0000001", 30*time.Hour, tt1, tt2)
+	bob := w.link("bob@example.com", "ls0000002", 21*time.Hour, tt2, tt3, "tt0009001")
 	recent := w.link("carol@example.com", "ls0000003", 19*time.Hour, tt1)
 
 	if err := w.run(); err != nil {
@@ -223,7 +223,7 @@ func TestIMDbTaskSyncsDueUsersOneAfterAnother(t *testing.T) {
 	if !state.LastAttemptAt.Equal(w.now) || state.LastSyncedAt == nil || !state.LastSyncedAt.Equal(w.now) {
 		t.Errorf("attempt at %v, synced at %v; want both now", state.LastAttemptAt, state.LastSyncedAt)
 	}
-	if !state.LinkedAt.Equal(w.now.Add(-30 * time.Hour)) {
+	if !state.LinkedAt.Equal(w.now.Add(-21 * time.Hour)) {
 		t.Errorf("linked at = %v, want it unchanged", state.LinkedAt)
 	}
 	w.wantSummary(`"users":2`, `"synced":2`, `"failed":0`, `"added":4`, `"removed":0`, `"marked_missing":0`, `"unmatched":1`)
@@ -480,4 +480,41 @@ func TestIMDbTaskStopsStartingUsersAfterCancellation(t *testing.T) {
 		t.Errorf("fetched %v after cancellation, want the run to stop at the first user", w.lists.fetched)
 	}
 	w.wantSummary(`"skipped":1`)
+}
+
+// A run that is out of time leaves the remaining users for the next run,
+// without using up their fetch of the day, and the next run starts with them.
+func TestIMDbTaskDefersUsersWhenOutOfTime(t *testing.T) {
+	w := newIMDbWorld(t)
+	longest := w.link("alice@example.com", "ur0000001", 50*time.Hour, tt1)
+	w.link("bob@example.com", "ls0000002", 40*time.Hour, tt1)
+	last := w.link("carol@example.com", "ls0000003", 30*time.Hour, tt1)
+	w.task.Budget = time.Minute
+	w.lists.onFetch = func(string) { w.now = w.now.Add(40 * time.Second) } // every sync takes 40 s
+
+	if err := w.run(); err != nil {
+		t.Fatal(err)
+	}
+
+	if want := []string{"ur0000001", "ls0000002"}; !reflect.DeepEqual(w.lists.fetched, want) {
+		t.Errorf("fetched %v, want %v: longest wait first, then stop when the minute is up", w.lists.fetched, want)
+	}
+	w.wantSummary(`"users":3`, `"synced":2`, `"deferred":1`)
+	if got := w.itemIDs(longest); len(got) != 1 {
+		t.Errorf("the first user's watchlist = %v", got)
+	}
+	if got := w.itemIDs(last); len(got) != 0 {
+		t.Errorf("the deferred user's watchlist = %v, want it untouched", got)
+	}
+
+	// The deferred user's fetch of the day was not used up: a run moments
+	// later syncs exactly them.
+	w.lists.fetched = nil
+	if err := w.run(); err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"ls0000003"}; !reflect.DeepEqual(w.lists.fetched, want) {
+		t.Errorf("the next run fetched %v, want %v", w.lists.fetched, want)
+	}
+	w.wantSummary(`"users":1`, `"synced":1`, `"deferred":0`)
 }

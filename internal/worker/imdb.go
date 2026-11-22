@@ -23,16 +23,24 @@ import (
 const IMDbSyncMinGap = 20 * time.Hour
 
 const (
+	// imdbTaskBudget is how long a run keeps starting new users. The job
+	// runs the digest after this task and Cloud Run stops the whole job at
+	// its task timeout (540 s as deployed), so the sync must not take the
+	// time the digest needs. Users it does not get to are not claimed: the
+	// next run starts with whoever has waited longest.
+	imdbTaskBudget = 4 * time.Minute
 	// One user's sync may take this long in all, of which this much reading
 	// the list and this much asking TMDb. The rest is left for the writes.
-	imdbUserTimeout  = 8 * time.Minute
-	imdbFetchTimeout = 2 * time.Minute
-	imdbLookupBudget = 4 * time.Minute
+	// A daily sync needs seconds: the list is a page or two, and only titles
+	// nobody has listed before are asked of TMDb.
+	imdbUserTimeout  = 2 * time.Minute
+	imdbFetchTimeout = 45 * time.Second
+	imdbLookupBudget = 60 * time.Second
 	// imdbPause separates two users' fetches. Together with syncing users
 	// one at a time it keeps the load on IMDb at one slow, steady reader.
 	imdbPause = 2 * time.Second
 	// imdbBaselineBudget bounds storing availability for newly added titles.
-	imdbBaselineBudget = 2 * time.Minute
+	imdbBaselineBudget = 45 * time.Second
 	imdbWriteTimeout   = 15 * time.Second
 )
 
@@ -87,6 +95,9 @@ type IMDbTask struct {
 	// DryRun logs what each sync would do and writes nothing at all: no
 	// items, no status, not even the record that a fetch happened.
 	DryRun bool
+	// Budget is how long a run keeps starting new users; zero means
+	// imdbTaskBudget.
+	Budget time.Duration
 	Logger *slog.Logger
 
 	// Now and Sleep are replaceable in tests.
@@ -102,6 +113,7 @@ type imdbSummary struct {
 	failed        int // IMDb or the database could not be reached
 	notFound      int // list gone or made private
 	skipped       int // another run got there first, or this one was cancelled
+	deferred      int // left for the next run because this one ran out of time
 	added         int
 	removed       int
 	markedMissing int
@@ -109,9 +121,11 @@ type imdbSummary struct {
 }
 
 // Run syncs every linked user whose last fetch is at least IMDbSyncMinGap
-// old, one after another. A user whose sync fails is counted and logged, and
-// the run moves on to the next; the task itself fails only when the users
-// could not be listed or not one of them could be synced.
+// old, one after another, starting with whoever has waited longest. A user
+// whose sync fails is counted and logged, and the run moves on to the next;
+// the task itself fails only when the users could not be listed or not one
+// of them could be synced. A run that uses up its budget leaves the remaining
+// users, unclaimed, for the next run.
 //
 // The log carries user IDs and counts, never email addresses or titles.
 func (t *IMDbTask) Run(ctx context.Context) error {
@@ -128,7 +142,13 @@ func (t *IMDbTask) Run(ctx context.Context) error {
 		sleep = sleepContext
 	}
 
-	users, err := t.Store.ListIMDbLinkedUsers(ctx, now().Add(-IMDbSyncMinGap))
+	budget := t.Budget
+	if budget <= 0 {
+		budget = imdbTaskBudget
+	}
+	started := now()
+
+	users, err := t.Store.ListIMDbLinkedUsers(ctx, started.Add(-IMDbSyncMinGap))
 	if err != nil {
 		return fmt.Errorf("list linked users: %w", err)
 	}
@@ -143,6 +163,10 @@ func (t *IMDbTask) Run(ctx context.Context) error {
 		}
 		if user.IMDbSync == nil {
 			sum.skipped++
+			continue
+		}
+		if now().Sub(started) >= budget {
+			sum.deferred++
 			continue
 		}
 		if !t.DryRun {
@@ -212,6 +236,7 @@ func (t *IMDbTask) Run(ctx context.Context) error {
 		"failed", sum.failed,
 		"not_found", sum.notFound,
 		"skipped", sum.skipped,
+		"deferred", sum.deferred,
 		"added", sum.added,
 		"removed", sum.removed,
 		"marked_missing", sum.markedMissing,

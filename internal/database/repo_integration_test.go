@@ -980,3 +980,56 @@ func TestIMDbLink(t *testing.T) {
 		t.Error("a late outcome linked the user again")
 	}
 }
+
+// Users due for a sync come back longest wait first, never-fetched users
+// before everyone, so a run that runs out of time does not starve anyone.
+func TestListIMDbLinkedUsersOrder(t *testing.T) {
+	srv := New()
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Millisecond)
+
+	// Created in the opposite order to the one expected back.
+	attempts := []struct {
+		email string
+		ago   time.Duration // zero: never fetched
+	}{
+		{"it-imdb-order-recent@example.com", 48 * time.Hour},
+		{"it-imdb-order-oldest@example.com", 72 * time.Hour},
+		{"it-imdb-order-never@example.com", 0},
+	}
+	position := map[primitive.ObjectID]string{}
+	for i, a := range attempts {
+		if err := srv.UpsertUser(ctx, &models.User{Email: a.email, Name: "Order"}); err != nil {
+			t.Fatal(err)
+		}
+		user, err := srv.GetUserByEmail(ctx, a.email)
+		if err != nil || user == nil {
+			t.Fatalf("GetUserByEmail: %v, %v", user, err)
+		}
+		position[user.ID] = a.email
+		if a.ago > 0 {
+			if ok, err := srv.ClaimIMDbAttempt(ctx, user.ID, now.Add(-a.ago), 0); err != nil || !ok {
+				t.Fatalf("ClaimIMDbAttempt: %v, %v", ok, err)
+			}
+		}
+		link := models.IMDbSync{SourceID: fmt.Sprintf("ls90000010%d", i), LinkedAt: now}
+		if err := srv.LinkIMDb(ctx, user.ID, link); err != nil {
+			t.Fatalf("LinkIMDb: %v", err)
+		}
+	}
+
+	users, err := srv.ListIMDbLinkedUsers(ctx, now)
+	if err != nil {
+		t.Fatalf("ListIMDbLinkedUsers: %v", err)
+	}
+	var got []string
+	for _, u := range users {
+		if email, mine := position[u.ID]; mine {
+			got = append(got, email)
+		}
+	}
+	want := []string{attempts[2].email, attempts[1].email, attempts[0].email}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("order = %v, want %v", got, want)
+	}
+}

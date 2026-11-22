@@ -420,7 +420,18 @@ func (s *Store) ListIMDbLinkedUsers(_ context.Context, attemptedBefore time.Time
 		}
 		users = append(users, cloneUser(u))
 	}
-	sort.Slice(users, func(i, j int) bool { return users[i].ID.Hex() < users[j].ID.Hex() })
+	// Longest wait first; a user never fetched sorts before all others.
+	sort.Slice(users, func(i, j int) bool {
+		a, b := users[i].IMDbAttemptAt, users[j].IMDbAttemptAt
+		switch {
+		case a == nil && b == nil, a != nil && b != nil && a.Equal(*b):
+			return users[i].ID.Hex() < users[j].ID.Hex()
+		case a == nil || b == nil:
+			return a == nil
+		default:
+			return a.Before(*b)
+		}
+	})
 	return users, nil
 }
 
