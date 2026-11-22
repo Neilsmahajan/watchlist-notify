@@ -222,6 +222,15 @@ func (s *Server) availabilityHandler(c *gin.Context) {
 			found = true
 		}
 		switch {
+		case err == nil && !found:
+			// The fetch worked but left no snapshot to answer from: another
+			// request stored this title first and it could not be read back.
+			// Look once more rather than report "available nowhere".
+			if snap, found = s.storedSnapshot(c.Request.Context(), ref, region); !found {
+				log.Printf("availability: no snapshot after refresh for %s", ref.Key())
+				jsonError(c, http.StatusBadGateway, "upstream providers failed")
+				return
+			}
 		case err == nil || errors.Is(err, availability.ErrTitleNotFound):
 		case errors.Is(ctx.Err(), context.DeadlineExceeded):
 			// Out of time. The title may have been stored meanwhile, by

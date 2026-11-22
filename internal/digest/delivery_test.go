@@ -139,7 +139,7 @@ func TestRunDoesNotSendWhenDeliveriesCannotBeRecorded(t *testing.T) {
 	if len(w.mailer.sent) != 0 {
 		t.Error("an email went out without a delivery record")
 	}
-	if s := w.schedule(); s.LastSentAt != nil || s.NextScheduledAt != nil {
+	if s := w.schedule(); !releasedAndDue(s) {
 		t.Errorf("schedule = %+v, want the claim released so the next run retries", s)
 	}
 
@@ -161,7 +161,7 @@ func TestRunReleasesTheClaimEvenWhenRecordsCannotBeRemoved(t *testing.T) {
 	if err != nil || sum.SendFailed != 1 {
 		t.Errorf("Run = %+v, %v", sum, err)
 	}
-	if s := w.schedule(); s.LastSentAt != nil || s.NextScheduledAt != nil {
+	if s := w.schedule(); !releasedAndDue(s) {
 		t.Errorf("schedule = %+v, want the claim released", s)
 	}
 	if !strings.Contains(w.logs.String(), "delivery records not removed") {
@@ -284,4 +284,10 @@ func TestSnapshotSaveFailingThenSucceedingEmailsTheTitleOnce(t *testing.T) {
 	if len(w.mailer.sent) != 2 {
 		t.Errorf("%d emails were sent, want 2: each title exactly once", len(w.mailer.sent))
 	}
+}
+
+// releasedAndDue reports whether a schedule is what releasing a claim leaves:
+// nothing recorded as sent, and due again from the releasing run's time.
+func releasedAndDue(s models.DigestSchedule) bool {
+	return s.LastSentAt == nil && s.NextScheduledAt != nil
 }

@@ -135,6 +135,7 @@ if [[ ${USE_CLOUD_BUILD} -eq 1 ]]; then
       . <<'EOF'
 steps:
   - name: 'gcr.io/cloud-builders/docker'
+    env: ['DOCKER_BUILDKIT=1'] # the Dockerfile uses RUN --mount cache mounts
     args:
       - 'build'
       - '-f'

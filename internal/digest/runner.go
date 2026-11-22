@@ -422,7 +422,17 @@ func (r *Runner) release(ctx context.Context, userID primitive.ObjectID, claimed
 			"user_id", userID.Hex(), "events", len(eventIDs), "error", err.Error())
 	}
 
-	won, err := r.store.CompareAndSwapDigestSchedule(ctx, userID, claimed, unclaimed, false)
+	// Released is not quite "as it was": the user is due again from this
+	// run's time rather than from the original one. An overlapping run that
+	// selected its events while this claim was held saw this run's delivery
+	// records and left those events out; with the original schedule restored
+	// exactly, its compare-and-set would still succeed and it would send that
+	// incomplete digest. Changing the value makes that run lose the claim, and
+	// the next run selects again from scratch.
+	dueAgain := unclaimed
+	dueAgain.NextScheduledAt = claimed.LastSentAt
+
+	won, err := r.store.CompareAndSwapDigestSchedule(ctx, userID, claimed, dueAgain, false)
 	return removed, won && err == nil
 }
 

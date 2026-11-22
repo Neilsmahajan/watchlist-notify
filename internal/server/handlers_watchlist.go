@@ -480,8 +480,13 @@ func (s *Server) importWatchlistHandler(c *gin.Context) {
 		_ = closer.Close()
 	}(file)
 
+	// One deadline for every row, so a slow TMDb cannot carry the import past
+	// the server's write timeout. Rows that did not fit are reported; uploading
+	// the file again continues where it stopped (imported rows are duplicates).
 	start := time.Now()
-	result, imported, err := s.importWatchlistFromCSV(c.Request.Context(), user.ID, file)
+	importCtx, cancelImport := context.WithTimeout(c.Request.Context(), importDeadline-3*time.Second)
+	defer cancelImport()
+	result, imported, err := s.importWatchlistFromCSV(importCtx, user.ID, file)
 	if err != nil {
 		jsonError(c, http.StatusBadRequest, err.Error())
 		return
@@ -556,6 +561,10 @@ func (s *Server) importWatchlistFromCSV(ctx context.Context, userID primitive.Ob
 			break
 		}
 		rowNumber++
+		if ctx.Err() != nil {
+			result.Errors = append(result.Errors, watchlistRowError{Row: rowNumber, Reason: "import ran out of time at this row; upload the file again to continue"})
+			break
+		}
 		if err != nil {
 			result.Errors = append(result.Errors, watchlistRowError{Row: rowNumber, Reason: "failed to parse row"})
 			continue

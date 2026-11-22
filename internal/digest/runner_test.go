@@ -342,14 +342,23 @@ func TestRunDoesNotEmailAUserWhoJustOptedOut(t *testing.T) {
 func TestRunReleasesTheClaimWhenTheSendDefinitelyFailed(t *testing.T) {
 	w := newWorld(t)
 	w.mailer.err = &notifications.RejectedError{StatusCode: 422, ErrorCode: 300}
+	before := w.schedule()
 
 	sum := w.run(w.runner(ModeSend, w.user.Email))
 
 	if sum.SendFailed != 1 || sum.Sent != 0 {
 		t.Errorf("summary = %+v", sum)
 	}
-	if s := w.schedule(); s.LastSentAt != nil || s.NextScheduledAt != nil {
-		t.Errorf("schedule = %+v, want the claim released", s)
+	after := w.schedule()
+	if !releasedAndDue(after) {
+		t.Errorf("schedule = %+v, want the claim released", after)
+	}
+	// An overlapping run that read the schedule before this one claimed it
+	// selected its events around this run's delivery records. It must not be
+	// able to claim with what it read.
+	won, err := w.store.CompareAndSwapDigestSchedule(context.Background(), w.user.ID, before, after, true)
+	if err != nil || won {
+		t.Errorf("claim with the pre-release schedule = %v, %v; want it lost", won, err)
 	}
 	if got := w.store.Deliveries(w.user.ID); len(got) != 0 {
 		t.Errorf("delivery records = %v, want none: nothing was delivered", got)
