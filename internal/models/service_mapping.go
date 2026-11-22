@@ -47,6 +47,7 @@ var providerIDs = map[int]string{
 	283:  ServiceCrunchyroll,   // Crunchyroll
 	43:   ServiceStarz,         // Starz
 	526:  ServiceAMCPlus,       // AMC+
+	1768: ServiceESPNPlus,      // ESPN Plus
 	520:  ServiceDiscoveryPlus, // Discovery+
 
 	// Storefronts that share a name with a subscription service. They only

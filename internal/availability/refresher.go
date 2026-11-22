@@ -60,9 +60,9 @@ type Option func(*Refresher)
 
 // WithMinAge makes RefreshAll leave alone titles that were checked less than
 // d ago in every region. It lets the job run more often than availability
-// needs refreshing (the digest wants an hourly look at who is due; provider
-// data changes daily at most) and makes re-running after a partial failure
-// cheap. Zero, the default, refreshes everything every time.
+// needs refreshing (provider data changes daily at most) and makes re-running
+// after a partial failure cheap. Zero, the default, refreshes everything every
+// time.
 func WithMinAge(d time.Duration) Option {
 	return func(r *Refresher) { r.minAge = d }
 }

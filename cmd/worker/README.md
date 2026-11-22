@@ -136,15 +136,14 @@ gcloud logging read \
 
 ### Schedule
 
-The job is safe to trigger hourly: `refresh` skips titles it checked within
-`REFRESH_MIN_AGE`, and `digest` only acts on users who are due. An hourly
-trigger sends digests close to each user's scheduled time; a daily one works
-too.
+Production runs the job once a day (09:00 UTC). It is also safe to trigger
+more often: `refresh` skips titles it checked within `REFRESH_MIN_AGE`, and
+`digest` only acts on users who are due.
 
 ```bash
-gcloud scheduler jobs create http digest-worker-hourly \
+gcloud scheduler jobs create http digest-worker-daily \
   --location "${REGION}" \
-  --schedule "0 * * * *" \
+  --schedule "0 9 * * *" \
   --uri "https://${REGION}-run.googleapis.com/apis/run.googleapis.com/v1/namespaces/${PROJECT_ID}/jobs/digest-worker:run" \
   --http-method POST \
   --oauth-service-account-email "digest-scheduler@${PROJECT_ID}.iam.gserviceaccount.com"

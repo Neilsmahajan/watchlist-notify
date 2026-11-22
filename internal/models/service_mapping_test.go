@@ -30,7 +30,8 @@ func TestMapProvider(t *testing.T) {
 		{"name fallback", 999001, "Netflix", ServiceNetflix, true},
 		{"name fallback ignores case and punctuation", 999002, "  DISNEY+ ", ServiceDisneyPlus, true},
 		{"name fallback for a variant", 999003, "Paramount+ Essential", ServiceParamountPlus, true},
-		{"name fallback for espn", 999004, "ESPN Plus", ServiceESPNPlus, true},
+		{"espn by id", 1768, "ESPN Plus", ServiceESPNPlus, true},
+		{"name fallback for an unknown espn id", 999004, "ESPN Plus", ServiceESPNPlus, true},
 		{"name fallback for max", 999005, "Max", ServiceMax, true},
 
 		// Resale channels are a different subscription and never map.
