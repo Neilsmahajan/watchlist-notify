@@ -2,9 +2,7 @@ package server
 
 import (
 	"context"
-	"encoding/csv"
 	"errors"
-	"io"
 	"log"
 	"net/http"
 	"strconv"
@@ -14,7 +12,6 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/neilsmahajan/watchlist-notify/internal/database"
 	"github.com/neilsmahajan/watchlist-notify/internal/models"
-	"github.com/neilsmahajan/watchlist-notify/internal/providers/tmdb"
 	"github.com/neilsmahajan/watchlist-notify/internal/watchlist"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 )
@@ -121,14 +118,8 @@ func (s *Server) createWatchlistItemHandler(c *gin.Context) {
 	c.JSON(http.StatusCreated, item)
 }
 
-const (
-	// createEnsureBudget bounds the availability fetch when adding one item.
-	createEnsureBudget = 1500 * time.Millisecond
-	// importEnsureBudget bounds it after a CSV import, however many rows.
-	importEnsureBudget = 6 * time.Second
-	// importDeadline leaves room under the server's 30 s write timeout.
-	importDeadline = 25 * time.Second
-)
+// createEnsureBudget bounds the availability fetch when adding one item.
+const createEnsureBudget = 1500 * time.Millisecond
 
 // ensureTitles stores availability baselines for titles that have none in the
 // user's region, spending at most budget. Failures are logged by the
@@ -431,240 +422,4 @@ func (s *Server) deleteWatchlistItemHandler(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"message": "watchlist item deleted"})
-}
-
-// importWatchlistHandler godoc
-// @Summary Import watchlist from CSV
-// @Description Bulk import watchlist items from a CSV file (IMDb export format)
-// @Tags Watchlist
-// @Security BearerAuth
-// @Accept multipart/form-data
-// @Produce json
-// @Param file formData file true "CSV file containing watchlist items (max 10MB)"
-// @Success 200 {object} map[string]interface{} "Import results with counts"
-// @Failure 400 {object} ErrorResponse "Invalid file or format"
-// @Failure 401 {object} ErrorResponse "Unauthorized"
-// @Failure 503 {object} ErrorResponse "Import service unavailable"
-// @Router /api/watchlist/import [post]
-func (s *Server) importWatchlistHandler(c *gin.Context) {
-	user, ok := s.getUser(c)
-	if !ok {
-		return
-	}
-	if s.tmdb == nil {
-		jsonError(c, http.StatusServiceUnavailable, "import unavailable")
-		return
-	}
-
-	fileHeader, err := c.FormFile("file")
-	if err != nil {
-		jsonError(c, http.StatusBadRequest, "file is required")
-		return
-	}
-	if fileHeader.Size == 0 {
-		jsonError(c, http.StatusBadRequest, "file is empty")
-		return
-	}
-	const maxImportSize = int64(10 << 20) // 10 MB
-	if fileHeader.Size > maxImportSize {
-		jsonError(c, http.StatusBadRequest, "file too large (max 10MB)")
-		return
-	}
-
-	file, err := fileHeader.Open()
-	if err != nil {
-		jsonError(c, http.StatusBadRequest, "failed to open file")
-		return
-	}
-	defer func(closer io.ReadCloser) {
-		_ = closer.Close()
-	}(file)
-
-	// One deadline for every row, so a slow TMDb cannot carry the import past
-	// the server's write timeout. Rows that did not fit are reported; uploading
-	// the file again continues where it stopped (imported rows are duplicates).
-	start := time.Now()
-	importCtx, cancelImport := context.WithTimeout(c.Request.Context(), importDeadline-3*time.Second)
-	defer cancelImport()
-	result, imported, err := s.importWatchlistFromCSV(importCtx, user.ID, file)
-	if err != nil {
-		jsonError(c, http.StatusBadRequest, err.Error())
-		return
-	}
-
-	// Availability for the new titles is fetched once, after the rows are in,
-	// with bounded concurrency and a fixed budget: the import does not get
-	// slower per row. Whatever does not fit is picked up by the list's miss
-	// handling or the daily refresh.
-	budget := importEnsureBudget
-	if remaining := importDeadline - time.Since(start); remaining < budget {
-		budget = remaining
-	}
-	s.ensureTitles(c.Request.Context(), user, imported, budget)
-
-	c.JSON(http.StatusOK, gin.H{
-		"imported":   result.Imported,
-		"duplicates": result.Duplicates,
-		"errors":     result.Errors,
-	})
-}
-
-type watchlistImportResult struct {
-	Imported   int                 `json:"imported"`
-	Duplicates int                 `json:"duplicates"`
-	Errors     []watchlistRowError `json:"errors"`
-}
-
-type watchlistRowError struct {
-	Row    int    `json:"row"`
-	Reason string `json:"reason"`
-}
-
-// importWatchlistFromCSV creates a watchlist item per CSV row. Besides the
-// result it returns the titles of the items it created.
-func (s *Server) importWatchlistFromCSV(ctx context.Context, userID primitive.ObjectID, reader io.Reader) (*watchlistImportResult, []models.TitleRef, error) {
-	if s.tmdb == nil {
-		return nil, nil, errors.New("tmdb client not configured")
-	}
-
-	csvReader := csv.NewReader(reader)
-	csvReader.FieldsPerRecord = -1
-	csvReader.TrimLeadingSpace = true
-	csvReader.LazyQuotes = true
-
-	header, err := csvReader.Read()
-	if err != nil {
-		return nil, nil, err
-	}
-	if len(header) == 0 {
-		return nil, nil, errors.New("missing header row")
-	}
-	header[0] = strings.TrimPrefix(header[0], "\ufeff")
-
-	colIndex := make(map[string]int, len(header))
-	for i, col := range header {
-		colIndex[col] = i
-	}
-	constIdx, ok := colIndex["Const"]
-	if !ok {
-		return nil, nil, errors.New("missing required column: Const")
-	}
-
-	result := &watchlistImportResult{}
-	var imported []models.TitleRef
-	cache := make(map[string]*tmdb.Result)
-	rowNumber := 1
-
-	for {
-		record, err := csvReader.Read()
-		if err == io.EOF {
-			break
-		}
-		rowNumber++
-		if ctx.Err() != nil {
-			result.Errors = append(result.Errors, watchlistRowError{Row: rowNumber, Reason: "import ran out of time at this row; upload the file again to continue"})
-			break
-		}
-		if err != nil {
-			result.Errors = append(result.Errors, watchlistRowError{Row: rowNumber, Reason: "failed to parse row"})
-			continue
-		}
-		if len(record) <= constIdx {
-			result.Errors = append(result.Errors, watchlistRowError{Row: rowNumber, Reason: "missing IMDb ID"})
-			continue
-		}
-
-		imdbID := strings.TrimSpace(record[constIdx])
-		if imdbID == "" {
-			result.Errors = append(result.Errors, watchlistRowError{Row: rowNumber, Reason: "missing IMDb ID"})
-			continue
-		}
-
-		tmdbItem, lookupErr := s.lookupTMDbByIMDb(ctx, imdbID, cache)
-		if lookupErr != nil {
-			result.Errors = append(result.Errors, watchlistRowError{Row: rowNumber, Reason: "tmdb lookup failed: " + lookupErr.Error()})
-			continue
-		}
-		if tmdbItem == nil {
-			result.Errors = append(result.Errors, watchlistRowError{Row: rowNumber, Reason: "no tmdb match for imdb id " + imdbID})
-			continue
-		}
-
-		watchlistType, ok := tmdbMediaTypeToWatchlistType(tmdbItem.Type)
-		if !ok {
-			result.Errors = append(result.Errors, watchlistRowError{Row: rowNumber, Reason: "unsupported tmdb media type"})
-			continue
-		}
-
-		title := strings.TrimSpace(tmdbItem.Title)
-		if title == "" {
-			title = imdbID
-		}
-
-		item := &models.WatchlistItem{
-			UserID: userID,
-			Title:  title,
-			Type:   watchlistType,
-			IMDbID: imdbID,
-			Status: models.WatchlistStatusPlanned,
-		}
-		if tmdbItem.TMDBID > 0 {
-			item.TMDbID = tmdbItem.TMDBID
-		}
-		if tmdbItem.Year > 0 {
-			item.Year = tmdbItem.Year
-		}
-
-		if err := s.db.CreateWatchlistItem(ctx, item); err != nil {
-			if errors.Is(err, database.ErrDuplicateWatchlistItem) {
-				result.Duplicates++
-				continue
-			}
-			result.Errors = append(result.Errors, watchlistRowError{Row: rowNumber, Reason: err.Error()})
-			continue
-		}
-
-		result.Imported++
-		if ref, ok := item.TitleRef(); ok {
-			imported = append(imported, ref)
-		}
-	}
-
-	if result.Imported == 0 && result.Duplicates == 0 && len(result.Errors) > 0 {
-		return nil, nil, errors.New("no rows imported")
-	}
-
-	return result, imported, nil
-}
-
-func (s *Server) lookupTMDbByIMDb(ctx context.Context, imdbID string, cache map[string]*tmdb.Result) (*tmdb.Result, error) {
-	if cached, seen := cache[imdbID]; seen {
-		return cached, nil
-	}
-	// Bounded per row, so one rate-limited lookup cannot hold the import for
-	// the length of the client's whole retry schedule.
-	ctx, cancel := s.lookupContext(ctx)
-	defer cancel()
-	res, err := s.tmdb.FindByExternalID(ctx, imdbID, tmdb.ExternalSourceIMDbID)
-	if err != nil {
-		return nil, err
-	}
-	if res == nil {
-		cache[imdbID] = nil
-		return nil, nil
-	}
-	cpy := *res
-	cache[imdbID] = &cpy
-	return cache[imdbID], nil
-}
-
-func tmdbMediaTypeToWatchlistType(mediaType string) (string, bool) {
-	switch strings.ToLower(mediaType) {
-	case "movie":
-		return models.WatchlistTypeMovie, true
-	case "tv":
-		return models.WatchlistTypeShow, true
-	default:
-		return "", false
-	}
 }

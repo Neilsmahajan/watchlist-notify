@@ -61,7 +61,9 @@ type SyncResult struct {
 //   - The whole list was read: the full reconcile runs. Status "ok", or
 //     "partial" when some titles could not be looked up or written yet.
 func (r *Reconciler) SyncList(ctx context.Context, req SyncRequest) SyncResult {
-	at := r.now().UTC()
+	// Milliseconds, like the database stores, so the state handed back is
+	// exactly the state that will be read later.
+	at := r.now().UTC().Truncate(time.Millisecond)
 	state := models.IMDbSync{SourceID: req.SourceID, LinkedAt: at}
 	if req.Previous != nil && req.Previous.SourceID == req.SourceID {
 		// Same list as before: keep when it was linked, when it last synced
