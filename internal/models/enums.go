@@ -1,10 +1,10 @@
 package models
 
-// Digest interval units for DigestSettings
+// Digest interval units as stored in DigestSettings.IntervalUnit.
 const (
-	DigestIntervalDay   = "day"
-	DigestIntervalWeek  = "week"
-	DigestIntervalMonth = "month"
+	DigestUnitDays   = "days"
+	DigestUnitWeeks  = "weeks"
+	DigestUnitMonths = "months"
 )
 
 // Watchlist item types

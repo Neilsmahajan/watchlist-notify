@@ -1,6 +1,7 @@
 package models
 
-// Supported service codes (phase 1 subset). Use lowercase stable codes.
+// Supported service codes. These are stored on user documents, so they are a
+// stable contract: display names and TMDb provider IDs may change, codes never do.
 const (
 	ServiceNetflix       = "netflix"
 	ServicePrimeVideo    = "prime_video"
@@ -36,16 +37,18 @@ type ServiceInfo struct {
 	Access string
 }
 
-// ServiceCatalog is the single source of truth for supported services and their display names.
+// ServiceCatalog is the single source of truth for supported services and
+// their display names. Names follow what the services call themselves today
+// (TMDb renamed Max back to "HBO Max" and Apple TV+ to "Apple TV").
 var ServiceCatalog = []ServiceInfo{
 	{Code: ServiceNetflix, Name: "Netflix", Access: ServiceAccessSubscription},
 	{Code: ServicePrimeVideo, Name: "Prime Video", Access: ServiceAccessSubscription},
 	{Code: ServiceHulu, Name: "Hulu", Access: ServiceAccessSubscription},
 	{Code: ServiceDisneyPlus, Name: "Disney+", Access: ServiceAccessSubscription},
-	{Code: ServiceMax, Name: "Max", Access: ServiceAccessSubscription},
+	{Code: ServiceMax, Name: "HBO Max", Access: ServiceAccessSubscription},
 	{Code: ServiceParamountPlus, Name: "Paramount+", Access: ServiceAccessSubscription},
 	{Code: ServicePeacock, Name: "Peacock", Access: ServiceAccessSubscription},
-	{Code: ServiceAppleTVPlus, Name: "Apple TV+", Access: ServiceAccessSubscription},
+	{Code: ServiceAppleTVPlus, Name: "Apple TV", Access: ServiceAccessSubscription},
 	{Code: ServicePlutoTV, Name: "Pluto TV", Access: ServiceAccessAds},
 	{Code: ServiceTubi, Name: "Tubi", Access: ServiceAccessAds},
 	{Code: ServiceRokuChannel, Name: "The Roku Channel", Access: ServiceAccessAds},
@@ -59,29 +62,30 @@ var ServiceCatalog = []ServiceInfo{
 }
 
 // ServiceCodeSet provides quick validation for service codes (keys are lowercase codes).
-var ServiceCodeSet = map[string]bool{
-	ServiceNetflix:       true,
-	ServicePrimeVideo:    true,
-	ServiceHulu:          true,
-	ServiceDisneyPlus:    true,
-	ServiceMax:           true,
-	ServiceParamountPlus: true,
-	ServicePeacock:       true,
-	ServiceAppleTVPlus:   true,
-	ServicePlutoTV:       true,
-	ServiceTubi:          true,
-	ServiceRokuChannel:   true,
-	ServicePlex:          true,
-	ServiceMGMPlus:       true,
-	ServiceCrunchyroll:   true,
-	ServiceStarz:         true,
-	ServiceAMCPlus:       true,
-	ServiceESPNPlus:      true,
-	ServiceDiscoveryPlus: true,
+var ServiceCodeSet = func() map[string]bool {
+	set := make(map[string]bool, len(ServiceCatalog))
+	for _, s := range ServiceCatalog {
+		set[s.Code] = true
+	}
+	return set
+}()
+
+var serviceNames = func() map[string]string {
+	names := make(map[string]string, len(ServiceCatalog))
+	for _, s := range ServiceCatalog {
+		names[s.Code] = s.Name
+	}
+	return names
+}()
+
+// ServiceName returns the display name for a service code, or the code itself
+// when it is not in the catalog.
+func ServiceName(code string) string {
+	if name, ok := serviceNames[code]; ok {
+		return name
+	}
+	return code
 }
 
-// Notification defaults
-const (
-	DefaultDigestHour     = 14
-	DefaultDigestTimezone = "Etc/UTC" // override per region during user creation
-)
+// DefaultRegion is used when neither the user nor the environment names one.
+const DefaultRegion = "US"

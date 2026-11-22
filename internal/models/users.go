@@ -1,6 +1,7 @@
 package models
 
 import (
+	"strings"
 	"time"
 
 	"go.mongodb.org/mongo-driver/bson/primitive"
@@ -21,6 +22,18 @@ type DigestSettings struct {
 	NextScheduledAt *time.Time `bson:"next_scheduled_at,omitempty" json:"next_scheduled_at,omitempty"`
 }
 
+// DigestSchedule is the part of DigestSettings that tracks sends. The digest
+// job claims a user by compare-and-swapping these two fields together.
+type DigestSchedule struct {
+	LastSentAt      *time.Time
+	NextScheduledAt *time.Time
+}
+
+// Schedule returns the settings' current schedule state.
+func (d DigestSettings) Schedule() DigestSchedule {
+	return DigestSchedule{LastSentAt: d.LastSentAt, NextScheduledAt: d.NextScheduledAt}
+}
+
 type Preferences struct {
 	NotifyEmail      string         `bson:"notify_email,omitempty" json:"notify_email,omitempty"`
 	UseAccountEmail  bool           `bson:"use_account_email" json:"use_account_email"`
@@ -39,4 +52,32 @@ type User struct {
 	Preferences Preferences           `bson:"preferences" json:"preferences"`
 	CreatedAt   time.Time             `bson:"created_at" json:"created_at"`
 	UpdatedAt   time.Time             `bson:"updated_at" json:"updated_at"`
+}
+
+// ActiveServiceCodes returns the codes of the services the user currently has.
+func (u *User) ActiveServiceCodes() map[string]bool {
+	active := make(map[string]bool, len(u.Services))
+	for _, svc := range u.Services {
+		if svc.Active {
+			active[strings.ToLower(svc.Code)] = true
+		}
+	}
+	return active
+}
+
+// RegionOr returns the user's region, or fallback when it is unset or invalid.
+func (u *User) RegionOr(fallback string) string {
+	if region, ok := NormalizeRegion(u.Region); ok {
+		return region
+	}
+	return fallback
+}
+
+// DigestRecipient returns the address digests go to: the notification email
+// when the user set one and opted out of using the account email.
+func (u *User) DigestRecipient() string {
+	if !u.Preferences.UseAccountEmail && strings.TrimSpace(u.Preferences.NotifyEmail) != "" {
+		return strings.TrimSpace(u.Preferences.NotifyEmail)
+	}
+	return u.Email
 }
