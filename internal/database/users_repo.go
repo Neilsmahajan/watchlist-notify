@@ -37,7 +37,9 @@ func (s *service) UpsertUser(ctx context.Context, u *models.User) error {
 		"updated_at": now,
 	}
 	if u.Region != "" {
+		// One path cannot be in both $set and $setOnInsert.
 		set["region"] = u.Region
+		delete(setOnInsert, "region")
 	}
 	_, err := collection.UpdateOne(ctx, bson.M{"email": u.Email}, bson.M{
 		"$set":         set,
