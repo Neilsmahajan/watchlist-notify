@@ -18,6 +18,32 @@ import (
 
 func (s *service) CreateWatchlistItem(ctx context.Context, item *models.WatchlistItem) error {
 	coll := s.db.Database(databaseName).Collection(collWatchlist)
+	if err := normalizeWatchlistItem(item); err != nil {
+		return err
+	}
+	now := time.Now()
+	item.AddedAt = now
+	item.UpdatedAt = now
+	res, err := coll.InsertOne(ctx, item)
+	if err != nil {
+		var we mongo.WriteException
+		if errors.As(err, &we) {
+			for _, e := range we.WriteErrors {
+				if e.Code == duplicateKeyCode {
+					return ErrDuplicateWatchlistItem
+				}
+			}
+		}
+		return err
+	}
+	if oid, ok := res.InsertedID.(primitive.ObjectID); ok {
+		item.ID = oid
+	}
+	return nil
+}
+
+// normalizeWatchlistItem validates a new item and tidies its fields in place.
+func normalizeWatchlistItem(item *models.WatchlistItem) error {
 	if item == nil {
 		return errors.New("item is required")
 	}
@@ -62,25 +88,66 @@ func (s *service) CreateWatchlistItem(ctx context.Context, item *models.Watchlis
 		}
 		item.Tags = tags
 	}
-	now := time.Now()
-	item.AddedAt = now
-	item.UpdatedAt = now
-	res, err := coll.InsertOne(ctx, item)
-	if err != nil {
-		var we mongo.WriteException
-		if errors.As(err, &we) {
-			for _, e := range we.WriteErrors {
-				if e.Code == 11000 {
-					return ErrDuplicateWatchlistItem
-				}
-			}
-		}
-		return err
-	}
-	if oid, ok := res.InsertedID.(primitive.ObjectID); ok {
-		item.ID = oid
-	}
 	return nil
+}
+
+// CreateWatchlistItems inserts many items in one round trip and returns the
+// ones that were created, with their IDs and timestamps set. An item that
+// collides with a unique index (the user already has that title) is skipped,
+// not treated as a failure: len(items) - len(created) is the number of
+// duplicates when err is nil.
+//
+// The insert is unordered, so one bad item does not stop the rest. If some
+// items failed for another reason, the created ones are still returned along
+// with the first such error. If the outcome is unknown (the connection
+// dropped, the context ended) nothing is returned but the error; inserting
+// the same items again later is safe, because the unique indexes turn the
+// ones that did land into duplicates.
+//
+// Items are stamped a millisecond apart, the last one with the current time,
+// so the default newest-first listing shows them in a stable order: the end
+// of the slice first.
+func (s *service) CreateWatchlistItems(ctx context.Context, items []*models.WatchlistItem) ([]*models.WatchlistItem, error) {
+	if len(items) == 0 {
+		return nil, nil
+	}
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	docs := make([]any, len(items))
+	for i, item := range items {
+		if err := normalizeWatchlistItem(item); err != nil {
+			return nil, fmt.Errorf("item %d: %w", i, err)
+		}
+		item.ID = primitive.NewObjectID()
+		item.AddedAt = now.Add(-time.Duration(len(items)-1-i) * time.Millisecond)
+		item.UpdatedAt = item.AddedAt
+		docs[i] = item
+	}
+
+	coll := s.db.Database(databaseName).Collection(collWatchlist)
+	_, err := coll.InsertMany(ctx, docs, options.InsertMany().SetOrdered(false))
+	if err == nil {
+		return items, nil
+	}
+	var bulkErr mongo.BulkWriteException
+	if !errors.As(err, &bulkErr) || bulkErr.WriteConcernError != nil {
+		return nil, err
+	}
+	// Every index that is not listed as a write error was inserted.
+	failed := make(map[int]bool, len(bulkErr.WriteErrors))
+	var firstErr error
+	for _, writeErr := range bulkErr.WriteErrors {
+		failed[writeErr.Index] = true
+		if writeErr.Code != duplicateKeyCode && firstErr == nil {
+			firstErr = fmt.Errorf("insert watchlist item: %s", writeErr.Message)
+		}
+	}
+	created := make([]*models.WatchlistItem, 0, len(items)-len(failed))
+	for i, item := range items {
+		if !failed[i] {
+			created = append(created, item)
+		}
+	}
+	return created, firstErr
 }
 
 func (s *service) ListWatchlistItems(ctx context.Context, opts models.ListWatchlistOptions) ([]*models.WatchlistItem, error) {

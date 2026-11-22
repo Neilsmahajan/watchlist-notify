@@ -2,7 +2,8 @@
 // database.Service, for unit tests that must run without a database. It
 // reproduces the semantics the application relies on: compare-and-set on
 // snapshots and digest schedules, event de-duplication by ID, per-region
-// projection, and millisecond time precision.
+// projection, the two unique indexes on watchlist items, the conditions on
+// the IMDb sync's writes, and millisecond time precision.
 package storetest
 
 import (
@@ -93,7 +94,17 @@ func (s *Store) AddUser(u *models.User) *models.User {
 func (s *Store) User(id primitive.ObjectID) *models.User {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	cp := *s.users[id]
+	return cloneUser(s.users[id])
+}
+
+func cloneUser(u *models.User) *models.User {
+	cp := *u
+	if u.IMDbSync != nil {
+		sync := *u.IMDbSync
+		sync.LastAttemptAt, sync.LastSyncedAt = msPtr(sync.LastAttemptAt), msPtr(sync.LastSyncedAt)
+		cp.IMDbSync = &sync
+	}
+	cp.IMDbAttemptAt = msPtr(u.IMDbAttemptAt)
 	return &cp
 }
 
@@ -107,6 +118,40 @@ func (s *Store) AddItem(item *models.WatchlistItem) *models.WatchlistItem {
 	cp := *item
 	s.items = append(s.items, &cp)
 	return item
+}
+
+// Items returns copies of the user's watchlist items, in insertion order.
+func (s *Store) Items(userID primitive.ObjectID) []*models.WatchlistItem {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []*models.WatchlistItem
+	for _, item := range s.items {
+		if item.UserID == userID {
+			out = append(out, cloneItem(item))
+		}
+	}
+	return out
+}
+
+// EditItem changes a stored item in place, the way a user's edit arriving
+// from another request would. It reports whether the item exists.
+func (s *Store) EditItem(id primitive.ObjectID, edit func(*models.WatchlistItem)) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, item := range s.items {
+		if item.ID == id {
+			edit(item)
+			return true
+		}
+	}
+	return false
+}
+
+func cloneItem(item *models.WatchlistItem) *models.WatchlistItem {
+	cp := *item
+	cp.Tags = append([]string(nil), item.Tags...)
+	cp.IMDbMissingSince = msPtr(item.IMDbMissingSince)
+	return &cp
 }
 
 // PutTitle stores a title document as is.
@@ -204,8 +249,7 @@ func (s *Store) GetUserByEmail(_ context.Context, email string) (*models.User, e
 	}
 	for _, u := range s.users {
 		if strings.EqualFold(u.Email, email) {
-			cp := *u
-			return &cp, nil
+			return cloneUser(u), nil
 		}
 	}
 	return nil, nil
@@ -279,26 +323,237 @@ func (s *Store) DistinctUserRegions(context.Context) ([]string, error) {
 	return regions, nil
 }
 
+// duplicateOf reports whether the user already has the item's title, under
+// the same rules as the two unique indexes: (user, type, TMDb ID) and
+// (user, IMDb ID).
+func (s *Store) duplicateOf(item *models.WatchlistItem) bool {
+	for _, existing := range s.items {
+		if existing.UserID != item.UserID {
+			continue
+		}
+		if item.TMDbID > 0 && existing.TMDbID == item.TMDbID && existing.Type == item.Type {
+			return true
+		}
+		if item.IMDbID != "" && existing.IMDbID == item.IMDbID {
+			return true
+		}
+	}
+	return false
+}
+
+// --- IMDb link ---
+
+func (s *Store) ClaimIMDbAttempt(_ context.Context, userID primitive.ObjectID, now time.Time, minGap time.Duration) (bool, error) {
+	unlock, err := s.begin("ClaimIMDbAttempt")
+	defer unlock()
+	if err != nil {
+		return false, err
+	}
+	u, ok := s.users[userID]
+	if !ok {
+		return false, nil
+	}
+	if u.IMDbAttemptAt != nil && u.IMDbAttemptAt.After(ms(now.Add(-minGap))) {
+		return false, nil
+	}
+	u.IMDbAttemptAt = msPtr(&now)
+	s.Writes++
+	return true, nil
+}
+
+func (s *Store) LinkIMDb(_ context.Context, userID primitive.ObjectID, sync models.IMDbSync) error {
+	unlock, err := s.begin("LinkIMDb")
+	defer unlock()
+	if err != nil {
+		return err
+	}
+	u, ok := s.users[userID]
+	if !ok {
+		return database.ErrUserNotFound
+	}
+	u.IMDbSync = &sync
+	s.Writes++
+	return nil
+}
+
+func (s *Store) UpdateIMDbSync(_ context.Context, userID primitive.ObjectID, sync models.IMDbSync) (bool, error) {
+	unlock, err := s.begin("UpdateIMDbSync")
+	defer unlock()
+	if err != nil {
+		return false, err
+	}
+	u, ok := s.users[userID]
+	if !ok || u.IMDbSync == nil || u.IMDbSync.SourceID != sync.SourceID {
+		return false, nil
+	}
+	u.IMDbSync = &sync
+	s.Writes++
+	return true, nil
+}
+
+func (s *Store) UnlinkIMDb(_ context.Context, userID primitive.ObjectID) error {
+	unlock, err := s.begin("UnlinkIMDb")
+	defer unlock()
+	if err != nil {
+		return err
+	}
+	if u, ok := s.users[userID]; ok {
+		u.IMDbSync = nil
+		s.Writes++
+	}
+	return nil
+}
+
+func (s *Store) ListIMDbLinkedUsers(_ context.Context, attemptedBefore time.Time) ([]*models.User, error) {
+	unlock, err := s.begin("ListIMDbLinkedUsers")
+	defer unlock()
+	if err != nil {
+		return nil, err
+	}
+	var users []*models.User
+	for _, u := range s.users {
+		if u.IMDbSync == nil || u.IMDbSync.SourceID == "" {
+			continue
+		}
+		if u.IMDbAttemptAt != nil && u.IMDbAttemptAt.After(ms(attemptedBefore)) {
+			continue
+		}
+		users = append(users, cloneUser(u))
+	}
+	sort.Slice(users, func(i, j int) bool { return users[i].ID.Hex() < users[j].ID.Hex() })
+	return users, nil
+}
+
+// --- watchlist ---
+
 func (s *Store) CreateWatchlistItem(_ context.Context, item *models.WatchlistItem) error {
 	unlock, err := s.begin("CreateWatchlistItem")
 	defer unlock()
 	if err != nil {
 		return err
 	}
-	for _, existing := range s.items {
-		if existing.UserID == item.UserID && item.TMDbID > 0 && existing.TMDbID == item.TMDbID && existing.Type == item.Type {
-			return database.ErrDuplicateWatchlistItem
-		}
+	if s.duplicateOf(item) {
+		return database.ErrDuplicateWatchlistItem
 	}
 	item.ID = primitive.NewObjectID()
 	if item.AddedAt.IsZero() {
 		item.AddedAt = ms(time.Now())
 	}
 	item.UpdatedAt = item.AddedAt
-	cp := *item
-	s.items = append(s.items, &cp)
+	s.items = append(s.items, cloneItem(item))
 	s.Writes++
 	return nil
+}
+
+// CreateWatchlistItems inserts the items that are not duplicates and returns
+// them, stamped a millisecond apart like the real insert.
+func (s *Store) CreateWatchlistItems(_ context.Context, items []*models.WatchlistItem) ([]*models.WatchlistItem, error) {
+	unlock, err := s.begin("CreateWatchlistItems")
+	defer unlock()
+	if err != nil {
+		return nil, err
+	}
+	now := ms(time.Now())
+	var created []*models.WatchlistItem
+	for i, item := range items {
+		if s.duplicateOf(item) {
+			continue
+		}
+		if item.Status == "" {
+			item.Status = models.WatchlistStatusPlanned
+		}
+		item.ID = primitive.NewObjectID()
+		item.AddedAt = now.Add(-time.Duration(len(items)-1-i) * time.Millisecond)
+		item.UpdatedAt = item.AddedAt
+		s.items = append(s.items, cloneItem(item))
+		created = append(created, item)
+		s.Writes++
+	}
+	return created, nil
+}
+
+// findItem returns the user's stored item, or nil.
+func (s *Store) findItem(userID, itemID primitive.ObjectID) *models.WatchlistItem {
+	for _, item := range s.items {
+		if item.ID == itemID && item.UserID == userID {
+			return item
+		}
+	}
+	return nil
+}
+
+func (s *Store) SetWatchlistItemIMDbID(_ context.Context, userID, itemID primitive.ObjectID, imdbID string) (bool, error) {
+	unlock, err := s.begin("SetWatchlistItemIMDbID")
+	defer unlock()
+	if err != nil {
+		return false, err
+	}
+	item := s.findItem(userID, itemID)
+	if item == nil || item.IMDbID != "" || imdbID == "" {
+		return false, nil
+	}
+	for _, other := range s.items {
+		if other.UserID == userID && other.IMDbID == imdbID {
+			return false, nil // the unique index refuses it
+		}
+	}
+	item.IMDbID = imdbID
+	s.Writes++
+	return true, nil
+}
+
+func (s *Store) MarkWatchlistItemIMDbMissing(_ context.Context, userID, itemID primitive.ObjectID, since time.Time) (bool, error) {
+	unlock, err := s.begin("MarkWatchlistItemIMDbMissing")
+	defer unlock()
+	if err != nil {
+		return false, err
+	}
+	item := s.findItem(userID, itemID)
+	if item == nil || item.Source != models.SourceIMDb || item.IMDbMissingSince != nil {
+		return false, nil
+	}
+	item.IMDbMissingSince = msPtr(&since)
+	s.Writes++
+	return true, nil
+}
+
+func (s *Store) ClearWatchlistItemIMDbMissing(_ context.Context, userID, itemID primitive.ObjectID) (bool, error) {
+	unlock, err := s.begin("ClearWatchlistItemIMDbMissing")
+	defer unlock()
+	if err != nil {
+		return false, err
+	}
+	item := s.findItem(userID, itemID)
+	if item == nil || item.IMDbMissingSince == nil {
+		return false, nil
+	}
+	item.IMDbMissingSince = nil
+	s.Writes++
+	return true, nil
+}
+
+// DeleteSyncedWatchlistItem applies the same conditions as the real delete
+// filter: sync-added, still planned, untagged, and marked missing at exactly
+// missingSince.
+func (s *Store) DeleteSyncedWatchlistItem(_ context.Context, userID, itemID primitive.ObjectID, missingSince time.Time) (bool, error) {
+	unlock, err := s.begin("DeleteSyncedWatchlistItem")
+	defer unlock()
+	if err != nil {
+		return false, err
+	}
+	for i, item := range s.items {
+		if item.ID != itemID || item.UserID != userID {
+			continue
+		}
+		if item.Source != models.SourceIMDb || item.Status != models.WatchlistStatusPlanned || len(item.Tags) > 0 ||
+			item.IMDbMissingSince == nil || !item.IMDbMissingSince.Equal(ms(missingSince)) {
+			return false, nil
+		}
+		s.items = append(s.items[:i], s.items[i+1:]...)
+		s.Writes++
+		return true, nil
+	}
+	return false, nil
 }
 
 // ListWatchlistItems returns the user's items, newest first. Like the real
@@ -369,6 +624,30 @@ func (s *Store) GetTitles(_ context.Context, keys []string, regions []string) (m
 	for _, key := range keys {
 		if t, ok := s.titles[key]; ok {
 			out[key] = cloneTitle(t, regions)
+		}
+	}
+	return out, nil
+}
+
+func (s *Store) GetTitlesByIMDbIDs(_ context.Context, imdbIDs []string) (map[string]*models.Title, error) {
+	unlock, err := s.begin("GetTitlesByIMDbIDs")
+	defer unlock()
+	if err != nil {
+		return nil, err
+	}
+	keys := make([]string, 0, len(s.titles))
+	for key := range s.titles {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	out := make(map[string]*models.Title, len(imdbIDs))
+	for _, key := range keys {
+		t := s.titles[key]
+		if t.IMDbID == "" || t.NotFoundAt != nil || !contains(imdbIDs, t.IMDbID) {
+			continue
+		}
+		if _, taken := out[t.IMDbID]; !taken {
+			out[t.IMDbID] = cloneTitle(t, []string{}) // no provider snapshots
 		}
 	}
 	return out, nil

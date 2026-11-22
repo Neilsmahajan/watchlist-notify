@@ -2,6 +2,7 @@ package database
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"reflect"
 	"testing"
@@ -10,6 +11,8 @@ import (
 	"github.com/neilsmahajan/watchlist-notify/internal/models"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
+	"go.mongodb.org/mongo-driver/mongo"
+	"go.mongodb.org/mongo-driver/mongo/options"
 )
 
 // These tests run against the MongoDB container TestMain starts. They pin the
@@ -499,5 +502,481 @@ func TestDistinctTitlesAndRegions(t *testing.T) {
 	// Upserting a user again, with a region, updates rather than conflicts.
 	if err := srv.UpsertUser(ctx, &models.User{Email: "it-distinct-gb@example.com", Region: "GB", Name: "Renamed"}); err != nil {
 		t.Errorf("second upsert: %v", err)
+	}
+}
+
+// --- IMDb sync: indexes, bulk insert, conditional writes, the link ---
+
+func indexNames(t *testing.T, coll *mongo.Collection) map[string]bool {
+	t.Helper()
+	ctx := context.Background()
+	cursor, err := coll.Indexes().List(ctx)
+	if err != nil {
+		t.Fatalf("%s: list indexes: %v", coll.Name(), err)
+	}
+	var indexes []bson.M
+	if err := cursor.All(ctx, &indexes); err != nil {
+		t.Fatalf("%s: read indexes: %v", coll.Name(), err)
+	}
+	names := make(map[string]bool, len(indexes))
+	for _, index := range indexes {
+		names[fmt.Sprint(index["name"])] = true
+	}
+	return names
+}
+
+func mustFindItem(t *testing.T, srv Service, userID, itemID primitive.ObjectID) *models.WatchlistItem {
+	t.Helper()
+	items, err := srv.ListWatchlistItems(context.Background(), models.ListWatchlistOptions{UserID: userID})
+	if err != nil {
+		t.Fatalf("ListWatchlistItems: %v", err)
+	}
+	for _, item := range items {
+		if item.ID == itemID {
+			return item
+		}
+	}
+	return nil
+}
+
+// TMDb IDs are per media type, so the unique index has to include the type.
+func TestWatchlistUniqueIndexes(t *testing.T) {
+	srv := New().(*service)
+	ctx := context.Background()
+
+	watchlist := indexNames(t, srv.db.Database(databaseName).Collection(collWatchlist))
+	if !watchlist[indexUserTypeTMDb] || !watchlist["uniq_user_imdb_id"] || watchlist[legacyIndexUserTMDb] {
+		t.Errorf("watchlist indexes = %v; want %s and uniq_user_imdb_id, and no %s", watchlist, indexUserTypeTMDb, legacyIndexUserTMDb)
+	}
+	if titles := indexNames(t, srv.db.Database(databaseName).Collection(collTitles)); !titles["imdb_id_idx"] {
+		t.Errorf("titles indexes = %v; want imdb_id_idx", titles)
+	}
+
+	alice, bob := primitive.NewObjectID(), primitive.NewObjectID()
+	create := func(user primitive.ObjectID, typ string, tmdbID int, imdbID string) error {
+		return srv.CreateWatchlistItem(ctx, &models.WatchlistItem{UserID: user, Title: "Title", Type: typ, TMDbID: tmdbID, IMDbID: imdbID})
+	}
+	if err := create(alice, models.WatchlistTypeMovie, 900100, "tt9001000"); err != nil {
+		t.Fatalf("first item: %v", err)
+	}
+	if err := create(alice, models.WatchlistTypeShow, 900100, "tt9001001"); err != nil {
+		t.Errorf("a show with the same TMDb ID as a movie was refused: %v", err)
+	}
+	if err := create(alice, models.WatchlistTypeMovie, 900100, "tt9001002"); !errors.Is(err, ErrDuplicateWatchlistItem) {
+		t.Errorf("the same movie twice: err = %v, want ErrDuplicateWatchlistItem", err)
+	}
+	if err := create(alice, models.WatchlistTypeMovie, 900101, "tt9001000"); !errors.Is(err, ErrDuplicateWatchlistItem) {
+		t.Errorf("the same IMDb ID twice: err = %v, want ErrDuplicateWatchlistItem", err)
+	}
+	if err := create(bob, models.WatchlistTypeMovie, 900100, "tt9001000"); err != nil {
+		t.Errorf("another user's copy of the title was refused: %v", err)
+	}
+	// Items without either ID never collide.
+	for i := 0; i < 2; i++ {
+		if err := create(alice, models.WatchlistTypeMovie, 0, ""); err != nil {
+			t.Errorf("item without IDs, copy %d: %v", i+1, err)
+		}
+	}
+}
+
+// A database that still has the old index gets the new one first and loses
+// the old one after. This runs in a database of its own, because it needs
+// the old index to exist.
+func TestLegacyTMDbIndexIsReplaced(t *testing.T) {
+	srv := New().(*service)
+	ctx := context.Background()
+	db := srv.db.Database(databaseName + "_legacy_index")
+	t.Cleanup(func() { _ = db.Drop(context.Background()) })
+	coll := db.Collection(collWatchlist)
+
+	legacy := mongo.IndexModel{
+		Keys: bson.D{{Key: "user_id", Value: 1}, {Key: "tmdb_id", Value: 1}},
+		Options: options.Index().SetUnique(true).
+			SetPartialFilterExpression(bson.D{{Key: "tmdb_id", Value: bson.D{{Key: "$exists", Value: true}}}}).
+			SetName(legacyIndexUserTMDb),
+	}
+	if _, err := coll.Indexes().CreateOne(ctx, legacy); err != nil {
+		t.Fatalf("create the legacy index: %v", err)
+	}
+	user := primitive.NewObjectID()
+	doc := func(typ string) bson.M {
+		return bson.M{"user_id": user, "title": "Title", "type": typ, "tmdb_id": 603, "status": "planned"}
+	}
+	if _, err := coll.InsertOne(ctx, doc(models.WatchlistTypeMovie)); err != nil {
+		t.Fatalf("insert under the legacy index: %v", err)
+	}
+	if _, err := coll.InsertOne(ctx, doc(models.WatchlistTypeShow)); !mongo.IsDuplicateKeyError(err) {
+		t.Fatalf("the legacy index should refuse a show with a movie's TMDb ID; err = %v", err)
+	}
+
+	// Starting the new build twice is the same as starting it once.
+	for start := 1; start <= 2; start++ {
+		if err := ensureIndexes(ctx, db); err != nil {
+			t.Fatalf("ensureIndexes, start %d: %v", start, err)
+		}
+		if names := indexNames(t, coll); !names[indexUserTypeTMDb] || names[legacyIndexUserTMDb] {
+			t.Fatalf("after start %d the indexes are %v; want %s without %s", start, names, indexUserTypeTMDb, legacyIndexUserTMDb)
+		}
+	}
+
+	if _, err := coll.InsertOne(ctx, doc(models.WatchlistTypeShow)); err != nil {
+		t.Errorf("a show with a movie's TMDb ID is still refused: %v", err)
+	}
+	if _, err := coll.InsertOne(ctx, doc(models.WatchlistTypeMovie)); !mongo.IsDuplicateKeyError(err) {
+		t.Errorf("the same movie twice: err = %v, want a duplicate-key error", err)
+	}
+
+	// What a rollback meets: the previous build creates the legacy index at
+	// startup, and that build fails once a user holds a movie and a show with
+	// the same TMDb ID.
+	if _, err := coll.Indexes().CreateOne(ctx, legacy); err == nil {
+		t.Error("the legacy index was rebuilt over data it does not allow")
+	}
+}
+
+func TestCreateWatchlistItems(t *testing.T) {
+	srv := New()
+	ctx := context.Background()
+	user := primitive.NewObjectID()
+	item := func(title, typ string, tmdbID int, imdbID string) *models.WatchlistItem {
+		return &models.WatchlistItem{UserID: user, Title: title, Type: typ, TMDbID: tmdbID, IMDbID: imdbID, Source: models.SourceIMDb}
+	}
+
+	if created, err := srv.CreateWatchlistItems(ctx, nil); err != nil || len(created) != 0 {
+		t.Errorf("inserting nothing: created = %v, err = %v", created, err)
+	}
+	if err := srv.CreateWatchlistItem(ctx, &models.WatchlistItem{UserID: user, Title: "Already There", Type: models.WatchlistTypeMovie, TMDbID: 900200, IMDbID: "tt9002000"}); err != nil {
+		t.Fatal(err)
+	}
+
+	batch := func() []*models.WatchlistItem {
+		return []*models.WatchlistItem{
+			item("First", models.WatchlistTypeMovie, 900201, "tt9002001"),
+			item("Same TMDb title", models.WatchlistTypeMovie, 900200, "tt9002009"),
+			item("Same IMDb ID", models.WatchlistTypeShow, 900202, "tt9002000"),
+			item("Last", models.WatchlistTypeShow, 900200, "tt9002003"), // a show numbered like the movie
+		}
+	}
+	created, err := srv.CreateWatchlistItems(ctx, batch())
+	if err != nil {
+		t.Fatalf("CreateWatchlistItems: %v", err)
+	}
+	if len(created) != 2 || created[0].Title != "First" || created[1].Title != "Last" {
+		t.Fatalf("created = %+v; want First and Last, with the two duplicates skipped", created)
+	}
+	for _, c := range created {
+		if c.ID.IsZero() || c.Status != models.WatchlistStatusPlanned || c.AddedAt.IsZero() || !c.UpdatedAt.Equal(c.AddedAt) {
+			t.Errorf("created item not filled in: %+v", c)
+		}
+	}
+	if !created[0].AddedAt.Before(created[1].AddedAt) {
+		t.Errorf("items are not stamped in slice order: %v then %v", created[0].AddedAt, created[1].AddedAt)
+	}
+
+	stored, err := srv.ListWatchlistItems(ctx, models.ListWatchlistOptions{UserID: user})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stored) != 3 {
+		t.Fatalf("user has %d items, want 3", len(stored))
+	}
+	position := map[string]int{}
+	for i, it := range stored {
+		position[it.Title] = i
+	}
+	if position["Last"] > position["First"] {
+		t.Errorf("newest-first listing shows First before Last; want the end of the batch first: %v", position)
+	}
+	if first := mustFindItem(t, srv, user, created[0].ID); first == nil || first.Source != models.SourceIMDb || first.IMDbID != "tt9002001" || first.IMDbMissingSince != nil {
+		t.Errorf("stored item = %+v", first)
+	}
+
+	// The same batch again creates nothing and is not an error.
+	if again, err := srv.CreateWatchlistItems(ctx, batch()); err != nil || len(again) != 0 {
+		t.Errorf("second insert of the batch: created = %d, err = %v; want 0 and nil", len(again), err)
+	}
+	// An invalid item fails the call before anything is written.
+	bad := []*models.WatchlistItem{item("Fine", models.WatchlistTypeMovie, 900203, "tt9002004"), item("", models.WatchlistTypeMovie, 900204, "tt9002005")}
+	if created, err := srv.CreateWatchlistItems(ctx, bad); err == nil || len(created) != 0 {
+		t.Errorf("batch with an invalid item: created = %d, err = %v", len(created), err)
+	}
+	if after, _ := srv.ListWatchlistItems(ctx, models.ListWatchlistOptions{UserID: user}); len(after) != 3 {
+		t.Errorf("user has %d items after the rejected batches, want 3", len(after))
+	}
+}
+
+// The sync's writes carry their own conditions, so a user's edit that lands
+// between planning and writing wins.
+func TestIMDbSyncItemWrites(t *testing.T) {
+	srv := New()
+	ctx := context.Background()
+	user, stranger := primitive.NewObjectID(), primitive.NewObjectID()
+
+	created, err := srv.CreateWatchlistItems(ctx, []*models.WatchlistItem{
+		{UserID: user, Title: "Synced", Type: models.WatchlistTypeMovie, TMDbID: 900300, IMDbID: "tt9003000", Source: models.SourceIMDb},
+		{UserID: user, Title: "Synced Too", Type: models.WatchlistTypeMovie, TMDbID: 900303, IMDbID: "tt9003003", Source: models.SourceIMDb},
+		{UserID: user, Title: "Manual", Type: models.WatchlistTypeMovie, TMDbID: 900301},
+		{UserID: user, Title: "Manual Too", Type: models.WatchlistTypeMovie, TMDbID: 900302},
+	})
+	if err != nil || len(created) != 4 {
+		t.Fatalf("seed: created = %d, err = %v", len(created), err)
+	}
+	synced, syncedToo, manual, manualToo := created[0], created[1], created[2], created[3]
+	check := func(what string, got bool, err error, want bool) {
+		t.Helper()
+		if err != nil || got != want {
+			t.Errorf("%s: applied = %v, err = %v; want %v and no error", what, got, err, want)
+		}
+	}
+	edit := func(itemID primitive.ObjectID, fields map[string]any) {
+		t.Helper()
+		if _, err := srv.UpdateWatchlistItem(ctx, user, itemID, fields); err != nil {
+			t.Fatalf("UpdateWatchlistItem: %v", err)
+		}
+	}
+
+	// Filling in an IMDb ID.
+	ok, err := srv.SetWatchlistItemIMDbID(ctx, stranger, manual.ID, "tt9003001")
+	check("set IMDb ID on someone else's item", ok, err, false)
+	ok, err = srv.SetWatchlistItemIMDbID(ctx, user, manual.ID, "tt9003001")
+	check("set a missing IMDb ID", ok, err, true)
+	ok, err = srv.SetWatchlistItemIMDbID(ctx, user, manual.ID, "tt9003009")
+	check("overwrite an IMDb ID", ok, err, false)
+	ok, err = srv.SetWatchlistItemIMDbID(ctx, user, manualToo.ID, "tt9003000")
+	check("set an IMDb ID another item holds", ok, err, false)
+	if got := mustFindItem(t, srv, user, manual.ID); got.IMDbID != "tt9003001" || got.Source != "" {
+		t.Errorf("manual item = %+v; want the IMDb ID filled in and the source untouched", got)
+	}
+	if got := mustFindItem(t, srv, user, manualToo.ID); got.IMDbID != "" {
+		t.Errorf("refused IMDb ID was written anyway: %+v", got)
+	}
+
+	// Strike one.
+	strike := t1
+	ok, err = srv.MarkWatchlistItemIMDbMissing(ctx, user, manual.ID, strike)
+	check("mark an item the sync did not add", ok, err, false)
+	ok, err = srv.MarkWatchlistItemIMDbMissing(ctx, stranger, synced.ID, strike)
+	check("mark someone else's item", ok, err, false)
+	ok, err = srv.MarkWatchlistItemIMDbMissing(ctx, user, synced.ID, strike)
+	check("mark", ok, err, true)
+	ok, err = srv.MarkWatchlistItemIMDbMissing(ctx, user, synced.ID, strike.Add(time.Hour))
+	check("mark again", ok, err, false)
+	if got := mustFindItem(t, srv, user, synced.ID); got.IMDbMissingSince == nil || !got.IMDbMissingSince.Equal(strike) {
+		t.Fatalf("imdb_missing_since = %v, want the first strike %v", got.IMDbMissingSince, strike)
+	}
+
+	// The delete re-checks everything at the moment it runs.
+	ok, err = srv.DeleteSyncedWatchlistItem(ctx, user, manual.ID, strike)
+	check("delete an item the sync did not add", ok, err, false)
+	ok, err = srv.DeleteSyncedWatchlistItem(ctx, stranger, synced.ID, strike)
+	check("delete someone else's item", ok, err, false)
+	ok, err = srv.DeleteSyncedWatchlistItem(ctx, user, synced.ID, strike.Add(time.Hour))
+	check("delete with a stale mark", ok, err, false)
+	ok, err = srv.DeleteSyncedWatchlistItem(ctx, user, syncedToo.ID, strike)
+	check("delete an item that is not marked", ok, err, false)
+
+	edit(synced.ID, map[string]any{"status": models.WatchlistStatusWatching})
+	ok, err = srv.DeleteSyncedWatchlistItem(ctx, user, synced.ID, strike)
+	check("delete after the user changed the status", ok, err, false)
+
+	edit(synced.ID, map[string]any{"status": models.WatchlistStatusPlanned, "tags": []string{"keep"}})
+	ok, err = srv.DeleteSyncedWatchlistItem(ctx, user, synced.ID, strike)
+	check("delete after the user tagged it", ok, err, false)
+	if mustFindItem(t, srv, user, synced.ID) == nil {
+		t.Fatal("a refused delete removed the item")
+	}
+
+	edit(synced.ID, map[string]any{"tags": []string{}})
+	ok, err = srv.DeleteSyncedWatchlistItem(ctx, user, synced.ID, strike)
+	check("delete an untouched, marked, sync-added item", ok, err, true)
+	if mustFindItem(t, srv, user, synced.ID) != nil {
+		t.Error("the item is still there after the delete")
+	}
+
+	// Seeing the title again clears the mark, and with it the way to a delete.
+	ok, err = srv.ClearWatchlistItemIMDbMissing(ctx, user, syncedToo.ID)
+	check("clear an item that is not marked", ok, err, false)
+	ok, err = srv.MarkWatchlistItemIMDbMissing(ctx, user, syncedToo.ID, strike)
+	check("mark the second item", ok, err, true)
+	ok, err = srv.ClearWatchlistItemIMDbMissing(ctx, stranger, syncedToo.ID)
+	check("clear someone else's item", ok, err, false)
+	ok, err = srv.ClearWatchlistItemIMDbMissing(ctx, user, syncedToo.ID)
+	check("clear", ok, err, true)
+	ok, err = srv.DeleteSyncedWatchlistItem(ctx, user, syncedToo.ID, strike)
+	check("delete after the mark was cleared", ok, err, false)
+	if got := mustFindItem(t, srv, user, syncedToo.ID); got == nil || got.IMDbMissingSince != nil {
+		t.Errorf("item after clear = %+v; want it present and unmarked", got)
+	}
+}
+
+func TestGetTitlesByIMDbIDs(t *testing.T) {
+	srv := New()
+	ctx := context.Background()
+	save := func(ref models.TitleRef, meta *models.TitleMetadata) {
+		t.Helper()
+		if ok, err := srv.SaveTitleSnapshot(ctx, ref, "US", nil, snapshot(t1, "Netflix"), meta); err != nil || !ok {
+			t.Fatalf("SaveTitleSnapshot %s: applied = %v, err = %v", ref.Key(), ok, err)
+		}
+	}
+	known := models.TitleRef{MediaType: models.MediaTypeMovie, TMDbID: 900400}
+	gone := models.TitleRef{MediaType: models.MediaTypeTV, TMDbID: 900401}
+	save(known, &models.TitleMetadata{Title: "Known", Year: 1999, IMDbID: "tt9004000"})
+	save(gone, &models.TitleMetadata{Title: "Gone", IMDbID: "tt9004001"})
+	save(models.TitleRef{MediaType: models.MediaTypeMovie, TMDbID: 900402}, nil) // no IMDb ID stored
+	if err := srv.MarkTitleNotFound(ctx, gone, t1); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := srv.GetTitlesByIMDbIDs(ctx, []string{"tt9004000", "tt9004001", "tt9004999"})
+	if err != nil {
+		t.Fatalf("GetTitlesByIMDbIDs: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("found %d titles, want only the known one: %v", len(got), got)
+	}
+	title := got["tt9004000"]
+	if title == nil || title.ID != known.Key() || title.MediaType != models.MediaTypeMovie || title.TMDbID != 900400 || title.Title != "Known" || title.Year != 1999 {
+		t.Errorf("title = %+v", title)
+	}
+	if title != nil && len(title.Providers) != 0 {
+		t.Errorf("provider snapshots were loaded: %v", title.Providers)
+	}
+	if none, err := srv.GetTitlesByIMDbIDs(ctx, nil); err != nil || len(none) != 0 {
+		t.Errorf("no IDs: got %v, err = %v", none, err)
+	}
+}
+
+func TestIMDbLink(t *testing.T) {
+	srv := New()
+	ctx := context.Background()
+	const email = "it-imdb-link@example.com"
+	load := func() *models.User {
+		t.Helper()
+		u, err := srv.GetUserByEmail(ctx, email)
+		if err != nil || u == nil {
+			t.Fatalf("GetUserByEmail: %v, %v", u, err)
+		}
+		return u
+	}
+	listed := func(attemptedBefore time.Time, id primitive.ObjectID) bool {
+		t.Helper()
+		users, err := srv.ListIMDbLinkedUsers(ctx, attemptedBefore)
+		if err != nil {
+			t.Fatalf("ListIMDbLinkedUsers: %v", err)
+		}
+		for _, u := range users {
+			if u.IMDbSync == nil {
+				t.Errorf("a user without a link was listed: %s", u.ID.Hex())
+			}
+			if u.ID == id {
+				return true
+			}
+		}
+		return false
+	}
+	claim := func(what string, id primitive.ObjectID, at time.Time, want bool) {
+		t.Helper()
+		got, err := srv.ClaimIMDbAttempt(ctx, id, at, time.Minute)
+		if err != nil || got != want {
+			t.Errorf("%s: claimed = %v, err = %v; want %v", what, got, err, want)
+		}
+	}
+
+	if err := srv.UpsertUser(ctx, &models.User{Email: email, Name: "Link"}); err != nil {
+		t.Fatal(err)
+	}
+	user := load()
+	if user.IMDbSync != nil || user.IMDbAttemptAt != nil {
+		t.Fatalf("a new user has IMDb state: %+v", user)
+	}
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	far := now.Add(24 * time.Hour)
+	if listed(far, user.ID) {
+		t.Error("a user without a link is due for a sync")
+	}
+
+	// The fetch throttle.
+	claim("first claim", user.ID, now, true)
+	claim("claim inside the gap", user.ID, now.Add(30*time.Second), false)
+	claim("claim of an unknown user", primitive.NewObjectID(), now, false)
+	attempt := now.Add(61 * time.Second)
+	claim("claim after the gap", user.ID, attempt, true)
+	if got := load().IMDbAttemptAt; got == nil || !got.Equal(attempt) {
+		t.Errorf("imdb_attempt_at = %v, want %v", got, attempt)
+	}
+
+	// Linking.
+	sync := models.IMDbSync{
+		SourceID: "ls900000001", LinkedAt: now, LastAttemptAt: &attempt, LastSyncedAt: &attempt,
+		LastStatus: models.IMDbStatusOK, Total: 3, Added: 2, Unmatched: 1,
+	}
+	if err := srv.LinkIMDb(ctx, primitive.NewObjectID(), sync); !errors.Is(err, ErrUserNotFound) {
+		t.Errorf("linking an unknown user: err = %v, want ErrUserNotFound", err)
+	}
+	if err := srv.LinkIMDb(ctx, user.ID, sync); err != nil {
+		t.Fatalf("LinkIMDb: %v", err)
+	}
+	stored := load().IMDbSync
+	if stored == nil || stored.SourceID != sync.SourceID || !stored.LinkedAt.Equal(now) ||
+		stored.LastAttemptAt == nil || !stored.LastAttemptAt.Equal(attempt) ||
+		stored.LastSyncedAt == nil || !stored.LastSyncedAt.Equal(attempt) ||
+		stored.LastStatus != models.IMDbStatusOK || stored.LastError != "" ||
+		stored.Total != 3 || stored.Added != 2 || stored.Removed != 0 || stored.Unmatched != 1 {
+		t.Errorf("stored link = %+v, want %+v", stored, sync)
+	}
+
+	// Who is due: linked, and not attempted after the cutoff.
+	if listed(attempt.Add(-time.Second), user.ID) {
+		t.Error("a user attempted after the cutoff is due")
+	}
+	if !listed(attempt, user.ID) {
+		t.Error("a linked user attempted at the cutoff is not due")
+	}
+
+	// A run's outcome is stored only while the user is still linked to its list.
+	failed := sync
+	failed.LastStatus, failed.LastError, failed.LastSyncedAt = models.IMDbStatusFailed, "imdb: status 503", nil
+	if ok, err := srv.UpdateIMDbSync(ctx, user.ID, failed); err != nil || !ok {
+		t.Errorf("UpdateIMDbSync: applied = %v, err = %v", ok, err)
+	}
+	elsewhere := failed
+	elsewhere.SourceID, elsewhere.LastStatus = "ur9000002", models.IMDbStatusOK
+	if ok, err := srv.UpdateIMDbSync(ctx, user.ID, elsewhere); err != nil || ok {
+		t.Errorf("outcome for another list: applied = %v, err = %v; want dropped", ok, err)
+	}
+	if got := load().IMDbSync; got.SourceID != sync.SourceID || got.LastStatus != models.IMDbStatusFailed || got.LastError != "imdb: status 503" || got.LastSyncedAt != nil {
+		t.Errorf("link after the updates = %+v", got)
+	}
+
+	// Signing in again (an upsert of the profile) leaves the link alone.
+	if err := srv.UpsertUser(ctx, &models.User{Email: email, Name: "Renamed"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := load(); got.IMDbSync == nil || got.Name != "Renamed" {
+		t.Errorf("after signing in again: %+v", got)
+	}
+
+	// Unlinking removes the link and keeps the throttle.
+	for i := 0; i < 2; i++ {
+		if err := srv.UnlinkIMDb(ctx, user.ID); err != nil {
+			t.Fatalf("UnlinkIMDb, call %d: %v", i+1, err)
+		}
+	}
+	unlinked := load()
+	if unlinked.IMDbSync != nil {
+		t.Errorf("link survived unlinking: %+v", unlinked.IMDbSync)
+	}
+	if unlinked.IMDbAttemptAt == nil || !unlinked.IMDbAttemptAt.Equal(attempt) {
+		t.Errorf("imdb_attempt_at after unlinking = %v, want it kept at %v", unlinked.IMDbAttemptAt, attempt)
+	}
+	claim("claim right after unlinking", user.ID, attempt.Add(10*time.Second), false)
+	if listed(far, user.ID) {
+		t.Error("an unlinked user is due for a sync")
+	}
+	if ok, err := srv.UpdateIMDbSync(ctx, user.ID, failed); err != nil || ok {
+		t.Errorf("outcome after unlinking: applied = %v, err = %v; want dropped", ok, err)
+	}
+	if load().IMDbSync != nil {
+		t.Error("a late outcome linked the user again")
 	}
 }

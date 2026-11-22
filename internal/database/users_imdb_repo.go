@@ -1,0 +1,103 @@
+package database
+
+import (
+	"context"
+	"errors"
+	"time"
+
+	"github.com/neilsmahajan/watchlist-notify/internal/models"
+	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/bson/primitive"
+	"go.mongodb.org/mongo-driver/mongo/options"
+)
+
+// ErrUserNotFound is returned when a write addresses a user that does not exist.
+var ErrUserNotFound = errors.New("user not found")
+
+// notAttemptedSince matches users whose IMDb list was not fetched after cutoff.
+func notAttemptedSince(cutoff time.Time) bson.A {
+	return bson.A{
+		bson.M{"imdb_attempt_at": nil}, // never
+		bson.M{"imdb_attempt_at": bson.M{"$lte": cutoff}},
+	}
+}
+
+// ClaimIMDbAttempt records that a fetch of the user's IMDb list starts now,
+// unless one started less than minGap ago. It reports whether the caller may
+// fetch.
+//
+// It is one atomic update, so two overlapping worker runs, or a double-clicked
+// link request, cannot both fetch. That is what keeps the service to the one
+// request a day per user it promises to make against IMDb.
+func (s *service) ClaimIMDbAttempt(ctx context.Context, userID primitive.ObjectID, now time.Time, minGap time.Duration) (bool, error) {
+	collection := s.db.Database(databaseName).Collection(collUsers)
+	res, err := collection.UpdateOne(ctx, bson.M{
+		"_id": userID,
+		"$or": notAttemptedSince(now.Add(-minGap)),
+	}, bson.M{"$set": bson.M{"imdb_attempt_at": now}})
+	if err != nil {
+		return false, err
+	}
+	return res.MatchedCount == 1, nil
+}
+
+// LinkIMDb stores the user's link to an IMDb list, replacing any earlier one.
+func (s *service) LinkIMDb(ctx context.Context, userID primitive.ObjectID, sync models.IMDbSync) error {
+	collection := s.db.Database(databaseName).Collection(collUsers)
+	res, err := collection.UpdateOne(ctx, bson.M{"_id": userID}, bson.M{
+		"$set": bson.M{"imdb_sync": sync, "updated_at": time.Now()},
+	})
+	if err != nil {
+		return err
+	}
+	if res.MatchedCount == 0 {
+		return ErrUserNotFound
+	}
+	return nil
+}
+
+// UpdateIMDbSync stores the outcome of a sync run, but only if the user is
+// still linked to the list the run was for. It reports false when they
+// unlinked, or linked another list, while the run was under way; the run's
+// outcome is then dropped rather than resurrecting the old link.
+func (s *service) UpdateIMDbSync(ctx context.Context, userID primitive.ObjectID, sync models.IMDbSync) (bool, error) {
+	collection := s.db.Database(databaseName).Collection(collUsers)
+	res, err := collection.UpdateOne(ctx, bson.M{
+		"_id":                 userID,
+		"imdb_sync.source_id": sync.SourceID,
+	}, bson.M{"$set": bson.M{"imdb_sync": sync}})
+	if err != nil {
+		return false, err
+	}
+	return res.MatchedCount == 1, nil
+}
+
+// UnlinkIMDb removes the user's link. Their watchlist items are not touched,
+// and the fetch throttle (imdb_attempt_at) deliberately stays.
+func (s *service) UnlinkIMDb(ctx context.Context, userID primitive.ObjectID) error {
+	collection := s.db.Database(databaseName).Collection(collUsers)
+	_, err := collection.UpdateOne(ctx, bson.M{"_id": userID}, bson.M{
+		"$unset": bson.M{"imdb_sync": ""},
+		"$set":   bson.M{"updated_at": time.Now()},
+	})
+	return err
+}
+
+// ListIMDbLinkedUsers returns the users with a linked IMDb list whose last
+// fetch attempt started at or before attemptedBefore (or who were never
+// fetched), oldest account first.
+func (s *service) ListIMDbLinkedUsers(ctx context.Context, attemptedBefore time.Time) ([]*models.User, error) {
+	collection := s.db.Database(databaseName).Collection(collUsers)
+	cursor, err := collection.Find(ctx, bson.M{
+		"imdb_sync.source_id": bson.M{"$gt": ""},
+		"$or":                 notAttemptedSince(attemptedBefore),
+	}, options.Find().SetSort(bson.D{{Key: "_id", Value: 1}}))
+	if err != nil {
+		return nil, err
+	}
+	var users []*models.User
+	if err := cursor.All(ctx, &users); err != nil {
+		return nil, err
+	}
+	return users, nil
+}
