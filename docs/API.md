@@ -331,8 +331,10 @@ PUT /api/me/imdb
 
 Links the user's **public** IMDb Watchlist, or any public IMDb list, to their
 watchlist. The list's titles are added before the request answers (it may
-take up to about 20 seconds), and a daily job keeps the watchlist in step with
-the list from then on. Linking again replaces the link.
+take up to about 25 seconds), and a daily job keeps the watchlist in step with
+the list from then on. Linking again replaces the link, and clears every
+`imdb_missing_since` mark on the user's items first, so an item is only ever
+removed on the evidence of the list that is linked now.
 
 **Request Body:**
 
@@ -370,10 +372,12 @@ the list from then on. Linking again replaces the link.
 
 - `result.added` - titles that became new watchlist items; `existing` - titles
   the user already had, which are left exactly as they are
-- `result.complete` - `false` when the list was only partly read, or some
-  titles could not be looked up within the time the request has. What was
-  resolved is added, `imdb_sync.last_status` is `partial`, and the daily sync
-  finishes the job.
+- `result.complete` - `false` when the list was only partly read, when it
+  holds the same title twice, or when the request ran out of time (20 seconds
+  for reading the list, looking titles up and writing them, whichever of
+  IMDb, TMDb or the database was slow). What was written is reported and
+  stays, `imdb_sync.last_status` is `partial`, and the daily sync finishes
+  the job.
 
 **Errors** (`{"error": "..."}`; the 4xx messages are written to be shown to
 the user):
@@ -383,6 +387,7 @@ the user):
 | `400`  | `source` is not an IMDb user ID, list ID or IMDb URL; or the list has over 10,000 titles |
 | `404`  | IMDb has no such list, or it is not public. The message says to make it public          |
 | `429`  | A link was attempted less than 60 seconds ago. `Retry-After` gives the seconds to wait  |
+| `500`  | The watchlist could not be read or prepared, or the link could not be stored            |
 | `502`  | IMDb could not be reached                                                               |
 | `503`  | The server has no TMDb key, so IMDb titles cannot be resolved                           |
 
@@ -393,12 +398,16 @@ A failed attempt leaves an existing link as it was.
 - **Adds** each title on the list the user does not have yet, as a `planned`
   item with `"source": "imdb"`. Metadata comes from TMDb.
 - **Removes** an item only when all of these hold: the sync added it
-  (`source` is `imdb`); the user has not changed its status from `planned` or
-  tagged it; and it was missing from two fetches of the **whole** list at
-  least 12 hours apart. The first such fetch only sets `imdb_missing_since` on
-  the item. Items added by hand or by CSV import are never removed, and a list
-  that is private, unreachable, partly read or empty removes nothing.
-- Linking never removes anything; only the daily sync does.
+  (`source` is `imdb`); the user has not changed its status from `planned`,
+  tagged it, or edited it in any way since the sync last looked; and it was
+  missing from two fetches of the **whole** list at least 12 hours apart,
+  both made while the list that is linked now was linked. The first such
+  fetch only sets `imdb_missing_since` on the item. Items added by hand or by
+  CSV import are never removed, and a list that is private, unreachable,
+  partly read, empty, or that holds the same title twice removes nothing.
+- Linking never removes anything; only the daily sync does. A daily sync
+  that is under way when the user unlinks or links again removes nothing
+  either.
 
 **IMDb's terms.** IMDb does not license its data for public or commercial
 use. This feature is therefore strictly opt-in, reads only a list its owner
@@ -415,9 +424,13 @@ DELETE /api/me/imdb
 
 Stops the sync. Nothing is removed from the watchlist: the items the sync
 added stay (still marked `"source": "imdb"`), and nothing removes them
-automatically afterwards. Succeeds when nothing is linked.
+automatically afterwards. Every `imdb_missing_since` mark on the user's items
+is cleared. Succeeds when nothing is linked.
 
 **Response:** `204 No Content`
+
+**Errors:** `500` when the marks or the link could not be cleared. The list is
+then **still linked**; send the request again.
 
 #### Update User Preferences
 
@@ -724,10 +737,12 @@ row, count as `duplicates`; new titles become `planned` items with
 
 - `errors` is always an array, in file order; `row` counts the header as
   row 1.
-- When TMDb is slow, the rows that could not be looked up in time are reported
-  in `errors` (one entry per row up to 20, otherwise a single entry giving the
-  number left). Rows that made it are stored; uploading the same file again
-  continues where it stopped, at no cost for the rows already in.
+- An import has about 22 seconds for reading the watchlist, looking titles up
+  and writing the rows. When TMDb or the database is too slow for that, the
+  rows that did not make it are reported in `errors` (one entry per row up to
+  20, otherwise a single entry giving the number left). Rows that made it are
+  stored; uploading the same file again continues where it stopped, at no
+  cost for the rows already in.
 - `400` with `"no rows imported"` when the file has rows and none could be
   imported.
 

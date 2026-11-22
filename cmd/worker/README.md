@@ -107,15 +107,32 @@ overlapping runs cannot both fetch), reads the list, and then:
 - **Removes** an item only when all of this holds: the sync added it
   (`source: "imdb"`); the user has not touched it (status still `planned`, no
   tags); it is absent from a fetch that read the **whole** list (every page,
-  and the count matches what IMDb reported), the list is not empty, and every
-  title on it could be resolved; and an earlier such fetch, at least 12 hours
-  before, already found it absent. The first time only sets
-  `imdb_missing_since` on the item; seeing the title on the list again clears
-  it. The delete itself re-checks source, status, tags and the mark in its
-  filter, so an edit the user makes at the last moment wins.
+  no title read twice, and the count matches what IMDb reported), the list is
+  not empty, and every title on it could be resolved; and an earlier such
+  fetch **of the same link**, at least 12 hours before, already found it
+  absent. The first time only sets `imdb_missing_since` on the item; seeing
+  the title on the list again clears it.
+- **The writes check for themselves.** The mark is written only to an item
+  that is still the sync's, still `planned` and untagged. The delete matches
+  source, status, tags, the exact mark the plan saw and the `updated_at` the
+  plan saw, so any edit the user makes after the plan was drawn up wins,
+  whatever field it changes.
+- **Strikes belong to one link.** A mark carries the time the run claimed its
+  fetch. A mark older than the link's `linked_at` was made for a list linked
+  before: it is never grounds for removal, and the next sync clears it.
+  Linking and unlinking both clear all of a user's marks.
+- **The link is read again before pruning.** A run can spend two minutes
+  fetching and resolving, and the user can unlink or link again in that time.
+  Immediately before the marks, and again before the removals, the run reads
+  the user's link and does neither unless `source_id` and `linked_at` are
+  exactly what it started with (`link_changed` in the log). What it added
+  stays, and its status is stored only on the link it was for.
 - A list that is private, gone, unreachable, only partly read, or empty never
-  removes or marks anything. A partly read list still adds the titles that
-  were read. Unlinking never removes anything.
+  removes or marks anything, and neither does a list that holds the same
+  title twice (the client cannot tell that from two pages that overlap, so it
+  never calls such a list complete; the status tells the user to remove the
+  duplicate). A partly read list still adds the titles that were read.
+  Unlinking never removes anything.
 
 The outcome is stored on the user as `imdb_sync` (`last_status`: `ok`,
 `partial`, `failed` or `not_found`) and shown in the app. One user's failure

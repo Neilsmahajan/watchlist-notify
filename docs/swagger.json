@@ -294,7 +294,7 @@
                         "BearerAuth": []
                     }
                 ],
-                "description": "Stops syncing with the linked IMDb list. Nothing is removed from the watchlist: items the sync added stay, and are never removed automatically afterwards. Unlinking when nothing is linked also succeeds.",
+                "description": "Stops syncing with the linked IMDb list. Nothing is removed from the watchlist: items the sync added stay, and are never removed automatically afterwards. Every \"missing from the list\" mark (imdb_missing_since) on the user's items is cleared. Unlinking when nothing is linked also succeeds. On a 500 the list is still linked; send the request again.",
                 "tags": [
                     "Users"
                 ],
