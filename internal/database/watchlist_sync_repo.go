@@ -7,7 +7,6 @@ import (
 	"github.com/neilsmahajan/watchlist-notify/internal/models"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
-	"go.mongodb.org/mongo-driver/mongo"
 )
 
 // The writes the IMDb sync makes to single watchlist items. Each one is a
@@ -26,10 +25,16 @@ var noTags = bson.A{
 	bson.M{"tags": bson.M{"$size": 0}},
 }
 
-// SetWatchlistItemIMDbID records the IMDb ID of an item that has none. It
-// reports false, with no error, when the item already has one or another of
-// the user's items holds that ID (the unique index refuses it).
-func (s *service) SetWatchlistItemIMDbID(ctx context.Context, userID, itemID primitive.ObjectID, imdbID string) (bool, error) {
+// AdoptWatchlistItem hands an item the user imported from IMDb over to the
+// sync by setting its source to "imdb", and only if, at the moment of the
+// write, the item still is what may be adopted: it carries the IMDb ID it
+// was matched by, it has no source or "csv", its status is still "planned"
+// and it has no tags (models.WatchlistItem.Adoptable). It reports whether
+// the item was adopted; false means the user changed it first and it stays
+// theirs.
+//
+// Like the sync's other writes it leaves updated_at alone.
+func (s *service) AdoptWatchlistItem(ctx context.Context, userID, itemID primitive.ObjectID, imdbID string) (bool, error) {
 	if imdbID == "" {
 		return false, nil
 	}
@@ -37,12 +42,12 @@ func (s *service) SetWatchlistItemIMDbID(ctx context.Context, userID, itemID pri
 	res, err := coll.UpdateOne(ctx, bson.M{
 		"_id":     itemID,
 		"user_id": userID,
-		"imdb_id": bson.M{"$in": bson.A{nil, ""}},
-	}, bson.M{"$set": bson.M{"imdb_id": imdbID}})
+		"imdb_id": imdbID,
+		"source":  bson.M{"$in": bson.A{nil, "", models.SourceCSV}}, // nil: missing or null
+		"status":  models.WatchlistStatusPlanned,
+		"$or":     noTags,
+	}, bson.M{"$set": bson.M{"source": models.SourceIMDb}})
 	if err != nil {
-		if mongo.IsDuplicateKeyError(err) {
-			return false, nil
-		}
 		return false, err
 	}
 	return res.MatchedCount == 1, nil
@@ -105,9 +110,9 @@ func (s *service) ClearIMDbMissingMarks(ctx context.Context, userID primitive.Ob
 
 // DeleteSyncedWatchlistItem deletes an item on behalf of the IMDb sync, and
 // only if, at the moment of the delete, the item still is what the sync is
-// allowed to remove: added by the sync, status still "planned", no tags,
-// still carrying the missing mark the caller read, and not edited since the
-// caller read it. It reports whether the item was deleted; false means the
+// allowed to remove: added or adopted by the sync, status still "planned",
+// no tags, still carrying the missing mark the caller read, and not edited
+// since the caller read it. It reports whether the item was deleted; false means the
 // user (or another run) changed it first and it stays.
 //
 // updatedAt is the item's updated_at as the caller read it. Every edit a

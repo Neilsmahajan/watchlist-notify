@@ -716,12 +716,15 @@ func TestIMDbSyncItemWrites(t *testing.T) {
 		{UserID: user, Title: "Synced", Type: models.WatchlistTypeMovie, TMDbID: 900300, IMDbID: "tt9003000", Source: models.SourceIMDb},
 		{UserID: user, Title: "Synced Too", Type: models.WatchlistTypeMovie, TMDbID: 900303, IMDbID: "tt9003003", Source: models.SourceIMDb},
 		{UserID: user, Title: "Manual", Type: models.WatchlistTypeMovie, TMDbID: 900301},
-		{UserID: user, Title: "Manual Too", Type: models.WatchlistTypeMovie, TMDbID: 900302},
+		{UserID: user, Title: "Imported", Type: models.WatchlistTypeMovie, TMDbID: 900304, IMDbID: "tt9003004", Source: models.SourceCSV},
+		{UserID: user, Title: "Imported Long Ago", Type: models.WatchlistTypeMovie, TMDbID: 900305, IMDbID: "tt9003005"},
+		{UserID: user, Title: "Imported And Touched", Type: models.WatchlistTypeMovie, TMDbID: 900306, IMDbID: "tt9003006", Source: models.SourceCSV},
 	})
-	if err != nil || len(created) != 4 {
+	if err != nil || len(created) != 6 {
 		t.Fatalf("seed: created = %d, err = %v", len(created), err)
 	}
-	synced, syncedToo, manual, manualToo := created[0], created[1], created[2], created[3]
+	synced, syncedToo, manual := created[0], created[1], created[2]
+	imported, legacy, touched := created[3], created[4], created[5]
 	check := func(what string, got bool, err error, want bool) {
 		t.Helper()
 		if err != nil || got != want {
@@ -749,23 +752,55 @@ func TestIMDbSyncItemWrites(t *testing.T) {
 		}
 	}
 
-	// Filling in an IMDb ID.
-	manualSeen := seen(manual.ID)
-	ok, err := srv.SetWatchlistItemIMDbID(ctx, stranger, manual.ID, "tt9003001")
-	check("set IMDb ID on someone else's item", ok, err, false)
-	ok, err = srv.SetWatchlistItemIMDbID(ctx, user, manual.ID, "tt9003001")
-	check("set a missing IMDb ID", ok, err, true)
-	ok, err = srv.SetWatchlistItemIMDbID(ctx, user, manual.ID, "tt9003009")
-	check("overwrite an IMDb ID", ok, err, false)
-	ok, err = srv.SetWatchlistItemIMDbID(ctx, user, manualToo.ID, "tt9003000")
-	check("set an IMDb ID another item holds", ok, err, false)
-	if got := mustFindItem(t, srv, user, manual.ID); got.IMDbID != "tt9003001" || got.Source != "" {
-		t.Errorf("manual item = %+v; want the IMDb ID filled in and the source untouched", got)
+	// Adopting what the user imported from IMDb before linking the list.
+	importedSeen, legacySeen := seen(imported.ID), seen(legacy.ID)
+	ok, err := srv.AdoptWatchlistItem(ctx, stranger, imported.ID, "tt9003004")
+	check("adopt someone else's item", ok, err, false)
+	ok, err = srv.AdoptWatchlistItem(ctx, user, imported.ID, "tt9003009")
+	check("adopt under an IMDb ID the item does not carry", ok, err, false)
+	ok, err = srv.AdoptWatchlistItem(ctx, user, manual.ID, "tt9003004")
+	check("adopt a hand-added item", ok, err, false)
+	ok, err = srv.AdoptWatchlistItem(ctx, user, manual.ID, "")
+	check("adopt a hand-added item by its missing IMDb ID", ok, err, false)
+	ok, err = srv.AdoptWatchlistItem(ctx, user, synced.ID, "tt9003000")
+	check("adopt an item the sync already owns", ok, err, false)
+	// The user's edit, landing between the plan and this write, wins.
+	edit(touched.ID, map[string]any{"status": models.WatchlistStatusWatching})
+	ok, err = srv.AdoptWatchlistItem(ctx, user, touched.ID, "tt9003006")
+	check("adopt after the user changed the status", ok, err, false)
+	edit(touched.ID, map[string]any{"status": models.WatchlistStatusPlanned, "tags": []string{"keep"}})
+	ok, err = srv.AdoptWatchlistItem(ctx, user, touched.ID, "tt9003006")
+	check("adopt after the user tagged it", ok, err, false)
+	for _, refused := range []*models.WatchlistItem{manual, touched} {
+		if got := mustFindItem(t, srv, user, refused.ID); got.Source == models.SourceIMDb {
+			t.Fatalf("a refused adoption was written: %+v", got)
+		}
 	}
-	untouched("filling in an IMDb ID", manual.ID, manualSeen)
-	if got := mustFindItem(t, srv, user, manualToo.ID); got.IMDbID != "" {
-		t.Errorf("refused IMDb ID was written anyway: %+v", got)
+	if got := mustFindItem(t, srv, user, imported.ID); got.Source != models.SourceCSV {
+		t.Fatalf("a refused adoption was written: %+v", got)
 	}
+	ok, err = srv.AdoptWatchlistItem(ctx, user, imported.ID, "tt9003004")
+	check("adopt a CSV import", ok, err, true)
+	ok, err = srv.AdoptWatchlistItem(ctx, user, legacy.ID, "tt9003005")
+	check("adopt an import from before items had a source", ok, err, true)
+	ok, err = srv.AdoptWatchlistItem(ctx, user, imported.ID, "tt9003004")
+	check("adopt twice", ok, err, false)
+	for _, adopted := range []*models.WatchlistItem{imported, legacy} {
+		if got := mustFindItem(t, srv, user, adopted.ID); got.Source != models.SourceIMDb || got.IMDbID != adopted.IMDbID || got.Status != models.WatchlistStatusPlanned || got.IMDbMissingSince != nil {
+			t.Errorf("adopted item = %+v; want only its source changed", got)
+		}
+	}
+	untouched("adoption", imported.ID, importedSeen)
+	untouched("adoption", legacy.ID, legacySeen)
+	// Once the user clears the tag again the item is adoptable after all.
+	edit(touched.ID, map[string]any{"tags": []string{}})
+	ok, err = srv.AdoptWatchlistItem(ctx, user, touched.ID, "tt9003006")
+	check("adopt once the user's tag is gone", ok, err, true)
+	// An adopted item takes strikes and the delete like one the sync added.
+	ok, err = srv.MarkWatchlistItemIMDbMissing(ctx, user, legacy.ID, t1)
+	check("mark an adopted item", ok, err, true)
+	ok, err = srv.DeleteSyncedWatchlistItem(ctx, user, legacy.ID, t1, seen(legacy.ID))
+	check("delete a marked, adopted item", ok, err, true)
 
 	// Strike one.
 	strike := t1

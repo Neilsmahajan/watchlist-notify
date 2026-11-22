@@ -73,9 +73,9 @@ func tv(id int) Target {
 
 // want describes a plan by item names and IMDb IDs.
 type want struct {
-	add     []string          // IMDb IDs, in order
-	fill    map[string]string // item name -> IMDb ID
-	clear   []string          // item names
+	add     []string // IMDb IDs, in order
+	adopt   []string // item names
+	clear   []string // item names
 	mark    []string
 	remove  []string
 	prune   PruneDecision
@@ -107,12 +107,12 @@ func checkPlan(t *testing.T, plan Plan, w want) {
 	if !reflect.DeepEqual(gotAdd, append([]string{}, w.add...)) {
 		t.Errorf("add = %v, want %v", gotAdd, w.add)
 	}
-	gotFill := map[string]string{}
-	for _, fill := range plan.Fill {
-		gotFill[string(fill.ItemID[:1])] = fill.IMDbID
+	var adopted []primitive.ObjectID
+	for _, adoption := range plan.Adopt {
+		adopted = append(adopted, adoption.ItemID)
 	}
-	if wantFill := w.fill; len(gotFill)+len(wantFill) > 0 && !reflect.DeepEqual(gotFill, wantFill) {
-		t.Errorf("fill = %v, want %v", gotFill, wantFill)
+	if got := names(adopted); !reflect.DeepEqual(got, sorted(w.adopt)) {
+		t.Errorf("adopt = %v, want %v", got, w.adopt)
 	}
 	if got := names(plan.ClearMissing); !reflect.DeepEqual(got, sorted(w.clear)) {
 		t.Errorf("clear missing = %v, want %v", got, w.clear)
@@ -135,6 +135,25 @@ func checkPlan(t *testing.T, plan Plan, w want) {
 	}
 	if plan.Repeats != w.repeats {
 		t.Errorf("repeats = %d, want %d", plan.Repeats, w.repeats)
+	}
+	// An item is adopted because it is on the list and struck because it is
+	// not: never both in one plan, and never twice.
+	struck := map[primitive.ObjectID]bool{}
+	for _, id := range plan.MarkMissing {
+		struck[id] = true
+	}
+	for _, id := range removed {
+		struck[id] = true
+	}
+	seen := map[primitive.ObjectID]bool{}
+	for _, id := range adopted {
+		if struck[id] {
+			t.Errorf("item %q is adopted and marked or removed in the same plan", string(id[:1]))
+		}
+		if seen[id] {
+			t.Errorf("item %q is adopted twice", string(id[:1]))
+		}
+		seen[id] = true
 	}
 	if sum := len(plan.Add) + plan.Existing + plan.Unmatched + plan.Pending; sum != plan.Total || len(plan.Outcomes) != plan.Total {
 		t.Errorf("counts do not add up: %d added + %d existing + %d unmatched + %d pending != total %d (%d outcomes)",
@@ -233,15 +252,17 @@ func TestBuildPlan(t *testing.T) {
 
 		// --- items the user added themselves ---
 		{
-			name: "a hand-added item on the list is kept as it is and gets its IMDb ID",
+			name: "a hand-added item on the list is kept exactly as it is",
 			in: Input{
 				Mode: ModeSync, IDs: []string{ttA}, Complete: true, Resolved: abc,
 				Existing: []*models.WatchlistItem{item("m", tmdbID(1))},
 			},
-			want: want{fill: map[string]string{"m": ttA}, prune: PruneConsidered, counts: [4]int{1, 1, 0, 0}},
+			// Recognised by its title, so nothing is added; not adopted, and
+			// no IMDb ID is written onto it.
+			want: want{prune: PruneConsidered, counts: [4]int{1, 1, 0, 0}},
 		},
 		{
-			name: "a hand-added item that already has another IMDb ID is not rewritten",
+			name: "an item that has the title under another IMDb ID is matched by title and not adopted",
 			in: Input{
 				Mode: ModeSync, IDs: []string{ttA}, Complete: true, Resolved: abc,
 				Existing: []*models.WatchlistItem{item("m", tmdbID(1), imdbID("tt0000099"))},
@@ -249,13 +270,13 @@ func TestBuildPlan(t *testing.T) {
 			want: want{prune: PruneConsidered, counts: [4]int{1, 1, 0, 0}},
 		},
 		{
-			name: "two list IDs resolving to one hand-added item fill it once",
+			name: "two list IDs resolving to one hand-added item leave it alone",
 			in: Input{
 				Mode: ModeSync, IDs: []string{ttA, ttB}, Complete: true,
 				Resolved: map[string]Target{ttA: movie(1), ttB: movie(1)},
 				Existing: []*models.WatchlistItem{item("m", tmdbID(1))},
 			},
-			want: want{fill: map[string]string{"m": ttA}, prune: PruneConsidered, counts: [4]int{2, 2, 0, 0}},
+			want: want{prune: PruneConsidered, counts: [4]int{2, 2, 0, 0}},
 		},
 		{
 			name: "hand-added and CSV items that are not on the list are never marked or removed",
@@ -272,6 +293,114 @@ func TestBuildPlan(t *testing.T) {
 				},
 			},
 			want: want{clear: []string{"x", "y"}, prune: PruneConsidered, counts: [4]int{1, 1, 0, 0}},
+		},
+
+		// --- adopting what the user imported from IMDb before linking ---
+		{
+			name: "imported items on the list are adopted when the list is linked",
+			in: Input{
+				Mode: ModeLink, IDs: []string{ttA, ttB, ttC}, Complete: true, Resolved: abc,
+				Existing: []*models.WatchlistItem{
+					item("l", tmdbID(1), imdbID(ttA)),                           // from before the source field existed
+					item("c", tmdbID(2), imdbID(ttB), source(models.SourceCSV)), // a CSV import
+				},
+			},
+			want: want{add: []string{ttC}, adopt: []string{"c", "l"}, prune: PruneSkippedMode, counts: [4]int{3, 2, 0, 0}},
+		},
+		{
+			name: "imported items on the list are adopted by a worker sync too",
+			in: Input{
+				Mode: ModeSync, IDs: []string{ttA, ttB}, Complete: true,
+				Existing: []*models.WatchlistItem{
+					item("l", tmdbID(1), imdbID(ttA)),
+					item("c", tmdbID(2), imdbID(ttB), source(models.SourceCSV)),
+				},
+			},
+			want: want{adopt: []string{"c", "l"}, prune: PruneConsidered, counts: [4]int{2, 2, 0, 0}},
+		},
+		{
+			name: "a partly read list still adopts the items it does show",
+			in: Input{
+				Mode: ModeSync, IDs: []string{ttA}, Complete: false,
+				Existing: []*models.WatchlistItem{item("l", tmdbID(1), imdbID(ttA)), item("m", tmdbID(2), imdbID(ttB))},
+			},
+			want: want{adopt: []string{"l"}, prune: PruneSkippedIncomplete, counts: [4]int{1, 1, 0, 0}},
+		},
+		{
+			name: "an imported item the user has touched is not adopted",
+			in: Input{
+				Mode: ModeLink, IDs: []string{ttA, ttB, ttC}, Complete: true,
+				Existing: []*models.WatchlistItem{
+					item("w", tmdbID(1), imdbID(ttA), status(models.WatchlistStatusWatching)),
+					item("f", tmdbID(2), imdbID(ttB), source(models.SourceCSV), status(models.WatchlistStatusFinished)),
+					item("t", tmdbID(3), imdbID(ttC), source(models.SourceCSV), tagged("favourite")),
+				},
+			},
+			want: want{prune: PruneSkippedMode, counts: [4]int{3, 3, 0, 0}},
+		},
+		{
+			name: "an imported item that is not on the list is not adopted, marked or removed",
+			in: Input{
+				Mode: ModeSync, IDs: []string{ttA}, Complete: true,
+				Existing: []*models.WatchlistItem{
+					synced("a", ttA, 1),
+					item("l", tmdbID(2), imdbID(ttB)),
+					item("c", tmdbID(3), imdbID(ttC), source(models.SourceCSV)),
+				},
+			},
+			want: want{prune: PruneConsidered, counts: [4]int{1, 1, 0, 0}},
+		},
+		{
+			name: "an item matched only by its title is never adopted",
+			in: Input{
+				Mode: ModeLink, IDs: []string{ttA, ttB}, Complete: true, Resolved: abc,
+				Existing: []*models.WatchlistItem{
+					item("m", tmdbID(1)),                      // added by hand: no IMDb ID
+					item("o", tmdbID(2), imdbID("tt0000099")), // imported under another IMDb ID
+					item("n"), // added by hand, never matched to TMDb
+				},
+			},
+			want: want{prune: PruneSkippedMode, counts: [4]int{2, 2, 0, 0}},
+		},
+		{
+			name: "a CSV import never adopts",
+			in: Input{
+				Mode: ModeCSV, IDs: []string{ttA, ttB}, Complete: true,
+				Existing: []*models.WatchlistItem{
+					item("l", tmdbID(1), imdbID(ttA)),
+					item("c", tmdbID(2), imdbID(ttB), source(models.SourceCSV)),
+				},
+			},
+			want: want{prune: PruneSkippedMode, counts: [4]int{2, 2, 0, 0}},
+		},
+		{
+			name: "an item the sync already owns is not adopted again",
+			in: Input{
+				Mode: ModeSync, IDs: []string{ttA}, Complete: true,
+				Existing: []*models.WatchlistItem{synced("a", ttA, 1)},
+			},
+			want: want{prune: PruneConsidered, counts: [4]int{1, 1, 0, 0}},
+		},
+		{
+			name: "the same ID twice on the list adopts once",
+			in: Input{
+				Mode: ModeLink, IDs: []string{ttA, ttA}, Complete: true,
+				Existing: []*models.WatchlistItem{item("l", tmdbID(1), imdbID(ttA))},
+			},
+			want: want{adopt: []string{"l"}, prune: PruneSkippedMode, counts: [4]int{1, 1, 0, 0}, repeats: 1},
+		},
+		{
+			name: "adoption and a strike never fall on the same item",
+			in: Input{
+				Mode: ModeSync, IDs: []string{ttA}, Complete: true,
+				Existing: []*models.WatchlistItem{
+					item("l", tmdbID(1), imdbID(ttA)),            // on the list: adopted, not struck
+					synced("b", ttB, 2),                          // the sync's, off the list: strike one
+					synced("r", "tt0000004", 4, missingFor(day)), // the sync's, off it twice: removed
+					item("c", tmdbID(3), imdbID(ttC)),            // imported, off the list: neither
+				},
+			},
+			want: want{adopt: []string{"l"}, mark: []string{"b"}, remove: []string{"r"}, prune: PruneConsidered, counts: [4]int{1, 1, 0, 0}},
 		},
 
 		// --- removing: two strikes ---
@@ -562,5 +691,18 @@ func TestBuildPlanOutcomes(t *testing.T) {
 	want := map[string]Outcome{ttA: OutcomeExisting, ttB: OutcomeAdded, ttC: OutcomeUnmatched, "tt0000004": OutcomePending}
 	if !reflect.DeepEqual(plan.Outcomes, want) {
 		t.Errorf("outcomes = %v, want %v", plan.Outcomes, want)
+	}
+}
+
+// An adoption names the IMDb ID the item was matched by, which the store's
+// write then insists on.
+func TestBuildPlanAdoptionsCarryTheMatchedID(t *testing.T) {
+	plan := BuildPlan(Input{
+		Mode: ModeLink, Now: planNow, IDs: []string{ttB, ttA}, Complete: true,
+		Existing: []*models.WatchlistItem{item("l", tmdbID(1), imdbID(ttA)), item("c", tmdbID(2), imdbID(ttB), source(models.SourceCSV))},
+	})
+	want := []Adoption{{ItemID: itemID("c"), IMDbID: ttB}, {ItemID: itemID("l"), IMDbID: ttA}}
+	if !reflect.DeepEqual(plan.Adopt, want) {
+		t.Errorf("adoptions = %+v, want %+v (in list order)", plan.Adopt, want)
 	}
 }

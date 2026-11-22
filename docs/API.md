@@ -364,6 +364,7 @@ removed on the evidence of the list that is linked now.
     "total": 242,
     "added": 230,
     "existing": 10,
+    "adopted": 8,
     "unmatched": 2,
     "complete": true
   }
@@ -371,7 +372,10 @@ removed on the evidence of the list that is linked now.
 ```
 
 - `result.added` - titles that became new watchlist items; `existing` - titles
-  the user already had, which are left exactly as they are
+  the user already had
+- `result.adopted` - how many of the `existing` ones the sync took over
+  because the user had imported them from IMDb before (see **Adopts** below).
+  Every other existing item is left exactly as it is
 - `result.complete` - `false` when the list was only partly read, when it
   holds the same title twice, or when the request ran out of time (20 seconds
   for reading the list, looking titles up and writing them, whichever of
@@ -397,17 +401,31 @@ A failed attempt leaves an existing link as it was.
 
 - **Adds** each title on the list the user does not have yet, as a `planned`
   item with `"source": "imdb"`. Metadata comes from TMDb.
-- **Removes** an item only when all of these hold: the sync added it
-  (`source` is `imdb`); the user has not changed its status from `planned`,
+- **Adopts** what the user imported from IMDb before linking. An existing
+  item gets `"source": "imdb"`, and from then on is treated like one the sync
+  added, when all of these hold: the item's own stored `imdb_id` is on the
+  list; its `source` is `csv` or absent; its status is still `planned`; and it
+  has no tags. Both linking and the daily sync do this. Without it, someone
+  who imported their list by CSV and later linked the same list would never
+  see a title leave here after taking it off IMDb. An item added by hand has
+  no `imdb_id` (the create request's `imdb_id` is not stored and an edit
+  cannot set one), so it is never adopted, even when its title is on the
+  list, and the sync never writes an `imdb_id` onto it. An imported item that
+  is not on the list, or that the user has started, finished or tagged, is
+  not adopted either. Adopting changes nothing but `source` and does not move
+  `updated_at`.
+- **Removes** an item only when all of these hold: the sync added or adopted
+  it (`source` is `imdb`); the user has not changed its status from `planned`,
   tagged it, or edited it in any way since the sync last looked; and it was
   missing from two fetches of the **whole** list at least 12 hours apart,
   both made while the list that is linked now was linked. The first such
-  fetch only sets `imdb_missing_since` on the item. Items added by hand or by
-  CSV import are never removed, and a list that is private, unreachable,
-  partly read, empty, or that holds the same title twice removes nothing.
+  fetch only sets `imdb_missing_since` on the item. Items added by hand are
+  never removed, nor are imported items the sync has not adopted, and a list
+  that is private, unreachable, partly read, empty, or that holds the same
+  title twice removes nothing.
 - Linking never removes anything; only the daily sync does. A daily sync
-  that is under way when the user unlinks or links again removes nothing
-  either.
+  that is under way when the user unlinks or links again adopts nothing and
+  removes nothing.
 
 **IMDb's terms.** IMDb does not license its data for public or commercial
 use. This feature is therefore strictly opt-in, reads only a list its owner
@@ -423,7 +441,7 @@ DELETE /api/me/imdb
 ```
 
 Stops the sync. Nothing is removed from the watchlist: the items the sync
-added stay (still marked `"source": "imdb"`), and nothing removes them
+added or adopted stay (still marked `"source": "imdb"`), and nothing removes them
 automatically afterwards. Every `imdb_missing_since` mark on the user's items
 is cleared. Succeeds when nothing is linked.
 
@@ -643,9 +661,10 @@ however long it is, and no upstream calls.
 }
 ```
 
-- `source` - how the item got on the list: `"imdb"` (the IMDb sync), `"csv"`
-  (a CSV import), or absent for items added by hand or before this field
-  existed.
+- `source` - who looks after the item: `"imdb"` (the IMDb sync added it, or
+  adopted it from an earlier import because it is on the linked list),
+  `"csv"` (a CSV import), or absent for items added by hand or before this
+  field existed.
 - `imdb_missing_since` - present on an IMDb-synced item that was missing from
   the last complete fetch of the linked list. If it is still missing at a
   later sync, at least 12 hours on, and the user has not changed its status or
@@ -717,8 +736,11 @@ Content-Type: multipart/form-data
 Must include `Const` column with IMDb IDs (e.g., `tt0468569`)
 
 An import only adds. Rows the user already has, and rows repeating an earlier
-row, count as `duplicates`; new titles become `planned` items with
-`"source": "csv"`. A file brings in at most 10,000 titles.
+row, count as `duplicates` and are left as they are (an import never hands an
+item to the IMDb sync); new titles become `planned` items with
+`"source": "csv"`. A file brings in at most 10,000 titles. If the same list is
+linked afterwards, the untouched imported items that are on it are adopted by
+the sync (see [Link an IMDb List](#link-an-imdb-list)).
 
 **Response:**
 

@@ -477,7 +477,7 @@ func TestIMDbTaskDoesNotPruneWhenTheLinkChangesMidSync(t *testing.T) {
 				if got := w.itemIDs(alice); !reflect.DeepEqual(got, []string{tt1, tt2, tt3}) {
 					t.Errorf("watchlist = %v; want nothing removed and the new title added", got)
 				}
-				if !strings.Contains(w.logs.String(), "link changed during sync; nothing marked or removed") {
+				if !strings.Contains(w.logs.String(), "link changed during sync; nothing adopted, marked or removed") {
 					t.Errorf("the log does not say why nothing was removed:\n%s", w.logs.String())
 				}
 				stored := w.store.User(alice).IMDbSync
@@ -648,4 +648,55 @@ func TestIMDbTaskDefersUsersWhenOutOfTime(t *testing.T) {
 		t.Errorf("the next run fetched %v, want %v", w.lists.fetched, want)
 	}
 	w.wantSummary(`"users":1`, `"synced":1`, `"deferred":0`)
+}
+
+// A user who imported their list by CSV before linking it: the daily run
+// takes over the imports that are on the list, says so in its logs, and
+// later removes one that leaves the list. A title added by hand is never
+// taken over and so never removed.
+func TestIMDbTaskAdoptsImportedItemsAndLaterRemovesThem(t *testing.T) {
+	w := newIMDbWorld(t)
+	alice := w.link("alice@example.com", "ur0000001", 30*time.Hour, tt1, tt2, tt3)
+	w.store.AddItem(&models.WatchlistItem{
+		UserID: alice, Title: "Imported", Type: models.WatchlistTypeMovie, TMDbID: 1, IMDbID: tt1,
+		Source: models.SourceCSV, Status: models.WatchlistStatusPlanned,
+	})
+	manual := w.store.AddItem(&models.WatchlistItem{
+		UserID: alice, Title: "Added by hand", Type: models.WatchlistTypeMovie, TMDbID: 2, Status: models.WatchlistStatusPlanned,
+	})
+	sources := func() map[string]string {
+		out := map[string]string{}
+		for _, item := range w.store.Items(alice) {
+			out[item.Title] = item.Source
+		}
+		return out
+	}
+
+	if err := w.run(); err != nil {
+		t.Fatal(err)
+	}
+	w.wantSummary(`"adopted":1`, `"added":1`, `"marked_missing":0`, `"removed":0`)
+	if !strings.Contains(w.logs.String(), `"msg":"imdb: user synced"`) || strings.Count(w.logs.String(), `"adopted":1`) != 2 {
+		t.Errorf("the user's log line and the summary should both say adopted 1:\n%s", w.logs.String())
+	}
+	if got, want := sources(), (map[string]string{"Imported": models.SourceIMDb, "Added by hand": "", "Title": models.SourceIMDb}); !reflect.DeepEqual(got, want) {
+		t.Fatalf("sources = %v, want %v", got, want)
+	}
+
+	// Both leave the IMDb list.
+	w.lists.lists["ur0000001"] = []string{tt3}
+	w.nextDay()
+	_ = w.run()
+	w.wantSummary(`"adopted":0`, `"marked_missing":1`, `"removed":0`)
+	w.nextDay()
+	_ = w.run()
+	w.wantSummary(`"adopted":0`, `"marked_missing":0`, `"removed":1`)
+	if got, want := sources(), (map[string]string{"Added by hand": "", "Title": models.SourceIMDb}); !reflect.DeepEqual(got, want) {
+		t.Errorf("sources = %v, want the adopted import gone and the hand-added title kept", got)
+	}
+	for _, item := range w.store.Items(alice) {
+		if item.ID == manual.ID && (item.IMDbID != "" || item.IMDbMissingSince != nil) {
+			t.Errorf("the hand-added item was written to: %+v", item)
+		}
+	}
 }

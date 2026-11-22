@@ -71,3 +71,34 @@ func TestSyncOwned(t *testing.T) {
 		})
 	}
 }
+
+func TestAdoptable(t *testing.T) {
+	imported := WatchlistItem{Source: SourceCSV, Status: WatchlistStatusPlanned, IMDbID: "tt0133093"}
+	tests := []struct {
+		name string
+		edit func(*WatchlistItem)
+		want bool
+	}{
+		{"as a CSV import left it", func(*WatchlistItem) {}, true},
+		{"imported before items had a source", func(w *WatchlistItem) { w.Source = "" }, true},
+		{"added by hand: no IMDb ID", func(w *WatchlistItem) { w.Source, w.IMDbID = "", "" }, false},
+		{"a CSV row without an IMDb ID", func(w *WatchlistItem) { w.IMDbID = "" }, false},
+		{"already the sync's", func(w *WatchlistItem) { w.Source = SourceIMDb }, false},
+		{"a source nobody knows", func(w *WatchlistItem) { w.Source = "letterboxd" }, false},
+		{"status changed", func(w *WatchlistItem) { w.Status = WatchlistStatusWatching }, false},
+		{"finished", func(w *WatchlistItem) { w.Status = WatchlistStatusFinished }, false},
+		{"tagged", func(w *WatchlistItem) { w.Tags = []string{"date night"} }, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			item := imported
+			tt.edit(&item)
+			if got := item.Adoptable(); got != tt.want {
+				t.Errorf("Adoptable() = %v, want %v", got, tt.want)
+			}
+			if item.Adoptable() && item.SyncOwned() {
+				t.Error("an item is both adoptable and already the sync's")
+			}
+		})
+	}
+}

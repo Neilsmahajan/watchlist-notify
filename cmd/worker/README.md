@@ -99,13 +99,29 @@ For each due user the task claims the fetch (an atomic write, so two
 overlapping runs cannot both fetch), reads the list, and then:
 
 - **Adds** every title on the list the user does not have yet, as a `planned`
-  item with `source: "imdb"`. A title the user already has, however it got
-  there, is left exactly as it is. IMDb IDs are mapped to TMDb titles from the
-  user's own items first, then from the stored `titles`, and only then by
-  asking TMDb (8 lookups in flight). IDs TMDb does not know are counted as
-  `unmatched`.
-- **Removes** an item only when all of this holds: the sync added it
-  (`source: "imdb"`); the user has not touched it (status still `planned`, no
+  item with `source: "imdb"`. A title the user already has is not added
+  again. IMDb IDs are mapped to TMDb titles from the user's own items first,
+  then from the stored `titles`, and only then by asking TMDb (8 lookups in
+  flight). IDs TMDb does not know are counted as `unmatched`.
+- **Adopts** what the user imported from IMDb before linking: an existing
+  item whose own stored `imdb_id` is on the list, whose `source` is `csv` or
+  absent, whose status is still `planned` and which has no tags gets
+  `source: "imdb"` and follows the rules below from then on. (Linking does
+  the same.) Someone who imported their list by CSV and then linked it would
+  otherwise never see a title leave here after taking it off IMDb. The write
+  repeats all of those conditions in its filter, so an edit the user makes
+  after the plan wins, and it leaves `updated_at` alone.
+- **Never adopts** an item added by hand. Such an item has no `imdb_id`: the
+  create request's `imdb_id` is not stored, an edit cannot set one, and the
+  sync never writes one onto an existing item (if it did, the item would look
+  like an import on the next run). When its title is on the list, the sync
+  recognises it through the stored `titles` (which carry the IMDb ID) and
+  simply does not add it again; that costs no TMDb call once the refresh has
+  stored the title. Imported items that are not on the list, or that the user
+  has started, finished or tagged, are not adopted either. Every existing
+  item that is not adopted is left exactly as it is.
+- **Removes** an item only when all of this holds: the sync added or adopted
+  it (`source: "imdb"`); the user has not touched it (status still `planned`, no
   tags); it is absent from a fetch that read the **whole** list (every page,
   no title read twice, and the count matches what IMDb reported), the list is
   not empty, and every title on it could be resolved; and an earlier such
@@ -123,16 +139,16 @@ overlapping runs cannot both fetch), reads the list, and then:
   Linking and unlinking both clear all of a user's marks.
 - **The link is read again before pruning.** A run can spend two minutes
   fetching and resolving, and the user can unlink or link again in that time.
-  Immediately before the marks, and again before the removals, the run reads
-  the user's link and does neither unless `source_id` and `linked_at` are
-  exactly what it started with (`link_changed` in the log). What it added
-  stays, and its status is stored only on the link it was for.
+  Immediately before the adoptions and marks, and again before the removals,
+  the run reads the user's link and does none of them unless `source_id` and
+  `linked_at` are exactly what it started with (`link_changed` in the log).
+  What it added stays, and its status is stored only on the link it was for.
 - A list that is private, gone, unreachable, only partly read, or empty never
   removes or marks anything, and neither does a list that holds the same
   title twice (the client cannot tell that from two pages that overlap, so it
   never calls such a list complete; the status tells the user to remove the
-  duplicate). A partly read list still adds the titles that were read.
-  Unlinking never removes anything.
+  duplicate). A partly read list still adds the titles that were read, and
+  adopts the imported items it shows. Unlinking never removes anything.
 
 The outcome is stored on the user as `imdb_sync` (`last_status`: `ok`,
 `partial`, `failed` or `not_found`) and shown in the app. One user's failure
@@ -143,7 +159,7 @@ Logs carry user IDs and counts, never email addresses or titles. Each user
 gets an `imdb: user synced` line and the run ends with an `imdb summary` line:
 `users` (linked and due), `synced`, `partial`, `failed`, `not_found`,
 `skipped` (claimed by another run, or not reached), `deferred`, `added`,
-`removed`, `marked_missing`, `unmatched`.
+`adopted`, `removed`, `marked_missing`, `unmatched`.
 
 **Time.** The job's three tasks share one Cloud Run task timeout: 1800 s,
 set as `TASK_TIMEOUT` in `scripts/release-worker.sh`. The sync budgets itself

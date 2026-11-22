@@ -165,6 +165,20 @@ func (s *Store) Items(userID primitive.ObjectID) []*models.WatchlistItem {
 	return out
 }
 
+// RemoveItem deletes a stored item, the way a user's delete arriving from
+// another request would. It reports whether the item existed.
+func (s *Store) RemoveItem(id primitive.ObjectID) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i, item := range s.items {
+		if item.ID == id {
+			s.items = append(s.items[:i], s.items[i+1:]...)
+			return true
+		}
+	}
+	return false
+}
+
 // EditItem changes a stored item in place, the way a user's edit arriving
 // from another request would: like the real update it moves updated_at on,
 // whatever the edit changes. It reports whether the item exists.
@@ -545,22 +559,19 @@ func (s *Store) findItem(userID, itemID primitive.ObjectID) *models.WatchlistIte
 	return nil
 }
 
-func (s *Store) SetWatchlistItemIMDbID(ctx context.Context, userID, itemID primitive.ObjectID, imdbID string) (bool, error) {
-	unlock, err := s.begin(ctx, "SetWatchlistItemIMDbID")
+// AdoptWatchlistItem applies the same conditions as the real filter: the
+// IMDb ID it was matched by, no source or "csv", still planned, untagged.
+func (s *Store) AdoptWatchlistItem(ctx context.Context, userID, itemID primitive.ObjectID, imdbID string) (bool, error) {
+	unlock, err := s.begin(ctx, "AdoptWatchlistItem")
 	defer unlock()
 	if err != nil {
 		return false, err
 	}
 	item := s.findItem(userID, itemID)
-	if item == nil || item.IMDbID != "" || imdbID == "" {
+	if item == nil || imdbID == "" || item.IMDbID != imdbID || !item.Adoptable() {
 		return false, nil
 	}
-	for _, other := range s.items {
-		if other.UserID == userID && other.IMDbID == imdbID {
-			return false, nil // the unique index refuses it
-		}
-	}
-	item.IMDbID = imdbID
+	item.Source = models.SourceIMDb
 	s.Writes++
 	return true, nil
 }

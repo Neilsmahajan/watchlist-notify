@@ -94,6 +94,7 @@ func (f *fakeTMDb) lookups() []string {
 type hookedStore struct {
 	*storetest.Store
 	beforeCreate func()
+	beforeAdopt  func()
 	beforeMark   func()
 	beforeDelete func()
 	createErr    error
@@ -115,6 +116,13 @@ func (h *hookedStore) CreateWatchlistItems(ctx context.Context, items []*models.
 		h.beforeCreate()
 	}
 	return h.Store.CreateWatchlistItems(ctx, items)
+}
+
+func (h *hookedStore) AdoptWatchlistItem(ctx context.Context, userID, itemID primitive.ObjectID, imdbID string) (bool, error) {
+	if h.beforeAdopt != nil {
+		h.beforeAdopt()
+	}
+	return h.Store.AdoptWatchlistItem(ctx, userID, itemID, imdbID)
 }
 
 func (h *hookedStore) MarkWatchlistItemIMDbMissing(ctx context.Context, userID, itemID primitive.ObjectID, since time.Time) (bool, error) {
@@ -318,8 +326,8 @@ func TestRunLeavesHandAddedItemsAlone(t *testing.T) {
 
 	res := w.sync(matrix)
 
-	if res.Added != 0 || res.Existing != 1 || res.Filled != 1 {
-		t.Errorf("added = %d, existing = %d, filled = %d; want the hand-added item recognised", res.Added, res.Existing, res.Filled)
+	if res.Added != 0 || res.Existing != 1 || res.Adopted != 0 {
+		t.Errorf("added = %d, existing = %d, adopted = %d; want the hand-added item recognised and left the user's", res.Added, res.Existing, res.Adopted)
 	}
 	items := w.store.Items(w.user)
 	if len(items) != 1 {
@@ -329,8 +337,8 @@ func TestRunLeavesHandAddedItemsAlone(t *testing.T) {
 	if got.ID != manual.ID || got.Source != "" || got.Status != models.WatchlistStatusWatching || got.Title != "Matrix (rewatch)" || !reflect.DeepEqual(got.Tags, []string{"rewatch"}) {
 		t.Errorf("hand-added item was changed: %+v", got)
 	}
-	if got.IMDbID != matrix {
-		t.Errorf("IMDb ID = %q, want it filled in", got.IMDbID)
+	if got.IMDbID != "" {
+		t.Errorf("IMDb ID = %q; the sync must not write one onto an item the user added by hand", got.IMDbID)
 	}
 
 	// And it is never removed, however long it stays off the list.
@@ -338,7 +346,7 @@ func TestRunLeavesHandAddedItemsAlone(t *testing.T) {
 		w.now = w.now.Add(24 * time.Hour)
 		w.sync(inceptn)
 	}
-	w.expect(map[string]string{matrix: "/watching", inceptn: syncedAs})
+	w.expect(map[string]string{"Matrix (rewatch)": "/watching", inceptn: syncedAs})
 }
 
 func TestRunAddsAMovieAndAShowThatShareATMDbID(t *testing.T) {
@@ -580,8 +588,8 @@ func TestSyncDoesNotRemoveAnItemEditedAfterThePlan(t *testing.T) {
 	}
 }
 
-// The sync's own writes to an item (the mark, its clearing, a filled-in
-// IMDb ID) leave updated_at alone, so they never look like a user's edit to
+// The sync's own writes to an item (the mark, its clearing; adoption has its
+// own test) leave updated_at alone, so they never look like a user's edit to
 // the delete that follows.
 func TestSyncWritesDoNotLookLikeUserEdits(t *testing.T) {
 	w := newWorld(t)
@@ -693,6 +701,360 @@ func TestRelinkingStartsTheStrikesOver(t *testing.T) {
 		t.Errorf("second sync of the new list: removed = %d, want 2", res.Removed)
 	}
 	w.expect(map[string]string{thrones: syncedAs})
+}
+
+// --- adopting what the user imported from IMDb before linking ---
+
+// imported puts an item on the watchlist the way an import made before the
+// list was linked left it: it has the IMDb ID it was imported under, and no
+// source (the oldest ones) or "csv".
+func (w *world) imported(imdbID string, tmdbID int, title, source string) *models.WatchlistItem {
+	w.t.Helper()
+	return w.store.AddItem(&models.WatchlistItem{
+		UserID: w.user, Title: title, Type: models.WatchlistTypeMovie, TMDbID: tmdbID,
+		IMDbID: imdbID, Source: source, Status: models.WatchlistStatusPlanned,
+	})
+}
+
+// unlinked is a world whose user has no link yet, as when PUT /api/me/imdb
+// runs: the link is stored only after the reconcile.
+func unlinkedWorld(t *testing.T) *world {
+	t.Helper()
+	w := newWorld(t)
+	if err := w.store.UnlinkIMDb(context.Background(), w.user); err != nil {
+		t.Fatal(err)
+	}
+	return w
+}
+
+// The user imported their IMDb list by CSV long ago and now links that same
+// list. The titles on it become the sync's, and one they later take off IMDb
+// leaves here after the usual two strikes.
+func TestLinkAdoptsImportedItemsAndTheSyncThenRemovesThem(t *testing.T) {
+	w := unlinkedWorld(t)
+	standardTMDb(w.tmdb)
+	old := w.imported(matrix, 603, "The Matrix", "")
+	csv := w.imported(inceptn, 27205, "Inception", models.SourceCSV)
+	oldUpdated, csvUpdated := old.UpdatedAt, csv.UpdatedAt
+
+	w.now = w.now.Add(time.Hour)
+	w.linked = w.now
+	res := w.run(ModeLink, true, matrix, inceptn, thrones)
+
+	if res.Adopted != 2 || res.Added != 1 || res.Existing != 2 {
+		t.Errorf("adopted = %d, added = %d, existing = %d; want 2, 1, 2", res.Adopted, res.Added, res.Existing)
+	}
+	w.expect(map[string]string{matrix: syncedAs, inceptn: syncedAs, thrones: syncedAs})
+	if got := w.tmdb.lookups(); !reflect.DeepEqual(got, []string{thrones}) {
+		t.Errorf("TMDb was asked about %v; items matched by their own IMDb ID need no lookup", got)
+	}
+	// Adoption is the sync's write, not the user's: it must not look like an
+	// edit to the delete that may follow.
+	if a, b := w.item(matrix).UpdatedAt, w.item(inceptn).UpdatedAt; !a.Equal(oldUpdated) || !b.Equal(csvUpdated) {
+		t.Errorf("adoption moved updated_at (%v -> %v, %v -> %v)", oldUpdated, a, csvUpdated, b)
+	}
+	if got := w.store.Queries["GetIMDbLink"]; got != 0 {
+		t.Errorf("linking read the stored link %d times; there is none to compare with yet", got)
+	}
+	w.relink(worldList, w.linked) // the handler stores the link after the reconcile
+
+	// The user takes Inception off their IMDb list. Two complete fetches,
+	// twelve hours apart, both without it.
+	w.now = w.now.Add(24 * time.Hour)
+	if res := w.sync(matrix, thrones); res.MarkedMissing != 1 || res.Removed != 0 || res.Adopted != 0 {
+		t.Errorf("first fetch without it: marked = %d, removed = %d, adopted = %d; want 1, 0, 0", res.MarkedMissing, res.Removed, res.Adopted)
+	}
+	w.expect(map[string]string{matrix: syncedAs, inceptn: syncedAs + "/missing", thrones: syncedAs})
+	w.now = w.now.Add(MinMissingAge)
+	if res := w.sync(matrix, thrones); res.Removed != 1 {
+		t.Errorf("second fetch without it: removed = %d, want 1", res.Removed)
+	}
+	w.expect(map[string]string{matrix: syncedAs, thrones: syncedAs})
+}
+
+// A daily sync adopts as well: an imported item that turns up on the linked
+// list later, or that the link request could not get to.
+func TestSyncAdoptsImportedItemsOnTheList(t *testing.T) {
+	w := newWorld(t)
+	standardTMDb(w.tmdb)
+	w.imported(matrix, 603, "The Matrix", "")
+	w.imported(inceptn, 27205, "Inception", models.SourceCSV)
+
+	res := w.sync(matrix)
+	if res.Adopted != 1 {
+		t.Errorf("adopted = %d, want the one item that is on the list", res.Adopted)
+	}
+	w.expect(map[string]string{matrix: syncedAs, inceptn: "csv/planned"})
+
+	// The other one appears on the list the next day.
+	w.now = w.now.Add(24 * time.Hour)
+	if res := w.sync(matrix, inceptn); res.Adopted != 1 {
+		t.Errorf("adopted = %d, want the item that is on the list now", res.Adopted)
+	}
+	w.expect(map[string]string{matrix: syncedAs, inceptn: syncedAs})
+
+	// Nothing is left to adopt, and a run that only adopts read the link once.
+	w.now = w.now.Add(24 * time.Hour)
+	writes := w.store.Writes
+	if res := w.sync(matrix, inceptn); res.Adopted != 0 || w.store.Writes != writes {
+		t.Errorf("a third run adopted %d and wrote %d times; want nothing", res.Adopted, w.store.Writes-writes)
+	}
+	if got := w.store.Queries["GetIMDbLink"]; got != 2 {
+		t.Errorf("the link was read %d times, want once for each run that adopted", got)
+	}
+}
+
+// Once the user has started watching an adopted item it is theirs: it stays
+// when it leaves the IMDb list, and it keeps saying where it came from.
+func TestAdoptedItemTheUserStartsWatchingIsNeverRemoved(t *testing.T) {
+	w := newWorld(t)
+	standardTMDb(w.tmdb)
+	w.imported(matrix, 603, "The Matrix", "")
+	w.imported(inceptn, 27205, "Inception", models.SourceCSV)
+	w.run(ModeLink, true, matrix, inceptn)
+	w.store.EditItem(w.item(inceptn).ID, func(it *models.WatchlistItem) { it.Status = models.WatchlistStatusWatching })
+
+	for day := 1; day <= 4; day++ {
+		w.now = w.now.Add(24 * time.Hour)
+		if res := w.sync(matrix); res.MarkedMissing != 0 || res.Removed != 0 {
+			t.Fatalf("day %d: marked = %d, removed = %d; want the user's item left alone", day, res.MarkedMissing, res.Removed)
+		}
+	}
+	w.expect(map[string]string{matrix: syncedAs, inceptn: "imdb/watching"})
+}
+
+// A title the user added by hand has no IMDb ID, which is how the sync tells
+// it from an import. Being on the list must never make it the sync's: not at
+// the link, not on the tenth sync, and so never removable afterwards either.
+func TestHandAddedItemIsNeverAdoptedOrRemoved(t *testing.T) {
+	w := unlinkedWorld(t)
+	standardTMDb(w.tmdb)
+	manual := w.store.AddItem(&models.WatchlistItem{
+		UserID: w.user, Title: "The Matrix", Type: models.WatchlistTypeMovie, TMDbID: 603,
+		Status: models.WatchlistStatusPlanned, // untouched since: only the missing IMDb ID sets it apart
+	})
+	check := func(when string, res Result) {
+		t.Helper()
+		if res.Adopted != 0 || len(res.Plan.Adopt) != 0 || res.MarkedMissing != 0 || res.Removed != 0 {
+			t.Fatalf("%s: adopted = %d (planned %d), marked = %d, removed = %d; want nothing", when, res.Adopted, len(res.Plan.Adopt), res.MarkedMissing, res.Removed)
+		}
+		items := w.store.Items(w.user)
+		var got *models.WatchlistItem
+		for _, it := range items {
+			if it.ID == manual.ID {
+				got = it
+			}
+		}
+		if got == nil {
+			t.Fatalf("%s: the hand-added item is gone; watchlist = %v", when, w.titles())
+		}
+		if got.Source != "" || got.IMDbID != "" || got.IMDbMissingSince != nil || !got.UpdatedAt.Equal(manual.UpdatedAt) {
+			t.Fatalf("%s: the hand-added item was written to: %+v", when, got)
+		}
+	}
+
+	// Linked twice (a retry), then synced day after day with it on the list.
+	check("link", w.run(ModeLink, true, matrix, inceptn))
+	check("link again", w.run(ModeLink, true, matrix, inceptn))
+	w.relink(worldList, w.linked)
+	for day := 1; day <= 3; day++ {
+		w.now = w.now.Add(24 * time.Hour)
+		res := w.sync(matrix, inceptn)
+		check(fmt.Sprintf("sync, day %d", day), res)
+		if res.Existing != 2 || res.Added != 0 {
+			t.Fatalf("day %d: existing = %d, added = %d; want the title recognised, not added again", day, res.Existing, res.Added)
+		}
+	}
+	// It leaves the IMDb list and stays here.
+	for day := 4; day <= 7; day++ {
+		w.now = w.now.Add(24 * time.Hour)
+		check(fmt.Sprintf("off the list, day %d", day), w.sync(inceptn))
+	}
+	w.expect(map[string]string{"The Matrix": "/planned", inceptn: syncedAs})
+}
+
+// A hand-added title on the list is found through the stored titles on every
+// run, so leaving it without an IMDb ID costs no TMDb calls.
+func TestHandAddedItemOnTheListCostsNoLookupsOnceItsTitleIsStored(t *testing.T) {
+	w := newWorld(t)
+	stored := &models.Title{ID: "movie:603", MediaType: "movie", TMDbID: 603}
+	stored.TitleMetadata = models.TitleMetadata{Title: "The Matrix", Year: 1999, IMDbID: matrix}
+	w.store.PutTitle(stored)
+	w.store.AddItem(&models.WatchlistItem{
+		UserID: w.user, Title: "The Matrix", Type: models.WatchlistTypeMovie, TMDbID: 603, Status: models.WatchlistStatusPlanned,
+	})
+
+	for i := 0; i < 3; i++ {
+		w.now = w.now.Add(24 * time.Hour)
+		if res := w.sync(matrix); res.Lookups != 0 || res.Existing != 1 || res.Added != 0 {
+			t.Fatalf("run %d: lookups = %d, existing = %d, added = %d; want 0, 1, 0", i+1, res.Lookups, res.Existing, res.Added)
+		}
+	}
+	if got := w.tmdb.lookups(); len(got) != 0 {
+		t.Errorf("TMDb was asked about %v", got)
+	}
+}
+
+// An import that is not on the linked list (another list's, or a title since
+// taken off) is not the sync's business: never adopted, so never removed.
+func TestImportedItemOffTheListIsNeverAdoptedOrRemoved(t *testing.T) {
+	w := unlinkedWorld(t)
+	standardTMDb(w.tmdb)
+	w.imported(inceptn, 27205, "Inception", "")
+	w.imported(thrones, 1399, "Game of Thrones", models.SourceCSV)
+
+	if res := w.run(ModeLink, true, matrix); res.Adopted != 0 {
+		t.Errorf("link: adopted = %d, want 0", res.Adopted)
+	}
+	w.relink(worldList, w.linked)
+	for day := 1; day <= 4; day++ {
+		w.now = w.now.Add(24 * time.Hour)
+		if res := w.sync(matrix); res.Adopted != 0 || res.MarkedMissing != 0 || res.Removed != 0 {
+			t.Fatalf("day %d: adopted = %d, marked = %d, removed = %d; want nothing", day, res.Adopted, res.MarkedMissing, res.Removed)
+		}
+	}
+	w.expect(map[string]string{matrix: syncedAs, inceptn: "/planned", thrones: "csv/planned"})
+}
+
+// Importing a CSV is a one-off: it never hands anything to the sync, whether
+// or not a list is linked.
+func TestCSVImportNeverAdopts(t *testing.T) {
+	w := newWorld(t)
+	standardTMDb(w.tmdb)
+	w.imported(matrix, 603, "The Matrix", "")
+	w.imported(inceptn, 27205, "Inception", models.SourceCSV)
+	writes := w.store.Writes
+
+	res := w.run(ModeCSV, true, matrix, inceptn)
+
+	if res.Adopted != 0 || len(res.Plan.Adopt) != 0 || res.Existing != 2 || w.store.Writes != writes {
+		t.Errorf("adopted = %d (planned %d), existing = %d, writes = %d; want 0, 0, 2, 0",
+			res.Adopted, len(res.Plan.Adopt), res.Existing, w.store.Writes-writes)
+	}
+	w.expect(map[string]string{matrix: "/planned", inceptn: "csv/planned"})
+}
+
+// The plan says "adopt" and then the user edits the item, before the write.
+// The write itself must refuse, or the sync would own an item the user has
+// just made theirs and could later remove it.
+func TestAdoptionLosesToAConcurrentUserEdit(t *testing.T) {
+	edits := map[string]func(*models.WatchlistItem){
+		"status changed to watching": func(it *models.WatchlistItem) { it.Status = models.WatchlistStatusWatching },
+		"status changed to finished": func(it *models.WatchlistItem) { it.Status = models.WatchlistStatusFinished },
+		"tagged":                     func(it *models.WatchlistItem) { it.Tags = []string{"with friends"} },
+	}
+	for _, mode := range []Mode{ModeLink, ModeSync} {
+		for name, edit := range edits {
+			t.Run(mode.String()+": "+name, func(t *testing.T) {
+				w := newWorld(t)
+				standardTMDb(w.tmdb)
+				target := w.imported(inceptn, 27205, "Inception", models.SourceCSV).ID
+				w.store.beforeAdopt = func() { w.store.EditItem(target, edit) }
+
+				res := w.run(mode, true, inceptn)
+
+				if len(res.Plan.Adopt) != 1 {
+					t.Fatalf("plan adopts %d items, want the test to reach the write", len(res.Plan.Adopt))
+				}
+				if got := w.item(inceptn); res.Adopted != 0 || got.Source != models.SourceCSV {
+					t.Fatalf("adopted = %d, source = %q; the user's edit must win", res.Adopted, got.Source)
+				}
+
+				// And it stays theirs for good.
+				w.store.beforeAdopt = nil
+				for day := 1; day <= 3; day++ {
+					w.now = w.now.Add(24 * time.Hour)
+					if res := w.sync(matrix); res.Adopted != 0 || res.MarkedMissing != 0 || res.Removed != 0 {
+						t.Fatalf("day %d: adopted = %d, marked = %d, removed = %d", day, res.Adopted, res.MarkedMissing, res.Removed)
+					}
+				}
+				if got := w.item(inceptn); got.Source != models.SourceCSV {
+					t.Errorf("source = %q after later runs, want it still the user's", got.Source)
+				}
+			})
+		}
+	}
+}
+
+// The user deleted the item between the plan and the write: nothing to adopt,
+// and nothing recreated.
+func TestAdoptionOfAnItemDeletedMeanwhileDoesNothing(t *testing.T) {
+	w := newWorld(t)
+	standardTMDb(w.tmdb)
+	target := w.imported(inceptn, 27205, "Inception", "").ID
+	w.store.beforeAdopt = func() { w.store.RemoveItem(target) }
+
+	res := w.sync(inceptn)
+
+	if res.Adopted != 0 || len(w.store.Items(w.user)) != 0 {
+		t.Errorf("adopted = %d, watchlist = %v; want the deletion to stand", res.Adopted, w.titles())
+	}
+}
+
+// Adoption makes an item removable on the strength of the linked list, so a
+// worker run adopts only while the link it was started for is in force.
+func TestSyncDoesNotAdoptForALinkThatIsNoLongerInForce(t *testing.T) {
+	changes := map[string]func(w *world){
+		"unlinked": func(w *world) {
+			if err := w.store.UnlinkIMDb(context.Background(), w.user); err != nil {
+				w.t.Fatal(err)
+			}
+		},
+		"another list linked":         func(w *world) { w.relink("ur101082417", w.linked) },
+		"the same list linked afresh": func(w *world) { w.relink(worldList, w.now) },
+	}
+	for name, change := range changes {
+		t.Run(name, func(t *testing.T) {
+			w := newWorld(t)
+			standardTMDb(w.tmdb)
+			w.imported(inceptn, 27205, "Inception", models.SourceCSV)
+			w.now = w.now.Add(24 * time.Hour)
+			// The change lands while the run is busy adding a new title.
+			w.store.beforeCreate = func() { change(w) }
+
+			res := w.sync(inceptn, thrones)
+
+			if !res.LinkChanged || res.Adopted != 0 || res.Added != 1 {
+				t.Errorf("link changed = %v, adopted = %d, added = %d; want true, 0, 1", res.LinkChanged, res.Adopted, res.Added)
+			}
+			w.expect(map[string]string{inceptn: "csv/planned", thrones: syncedAs})
+		})
+	}
+}
+
+func TestSyncDoesNotAdoptWhenTheLinkCannotBeRead(t *testing.T) {
+	w := newWorld(t)
+	standardTMDb(w.tmdb)
+	w.imported(inceptn, 27205, "Inception", "")
+	w.store.Fail["GetIMDbLink"] = errors.New("mongo: connection reset")
+
+	res, err := w.rec.Run(context.Background(), Request{SourceID: worldList, LinkedAt: w.linked, UserID: w.user, Mode: ModeSync, IDs: []string{inceptn}, Complete: true})
+
+	if err == nil {
+		t.Fatal("no error although the link could not be read")
+	}
+	if res.Adopted != 0 || w.item(inceptn).Source != "" {
+		t.Errorf("adopted = %d, source = %q; want nothing adopted on a guess", res.Adopted, w.item(inceptn).Source)
+	}
+}
+
+// In one run, items on the list are adopted and items off it are struck: the
+// two never meet on one item, and a just-adopted item is not struck by the
+// same run's later writes.
+func TestAdoptionAndStrikesInOneRunFallOnDifferentItems(t *testing.T) {
+	w := newWorld(t)
+	standardTMDb(w.tmdb)
+	w.sync(matrix)                                   // The Matrix is the sync's
+	w.imported(inceptn, 27205, "Inception", "")      // imported, on the list below
+	w.imported(thrones, 1399, "Game of Thrones", "") // imported, not on it
+
+	w.now = w.now.Add(24 * time.Hour)
+	res := w.sync(inceptn)
+
+	if res.Adopted != 1 || res.MarkedMissing != 1 || res.Removed != 0 {
+		t.Errorf("adopted = %d, marked = %d, removed = %d; want 1, 1, 0", res.Adopted, res.MarkedMissing, res.Removed)
+	}
+	w.expect(map[string]string{matrix: syncedAs + "/missing", inceptn: syncedAs, thrones: "/planned"})
 }
 
 // --- lookups ---
@@ -1170,20 +1532,21 @@ func TestDryRunWritesNothing(t *testing.T) {
 	w.now = w.now.Add(24 * time.Hour)
 	w.sync(matrix)
 	w.now = w.now.Add(24 * time.Hour)
+	w.imported(obscure, 77, "An Old Import", models.SourceCSV)
 	writes := w.store.Writes
 	before := w.titles()
 
 	res, err := w.rec.Run(context.Background(), Request{
 		SourceID: worldList,
 		LinkedAt: w.linked,
-		UserID:   w.user, Mode: ModeSync, IDs: []string{matrix, thrones}, Complete: true, DryRun: true,
+		UserID:   w.user, Mode: ModeSync, IDs: []string{matrix, thrones, obscure}, Complete: true, DryRun: true,
 	})
 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.Added != 1 || res.Removed != 1 || res.Existing != 1 {
-		t.Errorf("added = %d, removed = %d, existing = %d; want the plan's 1, 1, 1", res.Added, res.Removed, res.Existing)
+	if res.Added != 1 || res.Removed != 1 || res.Existing != 2 || res.Adopted != 1 {
+		t.Errorf("added = %d, removed = %d, existing = %d, adopted = %d; want the plan's 1, 1, 2, 1", res.Added, res.Removed, res.Existing, res.Adopted)
 	}
 	if w.store.Writes != writes || !reflect.DeepEqual(w.titles(), before) {
 		t.Errorf("a dry run wrote: %d writes, watchlist %v", w.store.Writes-writes, w.titles())

@@ -332,6 +332,30 @@ func TestImportLeavesSyncedItemsAlone(t *testing.T) {
 	}
 }
 
+// An import never hands items to the sync either: what an earlier import
+// left stays the user's, also when a list is linked and the file names it.
+func TestImportNeverAdopts(t *testing.T) {
+	h := newSyncHarness(t)
+	h.lists.put(testList, ttID(1))
+	h.link(testList, http.StatusOK)
+	for i, source := range []string{"", models.SourceCSV} {
+		h.store.AddItem(&models.WatchlistItem{
+			UserID: h.user.ID, Title: fmt.Sprintf("Imported %d", i), Type: models.WatchlistTypeMovie, TMDbID: 60 + i, IMDbID: ttID(60 + i),
+			Status: models.WatchlistStatusPlanned, Source: source, AddedAt: base, UpdatedAt: base,
+		})
+	}
+
+	body := h.json(h.upload(csvOf(ttID(60), ttID(61))), http.StatusOK)
+
+	if body["imported"] != 0.0 || body["duplicates"] != 2.0 {
+		t.Errorf("response = %v", body)
+	}
+	items := h.items()
+	if a, b := items[ttID(60)], items[ttID(61)]; a.Source != "" || b.Source != models.SourceCSV {
+		t.Errorf("sources after the import = %q, %q; want them unchanged", a.Source, b.Source)
+	}
+}
+
 func TestParseIMDbCSVCapsTheNumberOfTitles(t *testing.T) {
 	var b strings.Builder
 	b.WriteString("Const\n")

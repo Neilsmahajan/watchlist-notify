@@ -30,15 +30,17 @@ const MinMissingAge = 12 * time.Hour
 type Mode int
 
 const (
-	// ModeSync is the daily worker run. It adds, and it is the only mode
-	// that marks items missing and removes them.
+	// ModeSync is the daily worker run. It adds and adopts, and it is the
+	// only mode that marks items missing and removes them.
 	ModeSync Mode = iota
-	// ModeLink is the request that links a list. It adds and never removes,
+	// ModeLink is the request that links a list. It adds, adopts and never
+	// removes,
 	// and every missing mark is cleared before anything else is written, so
 	// that both strikes against an item come from the list that is linked
 	// now.
 	ModeLink
-	// ModeCSV is an uploaded IMDb export. It adds and never removes.
+	// ModeCSV is an uploaded IMDb export. It adds, and never adopts or
+	// removes.
 	ModeCSV
 )
 
@@ -121,9 +123,10 @@ type Addition struct {
 	Target Target
 }
 
-// Fill sets the IMDb ID of an item the user added by hand that turned out to
-// be on the list. Nothing else about the item changes.
-type Fill struct {
+// Adoption hands an item the user imported from IMDb over to the sync: its
+// source becomes "imdb". IMDbID is the ID it was matched by, which the write
+// insists on. Nothing else about the item changes.
+type Adoption struct {
 	ItemID primitive.ObjectID
 	IMDbID string
 }
@@ -166,7 +169,7 @@ type Plan struct {
 	Mode Mode
 	// Add is in list order.
 	Add          []Addition
-	Fill         []Fill
+	Adopt        []Adoption
 	ClearMissing []primitive.ObjectID
 	MarkMissing  []primitive.ObjectID
 	Remove       []Removal
@@ -189,17 +192,31 @@ type Plan struct {
 //
 // Adding. An incoming ID is already on the watchlist when an item has that
 // IMDb ID, or when the ID resolves to a title an item already points at (same
-// type and TMDb ID). Such an item is left exactly as it is, whoever added it;
-// the one exception is that an item without an IMDb ID gets the ID filled
-// in. Every other resolved ID becomes a new item. IDs TMDb does not know are
-// counted as unmatched and IDs that could not be resolved are pending;
-// neither is an error.
+// type and TMDb ID). Such an item is left as it is, whoever added it (but
+// see adopting, below). Every other resolved ID becomes a new item. IDs TMDb
+// does not know are counted as unmatched and IDs that could not be resolved
+// are pending; neither is an error.
+//
+// Adopting happens in ModeLink and ModeSync. Items imported from IMDb before
+// the list was linked have no source or "csv", so the sync would never
+// remove them, and a user who takes a title off their IMDb list would find
+// it still here. An item is therefore adopted (its source becomes "imdb")
+// when the incoming list holds the item's own stored IMDb ID and the user
+// has not touched the item (models.WatchlistItem.Adoptable). From then on it
+// follows the removal rules like an item the sync added. Never adopted: an
+// item matched only by its title (an item added by hand has no IMDb ID, and
+// the sync never writes one onto an existing item, precisely so that it
+// cannot come to look like an imported one); an item the user has given a
+// status or a tag; an item that is not on the list in this run. An item is
+// never adopted and marked in the same plan: it is adopted because it is on
+// the list, and marked only when it is not.
 //
 // Removing happens in ModeSync only, and an item is removed only when all of
 // these hold:
 //
-//  1. The sync added it, and the user has not touched it since: its status
-//     is still "planned" and it has no tags (models.WatchlistItem.SyncOwned).
+//  1. The sync added or adopted it, and the user has not touched it since:
+//     its status is still "planned" and it has no tags
+//     (models.WatchlistItem.SyncOwned).
 //  2. It is absent from a fetch that is Complete, of a list that is not
 //     empty, with no ID left pending.
 //  3. An earlier such fetch of the same link already marked it missing, at
@@ -228,8 +245,8 @@ func BuildPlan(in Input) Plan {
 
 	// onList holds the items the incoming list accounts for.
 	onList := make(map[primitive.ObjectID]bool, len(in.IDs))
-	filled := make(map[primitive.ObjectID]bool)
 	adding := make(map[string]bool)
+	adopts := in.Mode == ModeLink || in.Mode == ModeSync
 
 	for _, id := range in.IDs {
 		if _, seen := plan.Outcomes[id]; seen {
@@ -240,6 +257,11 @@ func BuildPlan(in Input) Plan {
 
 		if item, ok := byIMDbID[id]; ok {
 			onList[item.ID] = true
+			if adopts && item.Adoptable() {
+				// Matched by the IMDb ID stored on the item itself, which
+				// only an import puts there.
+				plan.Adopt = append(plan.Adopt, Adoption{ItemID: item.ID, IMDbID: id})
+			}
 			plan.Outcomes[id] = OutcomeExisting
 			plan.Existing++
 			continue
@@ -249,13 +271,10 @@ func BuildPlan(in Input) Plan {
 		switch {
 		case resolved && byTitle[target.Ref.Key()] != nil:
 			// The user has the title under another IMDb ID or none at all,
-			// which is how items added by hand are stored.
-			item := byTitle[target.Ref.Key()]
-			onList[item.ID] = true
-			if item.IMDbID == "" && !filled[item.ID] {
-				filled[item.ID] = true
-				plan.Fill = append(plan.Fill, Fill{ItemID: item.ID, IMDbID: id})
-			}
+			// which is how items added by hand are stored. It stays exactly
+			// as it is: no IMDb ID is written onto it, or the next run would
+			// take it for an imported item and adopt it.
+			onList[byTitle[target.Ref.Key()].ID] = true
 			plan.Outcomes[id] = OutcomeExisting
 			plan.Existing++
 		case resolved && adding[target.Ref.Key()]:

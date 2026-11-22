@@ -33,7 +33,7 @@ type Store interface {
 	ListWatchlistItems(ctx context.Context, opts models.ListWatchlistOptions) ([]*models.WatchlistItem, error)
 	GetTitlesByIMDbIDs(ctx context.Context, imdbIDs []string) (map[string]*models.Title, error)
 	CreateWatchlistItems(ctx context.Context, items []*models.WatchlistItem) ([]*models.WatchlistItem, error)
-	SetWatchlistItemIMDbID(ctx context.Context, userID, itemID primitive.ObjectID, imdbID string) (bool, error)
+	AdoptWatchlistItem(ctx context.Context, userID, itemID primitive.ObjectID, imdbID string) (bool, error)
 	MarkWatchlistItemIMDbMissing(ctx context.Context, userID, itemID primitive.ObjectID, since time.Time) (bool, error)
 	ClearWatchlistItemIMDbMissing(ctx context.Context, userID, itemID primitive.ObjectID) (bool, error)
 	ClearIMDbMissingMarks(ctx context.Context, userID primitive.ObjectID) (int, error)
@@ -139,16 +139,18 @@ type Result struct {
 	Unmatched int
 	Pending   int
 
-	// Filled counts hand-added items that got their IMDb ID.
-	Filled int
+	// Adopted counts items the user had imported from IMDb that the sync
+	// took over (see Adoption).
+	Adopted int
 	// MarkedMissing, Unmarked and Removed count the sync's three writes on
 	// items that left, came back to, or stayed off the list.
 	MarkedMissing int
 	Unmarked      int
 	Removed       int
 
-	// LinkChanged says the run had marks or removals planned and left them
-	// undone, because the user's link was no longer the one the run was for
+	// LinkChanged says the run had adoptions, marks or removals planned and
+	// left them undone, because the user's link was no longer the one the run
+	// was for
 	// (see Request.SourceID). Additions made before that stay.
 	LinkChanged bool
 
@@ -164,7 +166,7 @@ type Result struct {
 // An error means the reconcile stopped early: before planning when the
 // watchlist or the stored titles could not be read, or part-way through the
 // writes. The Result is valid either way and counts what was actually done.
-// Writes run in the order additions, IMDb ID fills, unmarks, marks, removals,
+// Writes run in the order additions, unmarks, adoptions, marks, removals,
 // and stop at the first failure, so nothing is ever removed after a write
 // went wrong.
 //
@@ -225,7 +227,7 @@ func (r *Reconciler) Run(ctx context.Context, req Request) (Result, error) {
 
 	if req.DryRun {
 		res.Added = len(plan.Add)
-		res.Filled = len(plan.Fill)
+		res.Adopted = len(plan.Adopt)
 		res.Unmarked += len(plan.ClearMissing)
 		res.MarkedMissing = len(plan.MarkMissing)
 		res.Removed = len(plan.Remove)
@@ -343,24 +345,17 @@ func itemType(mediaType string) string {
 //
 // Marks are stamped with at, the time of the run (see Request.At).
 //
-// Additions, ID fills and unmarks are safe whatever the user did meanwhile.
-// Marks and removals are not: they rest on the list the run fetched being
-// the list that is linked. So the link is read again immediately before each
-// of the two, and they are skipped unless it is exactly the link the run
-// started with.
+// Additions and unmarks are safe whatever the user did meanwhile. A worker
+// run's adoptions, marks and removals are not: they rest on the list the run
+// fetched being the list that is linked. So the link is read again
+// immediately before the adoptions and marks, and again before the removals,
+// and they are skipped unless it is exactly the link the run started with.
+// (The link request adopts without that check: it is the request making the
+// link.)
 func (r *Reconciler) apply(ctx context.Context, req Request, plan Plan, at time.Time, res *Result) error {
 	userID := req.UserID
 	if err := r.applyAdditions(ctx, userID, plan, res); err != nil {
 		return err
-	}
-	for _, fill := range plan.Fill {
-		done, err := r.store.SetWatchlistItemIMDbID(ctx, userID, fill.ItemID, fill.IMDbID)
-		if err != nil {
-			return fmt.Errorf("set imdb id: %w", err)
-		}
-		if done {
-			res.Filled++
-		}
 	}
 	for _, itemID := range plan.ClearMissing {
 		done, err := r.store.ClearWatchlistItemIMDbMissing(ctx, userID, itemID)
@@ -371,10 +366,19 @@ func (r *Reconciler) apply(ctx context.Context, req Request, plan Plan, at time.
 			res.Unmarked++
 		}
 	}
-	if len(plan.MarkMissing) > 0 {
+	if req.Mode == ModeSync && len(plan.Adopt)+len(plan.MarkMissing) > 0 {
 		if same, err := r.linkUnchanged(ctx, req); err != nil || !same {
 			res.LinkChanged = err == nil
 			return err
+		}
+	}
+	for _, adoption := range plan.Adopt {
+		done, err := r.store.AdoptWatchlistItem(ctx, userID, adoption.ItemID, adoption.IMDbID)
+		if err != nil {
+			return fmt.Errorf("adopt item: %w", err)
+		}
+		if done {
+			res.Adopted++
 		}
 	}
 	for _, itemID := range plan.MarkMissing {

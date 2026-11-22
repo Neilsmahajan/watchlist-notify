@@ -145,6 +145,7 @@ type imdbSummary struct {
 	skipped       int // another run got there first, or this one was cancelled
 	deferred      int // left for the next run because this one ran out of time
 	added         int
+	adopted       int // imported items the sync took over
 	removed       int
 	markedMissing int
 	unmatched     int
@@ -234,6 +235,7 @@ func (t *IMDbTask) Run(ctx context.Context) error {
 			sum.failed++
 		}
 		sum.added += out.Result.Added
+		sum.adopted += out.Result.Adopted
 		sum.removed += out.Result.Removed
 		sum.markedMissing += out.Result.MarkedMissing
 		sum.unmatched += out.Result.Unmatched
@@ -249,6 +251,7 @@ func (t *IMDbTask) Run(ctx context.Context) error {
 			"total", out.Result.Total,
 			"added", out.Result.Added,
 			"existing", out.Result.Existing,
+			"adopted", out.Result.Adopted,
 			"unmatched", out.Result.Unmatched,
 			"pending", out.Result.Pending,
 			"marked_missing", out.Result.MarkedMissing,
@@ -272,6 +275,7 @@ func (t *IMDbTask) Run(ctx context.Context) error {
 		"skipped", sum.skipped,
 		"deferred", sum.deferred,
 		"added", sum.added,
+		"adopted", sum.adopted,
 		"removed", sum.removed,
 		"marked_missing", sum.markedMissing,
 		"unmatched", sum.unmatched,
@@ -322,7 +326,7 @@ func (t *IMDbTask) syncUser(ctx context.Context, user *models.User, claimedAt ti
 		logger.Warn("imdb: reconcile stopped early", "user_id", user.ID.Hex(), "error", out.Err.Error())
 	}
 	if out.Result.LinkChanged {
-		logger.Info("imdb: link changed during sync; nothing marked or removed", "user_id", user.ID.Hex())
+		logger.Info("imdb: link changed during sync; nothing adopted, marked or removed", "user_id", user.ID.Hex())
 	}
 	if t.DryRun {
 		return out

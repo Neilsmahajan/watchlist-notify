@@ -283,7 +283,7 @@ func TestLinkIMDbAddsTheListAndStoresTheLink(t *testing.T) {
 
 	body := h.link("https://www.imdb.com/user/ur101082417/watchlist/?ref_=nv_usr_wl_all_0", http.StatusOK)
 
-	wantResult := map[string]any{"total": 3.0, "added": 1.0, "existing": 1.0, "unmatched": 1.0, "complete": true}
+	wantResult := map[string]any{"total": 3.0, "added": 1.0, "existing": 1.0, "adopted": 0.0, "unmatched": 1.0, "complete": true}
 	if !reflect.DeepEqual(body["result"], wantResult) {
 		t.Errorf("result = %v, want %v", body["result"], wantResult)
 	}
@@ -312,9 +312,10 @@ func TestLinkIMDbAddsTheListAndStoresTheLink(t *testing.T) {
 	if added == nil || added.Source != models.SourceIMDb || added.Status != models.WatchlistStatusPlanned || added.TMDbID != 603 || added.Title != "Movie 603" {
 		t.Errorf("added item = %+v", added)
 	}
-	// The item the user already had is theirs: untouched but for its IMDb ID.
-	kept := items[ttID(604)]
-	if kept == nil || kept.ID != manual.ID || kept.Source != "" || kept.Status != models.WatchlistStatusFinished || kept.Title != "Already here" {
+	// The item the user already had is theirs: untouched, with no IMDb ID
+	// written onto it.
+	kept := items["Already here"]
+	if kept == nil || kept.ID != manual.ID || kept.Source != "" || kept.IMDbID != "" || kept.Status != models.WatchlistStatusFinished || !kept.UpdatedAt.Equal(base) {
 		t.Errorf("hand-added item = %+v", kept)
 	}
 	if len(items) != 2 {
@@ -641,6 +642,66 @@ func TestLinkIMDbPartlyReadListIsLinkedAsPartial(t *testing.T) {
 	}
 	if len(h.items()) != 3 {
 		t.Errorf("%d items stored, want the 3 that were read", len(h.items()))
+	}
+}
+
+// The user imported their IMDb list by CSV before, and now links it. Their
+// untouched imports that are on the list become the sync's, and the response
+// says how many; everything else they had stays theirs.
+func TestLinkIMDbAdoptsWhatTheUserImportedBefore(t *testing.T) {
+	h := newSyncHarness(t)
+	add := func(title string, tmdbID int, imdbID, source, status string, tags ...string) {
+		h.store.AddItem(&models.WatchlistItem{
+			UserID: h.user.ID, Title: title, Type: models.WatchlistTypeMovie, TMDbID: tmdbID, IMDbID: imdbID,
+			Source: source, Status: status, Tags: tags, AddedAt: base, UpdatedAt: base,
+		})
+	}
+	add("Imported by CSV", 601, ttID(601), models.SourceCSV, models.WatchlistStatusPlanned)
+	add("Imported long ago", 602, ttID(602), "", models.WatchlistStatusPlanned)
+	add("Imported, then watched", 603, ttID(603), models.SourceCSV, models.WatchlistStatusFinished)
+	add("Imported, then tagged", 604, ttID(604), "", models.WatchlistStatusPlanned, "favourite")
+	add("Imported, not on the list", 605, ttID(605), models.SourceCSV, models.WatchlistStatusPlanned)
+	add("Added by hand", 606, "", "", models.WatchlistStatusPlanned)
+	h.lists.put(testWatchlist, ttID(601), ttID(602), ttID(603), ttID(604), ttID(606), ttID(607))
+
+	body := h.link(testWatchlist, http.StatusOK)
+
+	wantResult := map[string]any{"total": 6.0, "added": 1.0, "existing": 5.0, "adopted": 2.0, "unmatched": 0.0, "complete": true}
+	if !reflect.DeepEqual(body["result"], wantResult) {
+		t.Errorf("result = %v, want %v", body["result"], wantResult)
+	}
+	wantSources := map[string]string{
+		ttID(601): models.SourceIMDb, ttID(602): models.SourceIMDb, // adopted
+		ttID(603): models.SourceCSV, ttID(604): "", // the user's: status, tags
+		ttID(605):       models.SourceCSV,  // not on the list
+		"Added by hand": "",                // never an import
+		ttID(607):       models.SourceIMDb, // new
+	}
+	items := h.items()
+	for key, want := range wantSources {
+		item := items[key]
+		if item == nil {
+			t.Fatalf("no item %q in %v", key, items)
+		}
+		if item.Source != want {
+			t.Errorf("%s: source = %q, want %q", key, item.Source, want)
+		}
+		if key != ttID(607) && !item.UpdatedAt.Equal(base) {
+			t.Errorf("%s: updated_at moved; adoption is not a user's edit", key)
+		}
+	}
+	if len(items) != len(wantSources) {
+		t.Errorf("watchlist has %d items, want %d", len(items), len(wantSources))
+	}
+	if got := items["Added by hand"]; got.IMDbID != "" {
+		t.Errorf("the hand-added item got an IMDb ID: %+v", got)
+	}
+
+	// Linking the same list again finds nothing left to adopt.
+	h.rewind(time.Hour)
+	again := h.link(testWatchlist, http.StatusOK)["result"].(map[string]any)
+	if again["adopted"] != 0.0 || again["added"] != 0.0 || again["existing"] != 6.0 {
+		t.Errorf("second link = %v; want nothing adopted or added", again)
 	}
 }
 

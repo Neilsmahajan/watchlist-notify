@@ -47,7 +47,7 @@ type Service interface {
 
 	// Bookkeeping of the IMDb sync on single items (watchlist_sync_repo.go).
 	// Every one is a conditional write scoped to the user.
-	SetWatchlistItemIMDbID(ctx context.Context, userID, itemID primitive.ObjectID, imdbID string) (bool, error)
+	AdoptWatchlistItem(ctx context.Context, userID, itemID primitive.ObjectID, imdbID string) (bool, error)
 	MarkWatchlistItemIMDbMissing(ctx context.Context, userID, itemID primitive.ObjectID, since time.Time) (bool, error)
 	ClearWatchlistItemIMDbMissing(ctx context.Context, userID, itemID primitive.ObjectID) (bool, error)
 	ClearIMDbMissingMarks(ctx context.Context, userID primitive.ObjectID) (int, error)
