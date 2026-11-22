@@ -97,6 +97,14 @@ type hookedStore struct {
 	beforeMark   func()
 	beforeDelete func()
 	createErr    error
+	clearAllErr  error
+}
+
+func (h *hookedStore) ClearIMDbMissingMarks(ctx context.Context, userID primitive.ObjectID) (int, error) {
+	if h.clearAllErr != nil {
+		return 0, h.clearAllErr
+	}
+	return h.Store.ClearIMDbMissingMarks(ctx, userID)
 }
 
 func (h *hookedStore) CreateWatchlistItems(ctx context.Context, items []*models.WatchlistItem) ([]*models.WatchlistItem, error) {
@@ -129,8 +137,10 @@ type world struct {
 	store *hookedStore
 	tmdb  *fakeTMDb
 	now   time.Time
-	user  primitive.ObjectID
-	rec   *Reconciler
+	// linked is when the user's list was linked: the start of the world.
+	linked time.Time
+	user   primitive.ObjectID
+	rec    *Reconciler
 }
 
 func newWorld(t *testing.T) *world {
@@ -140,6 +150,7 @@ func newWorld(t *testing.T) *world {
 		tmdb:  newFakeTMDb(),
 		now:   time.Date(2026, 3, 10, 6, 0, 0, 0, time.UTC),
 	}
+	w.linked = w.now
 	w.user = w.store.AddUser(&models.User{Email: "viewer@example.com"}).ID
 	w.rec = New(w.store, w.tmdb, WithClock(func() time.Time { return w.now }))
 	return w
@@ -147,7 +158,7 @@ func newWorld(t *testing.T) *world {
 
 func (w *world) run(mode Mode, complete bool, ids ...string) Result {
 	w.t.Helper()
-	res, err := w.rec.Run(context.Background(), Request{UserID: w.user, Mode: mode, IDs: ids, Complete: complete})
+	res, err := w.rec.Run(context.Background(), Request{LinkedAt: w.linked, UserID: w.user, Mode: mode, IDs: ids, Complete: complete})
 	if err != nil {
 		w.t.Fatalf("Run: %v", err)
 	}
@@ -355,7 +366,7 @@ func TestRunTreatsADuplicateKeyOnInsertAsExisting(t *testing.T) {
 		})
 	}
 
-	res, err := w.rec.Run(context.Background(), Request{UserID: w.user, Mode: ModeSync, Complete: true, IDs: []string{matrix, inceptn}})
+	res, err := w.rec.Run(context.Background(), Request{LinkedAt: w.linked, UserID: w.user, Mode: ModeSync, Complete: true, IDs: []string{matrix, inceptn}})
 
 	if err != nil {
 		t.Fatalf("a duplicate key failed the run: %v", err)
@@ -738,7 +749,8 @@ func TestRunAppliesWhatFitInTheLookupBudget(t *testing.T) {
 	}
 
 	res, err := w.rec.Run(context.Background(), Request{
-		UserID: w.user, Mode: ModeLink, IDs: ids, Complete: true, LookupBudget: 75 * time.Millisecond,
+		LinkedAt: w.linked,
+		UserID:   w.user, Mode: ModeLink, IDs: ids, Complete: true, LookupBudget: 75 * time.Millisecond,
 	})
 
 	if err != nil {
@@ -783,9 +795,143 @@ func TestRunWithoutTMDbUsesStoredTitlesOnly(t *testing.T) {
 		t.Error("CanResolve is true without a TMDb client")
 	}
 
-	res, err := rec.Run(context.Background(), Request{UserID: w.user, Mode: ModeLink, IDs: []string{matrix, inceptn}, Complete: true})
+	res, err := rec.Run(context.Background(), Request{LinkedAt: w.linked, UserID: w.user, Mode: ModeLink, IDs: []string{matrix, inceptn}, Complete: true})
 	if err != nil || res.Added != 1 || res.Pending != 1 {
 		t.Errorf("added = %d, pending = %d, err = %v", res.Added, res.Pending, err)
+	}
+}
+
+// --- strikes belong to one link ---
+
+// Linking clears every mark before it does anything else, so a link whose
+// own writes then fail still leaves no strike from the list linked before.
+func TestLinkClearsEveryMarkBeforeAnythingElse(t *testing.T) {
+	w := newWorld(t)
+	standardTMDb(w.tmdb)
+	w.sync(matrix, inceptn)
+	w.now = w.now.Add(24 * time.Hour)
+	w.sync(matrix) // strike one for Inception
+	w.now = w.now.Add(24 * time.Hour)
+	w.store.createErr = errors.New("mongo: write concern timeout")
+
+	// Linking another list, whose one new title cannot be written.
+	res, err := w.rec.Run(context.Background(), Request{UserID: w.user, Mode: ModeLink, IDs: []string{thrones}, Complete: true, LinkedAt: w.now})
+
+	if err == nil {
+		t.Fatal("no error although the insert failed")
+	}
+	if res.Unmarked != 1 {
+		t.Errorf("unmarked = %d, want the one strike cleared", res.Unmarked)
+	}
+	w.expect(map[string]string{matrix: syncedAs, inceptn: syncedAs})
+}
+
+// If the marks cannot be cleared, linking does nothing at all and says so,
+// so that the caller does not store the link.
+func TestLinkStopsWhenTheMarksCannotBeCleared(t *testing.T) {
+	w := newWorld(t)
+	standardTMDb(w.tmdb)
+	w.sync(matrix, inceptn)
+	w.now = w.now.Add(24 * time.Hour)
+	w.sync(matrix)
+	writes := w.store.Writes
+	w.tmdb.calls = nil
+	w.store.clearAllErr = errors.New("mongo: connection reset")
+
+	res, err := w.rec.Run(context.Background(), Request{UserID: w.user, Mode: ModeLink, IDs: []string{thrones}, Complete: true, LinkedAt: w.now})
+
+	if !errors.Is(err, ErrMarksNotCleared) {
+		t.Fatalf("err = %v, want ErrMarksNotCleared", err)
+	}
+	if res.Outcomes != nil || w.store.Writes != writes || len(w.tmdb.lookups()) != 0 {
+		t.Errorf("outcomes = %v, writes = %d (was %d), lookups = %d; want nothing attempted", res.Outcomes, w.store.Writes, writes, len(w.tmdb.lookups()))
+	}
+	w.expect(map[string]string{matrix: syncedAs, inceptn: syncedAs + "/missing"})
+
+	out := w.rec.SyncList(context.Background(), SyncRequest{UserID: w.user, SourceID: "ls042518938", Mode: ModeLink, List: completeList(thrones)})
+	if !errors.Is(out.Err, ErrMarksNotCleared) {
+		t.Errorf("SyncList err = %v, want ErrMarksNotCleared passed on", out.Err)
+	}
+}
+
+// A strike left over from the list linked before, which is what a link whose
+// clearing went wrong would leave behind, is never the first of the two. The
+// item is unmarked and then has to be missing from two fetches of the list
+// that is linked now.
+func TestSyncNeverActsOnAStrikeFromBeforeTheLink(t *testing.T) {
+	w := newWorld(t)
+	standardTMDb(w.tmdb)
+	w.sync(matrix, inceptn)
+	w.now = w.now.Add(24 * time.Hour)
+	w.sync(matrix) // strike one, under the first link
+	w.expect(map[string]string{matrix: syncedAs, inceptn: syncedAs + "/missing"})
+
+	// Another list is linked an hour later, and the strike survives it.
+	w.linked = w.now.Add(time.Hour)
+
+	w.now = w.now.Add(24 * time.Hour)
+	res := w.sync(matrix)
+	if res.Removed != 0 || res.Unmarked != 1 || res.MarkedMissing != 0 {
+		t.Errorf("removed = %d, unmarked = %d, marked = %d; want the old strike cleared and nothing else", res.Removed, res.Unmarked, res.MarkedMissing)
+	}
+	w.expect(map[string]string{matrix: syncedAs, inceptn: syncedAs})
+
+	w.now = w.now.Add(24 * time.Hour)
+	if res := w.sync(matrix); res.MarkedMissing != 1 || res.Removed != 0 {
+		t.Errorf("marked = %d, removed = %d; want strike one under the new link", res.MarkedMissing, res.Removed)
+	}
+	w.now = w.now.Add(24 * time.Hour)
+	if res := w.sync(matrix); res.Removed != 1 {
+		t.Errorf("removed = %d, want strike two under the new link to remove", res.Removed)
+	}
+	w.expect(map[string]string{matrix: syncedAs})
+}
+
+// A worker run that does not say which link it is for removes nothing.
+func TestSyncWithoutALinkTimeNeverMarksOrRemoves(t *testing.T) {
+	w := newWorld(t)
+	standardTMDb(w.tmdb)
+	w.sync(matrix, inceptn)
+	w.now = w.now.Add(24 * time.Hour)
+	w.sync(matrix)
+	w.now = w.now.Add(24 * time.Hour)
+
+	res, err := w.rec.Run(context.Background(), Request{UserID: w.user, Mode: ModeSync, IDs: []string{matrix}, Complete: true})
+
+	if err != nil || res.Removed != 0 || res.MarkedMissing != 0 || res.Plan.Prune != PruneSkippedNoLink {
+		t.Errorf("removed = %d, marked = %d, prune = %q, err = %v", res.Removed, res.MarkedMissing, res.Plan.Prune, err)
+	}
+	w.expect(map[string]string{matrix: syncedAs, inceptn: syncedAs + "/missing"})
+}
+
+// A mark carries the time the run claimed its fetch, not the time of the
+// write, so that a link made while the run was under way is newer than it.
+func TestMarksCarryTheTimeOfTheRun(t *testing.T) {
+	w := newWorld(t)
+	standardTMDb(w.tmdb)
+	w.sync(matrix, inceptn)
+	w.now = w.now.Add(24 * time.Hour)
+	claimed := w.now.Add(-90 * time.Second)
+
+	res, err := w.rec.Run(context.Background(), Request{
+		UserID: w.user, Mode: ModeSync, IDs: []string{matrix}, Complete: true, LinkedAt: w.linked, At: claimed,
+	})
+
+	if err != nil || res.MarkedMissing != 1 {
+		t.Fatalf("marked = %d, err = %v", res.MarkedMissing, err)
+	}
+	if got := w.item(inceptn).IMDbMissingSince; got == nil || !got.Equal(claimed) {
+		t.Errorf("missing since %v, want the run's time %v", got, claimed)
+	}
+
+	// SyncList hands the claim on, and stamps a new link with it.
+	other := newWorld(t)
+	standardTMDb(other.tmdb)
+	out := other.rec.SyncList(context.Background(), SyncRequest{
+		UserID: other.user, SourceID: "ls042518938", Mode: ModeLink, List: completeList(matrix), At: claimed,
+	})
+	if !out.State.LinkedAt.Equal(claimed) || out.State.LastAttemptAt == nil || !out.State.LastAttemptAt.Equal(claimed) {
+		t.Errorf("linked at %v, last attempt %v; want the claim %v", out.State.LinkedAt, out.State.LastAttemptAt, claimed)
 	}
 }
 
@@ -796,7 +942,7 @@ func TestRunStopsBeforeWritingWhenTheWatchlistCannotBeRead(t *testing.T) {
 	standardTMDb(w.tmdb)
 	w.store.Err = errors.New("mongo: connection reset")
 
-	_, err := w.rec.Run(context.Background(), Request{UserID: w.user, Mode: ModeSync, IDs: []string{matrix}, Complete: true})
+	_, err := w.rec.Run(context.Background(), Request{LinkedAt: w.linked, UserID: w.user, Mode: ModeSync, IDs: []string{matrix}, Complete: true})
 
 	if err == nil {
 		t.Fatal("no error although the watchlist could not be read")
@@ -816,7 +962,7 @@ func TestRunRemovesNothingAfterAFailedWrite(t *testing.T) {
 	w.now = w.now.Add(24 * time.Hour)
 	w.store.createErr = errors.New("mongo: write concern timeout")
 
-	res, err := w.rec.Run(context.Background(), Request{UserID: w.user, Mode: ModeSync, IDs: []string{matrix, thrones}, Complete: true})
+	res, err := w.rec.Run(context.Background(), Request{LinkedAt: w.linked, UserID: w.user, Mode: ModeSync, IDs: []string{matrix, thrones}, Complete: true})
 
 	if err == nil {
 		t.Fatal("no error although the insert failed")
@@ -841,7 +987,8 @@ func TestDryRunWritesNothing(t *testing.T) {
 	before := w.titles()
 
 	res, err := w.rec.Run(context.Background(), Request{
-		UserID: w.user, Mode: ModeSync, IDs: []string{matrix, thrones}, Complete: true, DryRun: true,
+		LinkedAt: w.linked,
+		UserID:   w.user, Mode: ModeSync, IDs: []string{matrix, thrones}, Complete: true, DryRun: true,
 	})
 
 	if err != nil {

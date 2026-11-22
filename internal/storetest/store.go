@@ -35,6 +35,9 @@ type Store struct {
 
 	// Err, when set, is returned by every method. It simulates an outage.
 	Err error
+	// Fail holds an error per method name, for a single write going wrong
+	// while the rest of the database works.
+	Fail map[string]error
 	// Queries counts calls per method name.
 	Queries map[string]int
 	// Writes counts calls that changed something.
@@ -56,6 +59,7 @@ func New() *Store {
 		events:     make(map[string]models.AvailabilityEvent),
 		deliveries: make(map[deliveryKey]models.DigestDelivery),
 		Queries:    make(map[string]int),
+		Fail:       make(map[string]error),
 	}
 }
 
@@ -63,7 +67,10 @@ func New() *Store {
 func (s *Store) begin(method string) (unlock func(), err error) {
 	s.mu.Lock()
 	s.Queries[method]++
-	return s.mu.Unlock, s.Err
+	if s.Err != nil {
+		return s.mu.Unlock, s.Err
+	}
+	return s.mu.Unlock, s.Fail[method]
 }
 
 func ms(t time.Time) time.Time { return t.UTC().Truncate(time.Millisecond) }
@@ -551,6 +558,23 @@ func (s *Store) ClearWatchlistItemIMDbMissing(_ context.Context, userID, itemID 
 	item.IMDbMissingSince = nil
 	s.Writes++
 	return true, nil
+}
+
+func (s *Store) ClearIMDbMissingMarks(_ context.Context, userID primitive.ObjectID) (int, error) {
+	unlock, err := s.begin("ClearIMDbMissingMarks")
+	defer unlock()
+	if err != nil {
+		return 0, err
+	}
+	cleared := 0
+	for _, item := range s.items {
+		if item.UserID == userID && item.IMDbMissingSince != nil {
+			item.IMDbMissingSince = nil
+			cleared++
+			s.Writes++
+		}
+	}
+	return cleared, nil
 }
 
 // DeleteSyncedWatchlistItem applies the same conditions as the real delete

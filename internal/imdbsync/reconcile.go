@@ -2,6 +2,7 @@ package imdbsync
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -21,6 +22,12 @@ const (
 	DefaultLookupTimeout = 8 * time.Second
 )
 
+// ErrMarksNotCleared is returned by Run in ModeLink when the user's missing
+// marks could not be cleared. Nothing else was written, and the caller must
+// not store the link: strikes made for the list linked before would still be
+// in place.
+var ErrMarksNotCleared = errors.New("missing marks could not be cleared")
+
 // Store is the persistence a reconcile needs. database.Service satisfies it.
 type Store interface {
 	ListWatchlistItems(ctx context.Context, opts models.ListWatchlistOptions) ([]*models.WatchlistItem, error)
@@ -29,6 +36,7 @@ type Store interface {
 	SetWatchlistItemIMDbID(ctx context.Context, userID, itemID primitive.ObjectID, imdbID string) (bool, error)
 	MarkWatchlistItemIMDbMissing(ctx context.Context, userID, itemID primitive.ObjectID, since time.Time) (bool, error)
 	ClearWatchlistItemIMDbMissing(ctx context.Context, userID, itemID primitive.ObjectID) (bool, error)
+	ClearIMDbMissingMarks(ctx context.Context, userID primitive.ObjectID) (int, error)
 	DeleteSyncedWatchlistItem(ctx context.Context, userID, itemID primitive.ObjectID, missingSince, updatedAt time.Time) (bool, error)
 }
 
@@ -93,6 +101,15 @@ type Request struct {
 	IDs []string
 	// Complete says IDs is the whole of the linked list (see Input.Complete).
 	Complete bool
+	// LinkedAt is when the list being synced was linked (see Input.LinkedAt).
+	// ModeSync does not mark or remove without it.
+	LinkedAt time.Time
+	// At is the time of the run; zero means now. A run that fetched a list
+	// passes the moment it claimed that fetch, which is before it read
+	// anything. Marks are stamped with it, so a mark is never newer than the
+	// evidence it rests on, and a link made while the run was under way is
+	// always newer than the run's marks (see Input.LinkedAt).
+	At time.Time
 	// LookupBudget, when positive, bounds the time spent asking TMDb. IDs
 	// not resolved in time stay pending; what was resolved is still applied.
 	LookupBudget time.Duration
@@ -139,20 +156,42 @@ type Result struct {
 // Writes run in the order additions, IMDb ID fills, unmarks, marks, removals,
 // and stop at the first failure, so nothing is ever removed after a write
 // went wrong.
+//
+// In ModeLink every missing mark of the user is cleared before anything is
+// read or written. If that fails the error is ErrMarksNotCleared and nothing
+// else has happened.
 func (r *Reconciler) Run(ctx context.Context, req Request) (Result, error) {
+	at := req.At
+	if at.IsZero() {
+		at = r.now()
+	}
+	at = at.UTC()
+
+	unmarked := 0
+	if req.Mode == ModeLink && !req.DryRun {
+		// First, and on its own: a link must never be stored on top of
+		// strikes that were made for the list linked before it.
+		n, err := r.store.ClearIMDbMissingMarks(ctx, req.UserID)
+		if err != nil {
+			return Result{}, fmt.Errorf("%w: %v", ErrMarksNotCleared, err)
+		}
+		unmarked = n
+	}
+
 	existing, err := r.store.ListWatchlistItems(ctx, models.ListWatchlistOptions{UserID: req.UserID})
 	if err != nil {
-		return Result{}, fmt.Errorf("list watchlist: %w", err)
+		return Result{Unmarked: unmarked}, fmt.Errorf("list watchlist: %w", err)
 	}
 
 	resolved, unmatched, lookups, err := r.resolve(ctx, unknownIDs(existing, req.IDs), req.LookupBudget)
 	if err != nil {
-		return Result{Lookups: lookups}, err
+		return Result{Lookups: lookups, Unmarked: unmarked}, err
 	}
 
 	plan := BuildPlan(Input{
 		Mode:      req.Mode,
-		Now:       r.now().UTC(),
+		Now:       at,
+		LinkedAt:  req.LinkedAt,
 		Existing:  existing,
 		IDs:       req.IDs,
 		Complete:  req.Complete,
@@ -167,6 +206,7 @@ func (r *Reconciler) Run(ctx context.Context, req Request) (Result, error) {
 		Unmatched: plan.Unmatched,
 		Pending:   plan.Pending,
 		Lookups:   lookups,
+		Unmarked:  unmarked,
 	}
 	for id, outcome := range plan.Outcomes {
 		res.Outcomes[id] = outcome
@@ -175,12 +215,12 @@ func (r *Reconciler) Run(ctx context.Context, req Request) (Result, error) {
 	if req.DryRun {
 		res.Added = len(plan.Add)
 		res.Filled = len(plan.Fill)
-		res.Unmarked = len(plan.ClearMissing)
+		res.Unmarked += len(plan.ClearMissing)
 		res.MarkedMissing = len(plan.MarkMissing)
 		res.Removed = len(plan.Remove)
 		return res, nil
 	}
-	err = r.apply(ctx, req.UserID, plan, &res)
+	err = r.apply(ctx, req.UserID, plan, at, &res)
 	return res, err
 }
 
@@ -289,7 +329,9 @@ func itemType(mediaType string) string {
 // apply performs the plan's writes and records what happened in res. Every
 // write is conditional in the store, so a write that no longer applies
 // (the user changed or deleted the item a moment ago) is skipped, not forced.
-func (r *Reconciler) apply(ctx context.Context, userID primitive.ObjectID, plan Plan, res *Result) error {
+//
+// Marks are stamped with at, the time of the run (see Request.At).
+func (r *Reconciler) apply(ctx context.Context, userID primitive.ObjectID, plan Plan, at time.Time, res *Result) error {
 	if err := r.applyAdditions(ctx, userID, plan, res); err != nil {
 		return err
 	}
@@ -311,9 +353,8 @@ func (r *Reconciler) apply(ctx context.Context, userID primitive.ObjectID, plan 
 			res.Unmarked++
 		}
 	}
-	now := r.now().UTC()
 	for _, itemID := range plan.MarkMissing {
-		done, err := r.store.MarkWatchlistItemIMDbMissing(ctx, userID, itemID, now)
+		done, err := r.store.MarkWatchlistItemIMDbMissing(ctx, userID, itemID, at)
 		if err != nil {
 			return fmt.Errorf("mark missing: %w", err)
 		}

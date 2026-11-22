@@ -34,8 +34,9 @@ const (
 	// that marks items missing and removes them.
 	ModeSync Mode = iota
 	// ModeLink is the request that links a list. It adds and never removes,
-	// and it clears every missing mark so that both strikes against an item
-	// come from the list that is linked now.
+	// and every missing mark is cleared before anything else is written, so
+	// that both strikes against an item come from the list that is linked
+	// now.
 	ModeLink
 	// ModeCSV is an uploaded IMDb export. It adds and never removes.
 	ModeCSV
@@ -91,7 +92,14 @@ const (
 // Input is everything BuildPlan decides from.
 type Input struct {
 	Mode Mode
-	Now  time.Time
+	// Now is the time of the run. A removal needs a mark at least
+	// MinMissingAge older than it.
+	Now time.Time
+	// LinkedAt is when the list being synced was linked. It names the
+	// generation of the link: a mark made before it is a strike on the
+	// evidence of whatever was linked earlier, and counts for nothing.
+	// ModeSync does not mark or remove without it.
+	LinkedAt time.Time
 	// Existing is every watchlist item the user has.
 	Existing []*models.WatchlistItem
 	// IDs are the incoming IMDb title IDs in list order. Repeats are allowed
@@ -140,6 +148,9 @@ const (
 	PruneConsidered PruneDecision = "considered"
 	// PruneSkippedMode means this mode never removes (link, CSV).
 	PruneSkippedMode PruneDecision = "mode"
+	// PruneSkippedNoLink means the run did not say which link it is for
+	// (Input.LinkedAt), so a strike could not be tied to one.
+	PruneSkippedNoLink PruneDecision = "no_link"
 	// PruneSkippedIncomplete means the fetch did not cover the whole list.
 	PruneSkippedIncomplete PruneDecision = "incomplete"
 	// PruneSkippedEmpty means the list had no titles. An empty list is far
@@ -191,11 +202,16 @@ type Plan struct {
 //     is still "planned" and it has no tags (models.WatchlistItem.SyncOwned).
 //  2. It is absent from a fetch that is Complete, of a list that is not
 //     empty, with no ID left pending.
-//  3. An earlier such fetch already marked it missing, at least
-//     MinMissingAge ago.
+//  3. An earlier such fetch of the same link already marked it missing, at
+//     least MinMissingAge ago. "The same link" means the mark is not older
+//     than LinkedAt.
 //
 // The first fetch an item is missing from only marks it. Seeing it on the
-// list again, in any fetch, clears the mark.
+// list again, in any fetch, clears the mark. A mark older than LinkedAt is
+// stale: it was made for a list linked before this one. It is never grounds
+// for removal; the plan clears it, and a later run may mark the item afresh.
+// That makes the two strikes belong to one link by construction, whatever
+// went wrong when the link changed.
 func BuildPlan(in Input) Plan {
 	plan := Plan{Mode: in.Mode, Outcomes: make(map[string]Outcome, len(in.IDs))}
 
@@ -267,8 +283,9 @@ func BuildPlan(in Input) Plan {
 
 	for _, item := range in.Existing {
 		marked := item.IMDbMissingSince != nil
+		stale := marked && item.IMDbMissingSince.Before(in.LinkedAt)
 		switch {
-		case marked && (in.Mode == ModeLink || onList[item.ID] || !item.SyncOwned()):
+		case marked && (in.Mode == ModeLink || stale || onList[item.ID] || !item.SyncOwned()):
 			// Back on the list, or the user has made the item theirs, or the
 			// link itself changed: the mark no longer means anything.
 			plan.ClearMissing = append(plan.ClearMissing, item.ID)
@@ -289,6 +306,8 @@ func pruneDecision(in Input, plan Plan) PruneDecision {
 	switch {
 	case in.Mode != ModeSync:
 		return PruneSkippedMode
+	case in.LinkedAt.IsZero():
+		return PruneSkippedNoLink
 	case !in.Complete:
 		return PruneSkippedIncomplete
 	case plan.Total == 0:

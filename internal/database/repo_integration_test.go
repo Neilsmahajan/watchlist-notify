@@ -854,6 +854,64 @@ func TestIMDbSyncItemWrites(t *testing.T) {
 	}
 }
 
+// Unlinking and re-linking wipe every strike of one user in a single update,
+// and of nobody else.
+func TestClearIMDbMissingMarks(t *testing.T) {
+	srv := New()
+	ctx := context.Background()
+	user, other := primitive.NewObjectID(), primitive.NewObjectID()
+	strike := time.Now().UTC().Add(-24 * time.Hour).Truncate(time.Millisecond)
+
+	seed := func(owner primitive.ObjectID, base int) []*models.WatchlistItem {
+		t.Helper()
+		created, err := srv.CreateWatchlistItems(ctx, []*models.WatchlistItem{
+			{UserID: owner, Title: "Marked", Type: models.WatchlistTypeMovie, TMDbID: base, IMDbID: fmt.Sprintf("tt%07d", base), Source: models.SourceIMDb},
+			{UserID: owner, Title: "Marked Too", Type: models.WatchlistTypeMovie, TMDbID: base + 1, IMDbID: fmt.Sprintf("tt%07d", base+1), Source: models.SourceIMDb},
+			{UserID: owner, Title: "Unmarked", Type: models.WatchlistTypeMovie, TMDbID: base + 2, IMDbID: fmt.Sprintf("tt%07d", base+2), Source: models.SourceIMDb},
+		})
+		if err != nil || len(created) != 3 {
+			t.Fatalf("seed: created = %d, err = %v", len(created), err)
+		}
+		for _, item := range created[:2] {
+			if ok, err := srv.MarkWatchlistItemIMDbMissing(ctx, owner, item.ID, strike); err != nil || !ok {
+				t.Fatalf("mark: applied = %v, err = %v", ok, err)
+			}
+		}
+		return created
+	}
+	mine, theirs := seed(user, 900500), seed(other, 900510)
+	updatedAt := mustFindItem(t, srv, user, mine[0].ID).UpdatedAt
+
+	n, err := srv.ClearIMDbMissingMarks(ctx, user)
+	if err != nil || n != 2 {
+		t.Fatalf("cleared = %d, err = %v; want the user's two marks", n, err)
+	}
+	for _, item := range mine {
+		got := mustFindItem(t, srv, user, item.ID)
+		if got == nil || got.IMDbMissingSince != nil {
+			t.Errorf("%s after the clear = %+v; want it present and unmarked", item.Title, got)
+		}
+	}
+	if got := mustFindItem(t, srv, user, mine[0].ID).UpdatedAt; !got.Equal(updatedAt) {
+		t.Errorf("clearing moved updated_at from %v to %v", updatedAt, got)
+	}
+	for _, item := range theirs[:2] {
+		got := mustFindItem(t, srv, other, item.ID)
+		if got == nil || got.IMDbMissingSince == nil || !got.IMDbMissingSince.Equal(strike) {
+			t.Errorf("another user's %s = %+v; want its mark left alone", item.Title, got)
+		}
+	}
+
+	// A removal planned on a strike that has since been wiped does not happen.
+	ok, err := srv.DeleteSyncedWatchlistItem(ctx, user, mine[0].ID, strike, updatedAt)
+	if err != nil || ok {
+		t.Errorf("delete after the clear: applied = %v, err = %v; want refused", ok, err)
+	}
+	if n, err := srv.ClearIMDbMissingMarks(ctx, user); err != nil || n != 0 {
+		t.Errorf("second clear = %d, err = %v; want nothing left to clear", n, err)
+	}
+}
+
 func TestGetTitlesByIMDbIDs(t *testing.T) {
 	srv := New()
 	ctx := context.Background()

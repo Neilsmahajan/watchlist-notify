@@ -49,6 +49,7 @@ type Service interface {
 	SetWatchlistItemIMDbID(ctx context.Context, userID, itemID primitive.ObjectID, imdbID string) (bool, error)
 	MarkWatchlistItemIMDbMissing(ctx context.Context, userID, itemID primitive.ObjectID, since time.Time) (bool, error)
 	ClearWatchlistItemIMDbMissing(ctx context.Context, userID, itemID primitive.ObjectID) (bool, error)
+	ClearIMDbMissingMarks(ctx context.Context, userID primitive.ObjectID) (int, error)
 	DeleteSyncedWatchlistItem(ctx context.Context, userID, itemID primitive.ObjectID, missingSince, updatedAt time.Time) (bool, error)
 
 	GetTitles(ctx context.Context, keys []string, regions []string) (map[string]*models.Title, error)

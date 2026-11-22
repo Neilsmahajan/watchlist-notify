@@ -12,6 +12,13 @@ import (
 
 var planNow = time.Date(2026, 3, 10, 6, 0, 0, 0, time.UTC)
 
+// planLinked is when the list of a worker-sync case was linked, unless the
+// case says otherwise: long before any mark the cases use.
+var planLinked = planNow.Add(-30 * 24 * time.Hour)
+
+// noLink stands for "no LinkedAt at all" in a table case.
+var noLink = time.Unix(1, 0)
+
 // Test items are named by a single letter; their ObjectIDs are derived from
 // it so that expectations can name items too.
 func itemID(name string) primitive.ObjectID {
@@ -400,6 +407,73 @@ func TestBuildPlan(t *testing.T) {
 			want: want{mark: []string{"a"}, remove: []string{"b"}, prune: PruneConsidered, counts: [4]int{1, 0, 1, 0}},
 		},
 
+		// --- strikes belong to one link ---
+		{
+			name: "a strike from before this link is cleared, not acted on",
+			in: Input{
+				Mode: ModeSync, Now: planNow, LinkedAt: planNow.Add(-day), IDs: []string{ttA}, Complete: true,
+				Existing: []*models.WatchlistItem{synced("a", ttA, 1), synced("b", ttB, 2, missingFor(3*day))},
+			},
+			// Not removed although it is absent from a complete fetch and the
+			// mark is old enough, and not marked again in the same run.
+			want: want{clear: []string{"b"}, prune: PruneConsidered, counts: [4]int{1, 1, 0, 0}},
+		},
+		{
+			name: "a strike made after the link counts as before",
+			in: Input{
+				Mode: ModeSync, Now: planNow, LinkedAt: planNow.Add(-3 * day), IDs: []string{ttA}, Complete: true,
+				Existing: []*models.WatchlistItem{synced("a", ttA, 1), synced("b", ttB, 2, missingFor(day))},
+			},
+			want: want{remove: []string{"b"}, prune: PruneConsidered, counts: [4]int{1, 1, 0, 0}},
+		},
+		{
+			name: "the link's own moment is the boundary",
+			in: Input{
+				Mode: ModeSync, Now: planNow, LinkedAt: planNow.Add(-day), IDs: []string{ttA}, Complete: true,
+				Existing: []*models.WatchlistItem{
+					synced("a", ttA, 1),
+					synced("b", ttB, 2, missingFor(day+time.Millisecond)),
+					synced("c", ttC, 3, missingFor(day)),
+				},
+			},
+			want: want{clear: []string{"b"}, remove: []string{"c"}, prune: PruneConsidered, counts: [4]int{1, 1, 0, 0}},
+		},
+		{
+			name: "a stale strike is cleared even when the fetch proves nothing",
+			in: Input{
+				Mode: ModeSync, Now: planNow, LinkedAt: planNow.Add(-day), IDs: []string{ttA}, Complete: false,
+				Existing: []*models.WatchlistItem{
+					synced("a", ttA, 1),
+					synced("b", ttB, 2, missingFor(3*day)),
+					synced("c", ttC, 3, missingFor(time.Hour)),
+				},
+			},
+			want: want{clear: []string{"b"}, prune: PruneSkippedIncomplete, counts: [4]int{1, 1, 0, 0}},
+		},
+		{
+			name: "a stale strike on an item the user took over is cleared once",
+			in: Input{
+				Mode: ModeSync, Now: planNow, LinkedAt: planNow.Add(-day), IDs: []string{ttA}, Complete: true,
+				Existing: []*models.WatchlistItem{
+					synced("a", ttA, 1, missingFor(3*day)),
+					synced("b", ttB, 2, missingFor(3*day), status(models.WatchlistStatusWatching)),
+				},
+			},
+			want: want{clear: []string{"a", "b"}, prune: PruneConsidered, counts: [4]int{1, 1, 0, 0}},
+		},
+		{
+			name: "a worker sync that does not say which link it is for never marks or removes",
+			in: Input{
+				Mode: ModeSync, Now: planNow, LinkedAt: noLink, IDs: []string{ttA, ttC}, Complete: true, Resolved: abc,
+				Existing: []*models.WatchlistItem{
+					synced("a", ttA, 1, missingFor(day)),
+					synced("b", ttB, 2),
+					synced("d", "tt0000004", 4, missingFor(9*day)),
+				},
+			},
+			want: want{add: []string{ttC}, clear: []string{"a"}, prune: PruneSkippedNoLink, counts: [4]int{2, 1, 0, 0}},
+		},
+
 		// --- modes that never remove ---
 		{
 			name: "linking never marks or removes, and resets every mark",
@@ -432,6 +506,12 @@ func TestBuildPlan(t *testing.T) {
 			if tt.in.Now.IsZero() {
 				tt.in.Now = planNow
 			}
+			switch {
+			case tt.in.LinkedAt.Equal(noLink):
+				tt.in.LinkedAt = time.Time{}
+			case tt.in.LinkedAt.IsZero() && tt.in.Mode == ModeSync:
+				tt.in.LinkedAt = planLinked
+			}
 			checkPlan(t, BuildPlan(tt.in), tt.want)
 		})
 	}
@@ -444,7 +524,7 @@ func TestBuildPlanRemovalsCarryWhatThePlanSaw(t *testing.T) {
 	gone := synced("b", ttB, 2, missingFor(3*day))
 	gone.UpdatedAt = planNow.Add(-40 * day)
 	plan := BuildPlan(Input{
-		Mode: ModeSync, Now: planNow, IDs: []string{ttA}, Complete: true,
+		Mode: ModeSync, Now: planNow, LinkedAt: planLinked, IDs: []string{ttA}, Complete: true,
 		Existing: []*models.WatchlistItem{synced("a", ttA, 1), gone},
 	})
 	want := []Removal{{ItemID: gone.ID, MissingSince: planNow.Add(-3 * day), UpdatedAt: planNow.Add(-40 * day)}}
@@ -460,7 +540,7 @@ func TestBuildPlanDoesNotChangeItsInput(t *testing.T) {
 		before[i] = *it
 	}
 	ids := []string{ttA, ttC, ttC}
-	BuildPlan(Input{Mode: ModeSync, Now: planNow, IDs: ids, Complete: true, Existing: existing, Resolved: abc})
+	BuildPlan(Input{Mode: ModeSync, Now: planNow, LinkedAt: planLinked, IDs: ids, Complete: true, Existing: existing, Resolved: abc})
 	for i, it := range existing {
 		if !reflect.DeepEqual(*it, before[i]) {
 			t.Errorf("item %d changed: %+v", i, *it)

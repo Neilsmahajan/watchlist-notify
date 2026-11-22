@@ -34,6 +34,13 @@ type SyncRequest struct {
 	// List and FetchErr are exactly what imdb.Client.FetchList returned.
 	List     imdb.List
 	FetchErr error
+	// At is when this run claimed its fetch of the list (the time given to
+	// ClaimIMDbAttempt); zero means now. It becomes last_attempt_at, the
+	// linked_at of a new link and the time on any mark the run makes. Claims
+	// of one user's list are at least a minute apart, so a link made while a
+	// worker run is under way is always newer than that run's marks, and
+	// those marks are stale for it (see Input.LinkedAt).
+	At time.Time
 	// LookupBudget and DryRun are passed on to the reconcile.
 	LookupBudget time.Duration
 	DryRun       bool
@@ -64,7 +71,11 @@ type SyncResult struct {
 func (r *Reconciler) SyncList(ctx context.Context, req SyncRequest) SyncResult {
 	// Milliseconds, like the database stores, so the state handed back is
 	// exactly the state that will be read later.
-	at := r.now().UTC().Truncate(time.Millisecond)
+	at := req.At
+	if at.IsZero() {
+		at = r.now()
+	}
+	at = at.UTC().Truncate(time.Millisecond)
 	state := models.IMDbSync{SourceID: req.SourceID, LinkedAt: at}
 	if req.Previous != nil && req.Previous.SourceID == req.SourceID {
 		// Same list as before: keep when it was linked, when it last synced
@@ -91,6 +102,8 @@ func (r *Reconciler) SyncList(ctx context.Context, req SyncRequest) SyncResult {
 		Mode:         req.Mode,
 		IDs:          ids,
 		Complete:     complete,
+		LinkedAt:     state.LinkedAt,
+		At:           at,
 		LookupBudget: req.LookupBudget,
 		DryRun:       req.DryRun,
 	})

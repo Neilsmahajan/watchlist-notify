@@ -630,6 +630,65 @@ func TestLinkIMDbNeverRemoves(t *testing.T) {
 	}
 }
 
+// markedLeftover is an item the sync added and a fetch of the list linked
+// before found missing three days ago.
+func (h *syncHarness) markedLeftover() {
+	longAgo := time.Now().Add(-72 * time.Hour)
+	h.store.AddItem(&models.WatchlistItem{
+		UserID: h.user.ID, Title: "Gone from IMDb", Type: models.WatchlistTypeMovie, TMDbID: 50, IMDbID: ttID(50),
+		Status: models.WatchlistStatusPlanned, Source: models.SourceIMDb, IMDbMissingSince: &longAgo, AddedAt: base, UpdatedAt: base,
+	})
+}
+
+// The strikes of the list linked before go first. A re-link whose own writes
+// then fail is still stored (the daily sync finishes it), but it must not
+// sit on top of those strikes.
+func TestRelinkIMDbClearsOldStrikesAlthoughItsWritesFail(t *testing.T) {
+	h := newSyncHarness(t)
+	h.lists.put(testWatchlist, ttID(1))
+	h.lists.put(testList, ttID(2))
+	h.link(testWatchlist, http.StatusOK)
+	h.markedLeftover()
+	h.rewind(time.Hour)
+	h.store.Fail["CreateWatchlistItems"] = errors.New("mongo: write concern timeout")
+
+	body := h.link(testList, http.StatusOK)
+
+	if sync := body["imdb_sync"].(map[string]any); sync["source_id"] != testList || sync["last_status"] != models.IMDbStatusPartial {
+		t.Errorf("imdb_sync = %v; want the new list linked as partial", sync)
+	}
+	if item := h.items()[ttID(50)]; item == nil || item.IMDbMissingSince != nil {
+		t.Errorf("leftover item = %+v; want it kept and its strike from the old list cleared", item)
+	}
+}
+
+// If the strikes cannot be cleared the link is not stored: the old one
+// stays, nothing is added, and the user tries again.
+func TestRelinkIMDbIsNotStoredWhenOldStrikesCannotBeCleared(t *testing.T) {
+	h := newSyncHarness(t)
+	h.lists.put(testWatchlist, ttID(1))
+	h.lists.put(testList, ttID(2))
+	h.link(testWatchlist, http.StatusOK)
+	h.markedLeftover()
+	h.rewind(time.Hour)
+	before := h.store.User(h.user.ID).IMDbSync
+	h.store.Fail["ClearIMDbMissingMarks"] = errors.New("mongo: connection reset")
+
+	h.link(testList, http.StatusInternalServerError)
+
+	after := h.store.User(h.user.ID).IMDbSync
+	if after == nil || !reflect.DeepEqual(*after, *before) {
+		t.Errorf("link = %+v, want the old one untouched: %+v", after, before)
+	}
+	items := h.items()
+	if len(items) != 2 || items[ttID(2)] != nil {
+		t.Errorf("watchlist = %v; want nothing added", items)
+	}
+	if item := items[ttID(50)]; item == nil || item.IMDbMissingSince == nil {
+		t.Errorf("leftover item = %+v; want it as it was", item)
+	}
+}
+
 func TestLinkIMDbAgainToTheSameListKeepsLinkedAt(t *testing.T) {
 	h := newSyncHarness(t)
 	h.lists.put(testList, ttID(1))

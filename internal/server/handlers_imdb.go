@@ -151,14 +151,17 @@ func (s *Server) linkIMDbHandler(c *gin.Context) {
 		Previous:     user.IMDbSync,
 		SourceID:     sourceID,
 		Mode:         imdbsync.ModeLink, // adds only; removing is the worker's job
+		At:           start,             // the claim; see SyncRequest.At
 		List:         list,
 		FetchErr:     fetchErr,
 		LookupBudget: lookupBudget,
 	})
 	if out.Err != nil {
 		log.Printf("imdb link: reconcile stopped early: %v", out.Err)
-		if out.Result.Outcomes == nil {
-			// Nothing was read or written; do not link on the strength of it.
+		if errors.Is(out.Err, imdbsync.ErrMarksNotCleared) || out.Result.Outcomes == nil {
+			// Either the strikes made for the list linked before are still
+			// in place, or nothing was read or written. Do not link on the
+			// strength of that; the link that was there stays as it was.
 			jsonError(c, http.StatusInternalServerError, "failed to link IMDb list")
 			return
 		}

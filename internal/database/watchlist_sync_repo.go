@@ -86,6 +86,23 @@ func (s *service) ClearWatchlistItemIMDbMissing(ctx context.Context, userID, ite
 	return res.MatchedCount == 1, nil
 }
 
+// ClearIMDbMissingMarks removes the mark from every item of the user, in one
+// update, and reports how many carried one. A mark is a strike against an
+// item on the evidence of the list that was linked when it was made; when
+// the link changes or goes away, every strike goes with it. Clearing a mark
+// is always safe: the worst it does is make a removal wait one more day.
+func (s *service) ClearIMDbMissingMarks(ctx context.Context, userID primitive.ObjectID) (int, error) {
+	coll := s.db.Database(databaseName).Collection(collWatchlist)
+	res, err := coll.UpdateMany(ctx, bson.M{
+		"user_id":            userID,
+		"imdb_missing_since": bson.M{"$ne": nil},
+	}, bson.M{"$unset": bson.M{"imdb_missing_since": ""}})
+	if err != nil {
+		return 0, err
+	}
+	return int(res.ModifiedCount), nil
+}
+
 // DeleteSyncedWatchlistItem deletes an item on behalf of the IMDb sync, and
 // only if, at the moment of the delete, the item still is what the sync is
 // allowed to remove: added by the sync, status still "planned", no tags,
