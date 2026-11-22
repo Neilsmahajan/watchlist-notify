@@ -211,6 +211,27 @@ func TestImportDatabaseStallBeforeAnythingIsReadImportsNothing(t *testing.T) {
 	}
 }
 
+// The deadline covers the request's very first read too, the one that loads
+// the user.
+func TestImportDatabaseStallOnTheFirstReadAnswersInTime(t *testing.T) {
+	h := newSyncHarness(t)
+	h.store.Stall["GetUserByEmail"] = true
+	h.server.reconcileDeadline = 300 * time.Millisecond
+	started := time.Now()
+
+	rec := h.upload(csvOf(ttIDs(3000, 3)...))
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, body = %s; want 500", rec.Code, rec.Body)
+	}
+	if took := time.Since(started); took > 2*time.Second {
+		t.Errorf("the request took %v with a deadline of 300 ms", took)
+	}
+	if got := len(h.items()); got != 0 {
+		t.Errorf("%d rows stored by an import that could not load its user", got)
+	}
+}
+
 // The response keeps the shape the frontend reads: imported, duplicates and
 // errors[{row, reason}], with rows numbered from the header.
 func TestImportResponseShape(t *testing.T) {

@@ -110,7 +110,19 @@ type IMDbLinkResult struct {
 // @Router /api/me/imdb [put]
 func (s *Server) linkIMDbHandler(c *gin.Context) {
 	start := time.Now()
-	user, ok := s.getUser(c)
+	// One deadline for everything up to the end of the reconcile, database
+	// time included, from the very first read. A database that stops
+	// answering then ends in the same way as a TMDb that is too slow: what
+	// was written stays, the rest is counted as not done yet, and the
+	// request still answers in time.
+	deadline := imdbLinkDeadline
+	if s.reconcileDeadline > 0 {
+		deadline = s.reconcileDeadline
+	}
+	ctx, cancel := context.WithDeadline(c.Request.Context(), start.Add(deadline))
+	defer cancel()
+
+	user, ok := s.getUserWithin(ctx, c)
 	if !ok {
 		return
 	}
@@ -129,17 +141,6 @@ func (s *Server) linkIMDbHandler(c *gin.Context) {
 		jsonError(c, http.StatusServiceUnavailable, "IMDb sync is unavailable")
 		return
 	}
-
-	// One deadline for everything up to the end of the reconcile, database
-	// time included. A database that stops answering then ends in the same
-	// way as a TMDb that is too slow: what was written stays, the rest is
-	// counted as not done yet, and the request still answers in time.
-	deadline := imdbLinkDeadline
-	if s.reconcileDeadline > 0 {
-		deadline = s.reconcileDeadline
-	}
-	ctx, cancel := context.WithDeadline(c.Request.Context(), start.Add(deadline))
-	defer cancel()
 
 	// Claiming the attempt is atomic, so two requests racing each other
 	// cannot both reach IMDb. It also makes this fetch the user's fetch of

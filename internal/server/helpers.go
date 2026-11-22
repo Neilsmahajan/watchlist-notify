@@ -29,13 +29,20 @@ func jsonError(c *gin.Context, status int, msg string) {
 // getUser fetches the authenticated user from context and DB. It writes the
 // appropriate error and returns (nil, false) on failure.
 func (s *Server) getUser(c *gin.Context) (*models.User, bool) {
+	return s.getUserWithin(c.Request.Context(), c)
+}
+
+// getUserWithin is getUser with the database reads on ctx, for handlers
+// that answer by a deadline: the first read of a request counts against it
+// like every later one.
+func (s *Server) getUserWithin(ctx context.Context, c *gin.Context) (*models.User, bool) {
 	emailVal, ok := c.Get("user_email")
 	if !ok {
 		jsonError(c, http.StatusUnauthorized, "unauthorized")
 		return nil, false
 	}
 	email, _ := emailVal.(string)
-	user, err := s.db.GetUserByEmail(c.Request.Context(), email)
+	user, err := s.db.GetUserByEmail(ctx, email)
 	if err != nil {
 		jsonError(c, http.StatusInternalServerError, "failed to fetch user")
 		return nil, false
@@ -49,12 +56,12 @@ func (s *Server) getUser(c *gin.Context) (*models.User, bool) {
 			Name:    toString(name),
 			Picture: toString(picture),
 		}
-		if err := s.db.UpsertUser(c.Request.Context(), nu); err != nil {
+		if err := s.db.UpsertUser(ctx, nu); err != nil {
 			jsonError(c, http.StatusInternalServerError, "failed to create user")
 			return nil, false
 		}
 		// Re-fetch to return full record including ID, defaults, etc.
-		user, err = s.db.GetUserByEmail(c.Request.Context(), email)
+		user, err = s.db.GetUserByEmail(ctx, email)
 		if err != nil || user == nil {
 			jsonError(c, http.StatusInternalServerError, "failed to load user")
 			return nil, false

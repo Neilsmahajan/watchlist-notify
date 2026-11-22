@@ -644,6 +644,26 @@ func TestLinkIMDbDatabaseStallBeforeAnythingIsReadLinksNothing(t *testing.T) {
 	}
 }
 
+// The deadline covers the request's very first read too, the one that loads
+// the user: a database that hangs there costs the request its deadline, not
+// however long the database takes.
+func TestLinkIMDbDatabaseStallOnTheFirstReadAnswersInTime(t *testing.T) {
+	h := newSyncHarness(t)
+	h.lists.put(testList, ttID(1))
+	h.store.Stall["GetUserByEmail"] = true
+	h.server.reconcileDeadline = 300 * time.Millisecond
+	started := time.Now()
+
+	h.link(testList, http.StatusInternalServerError)
+
+	if took := time.Since(started); took > 2*time.Second {
+		t.Errorf("the request took %v with a deadline of 300 ms", took)
+	}
+	if h.lists.fetches() != 0 || h.store.User(h.user.ID).IMDbAttemptAt != nil || h.store.User(h.user.ID).IMDbSync != nil {
+		t.Error("a request that could not load its user fetched, claimed or linked")
+	}
+}
+
 // IMDb failed after the first page: the titles read are added, nothing else.
 func TestLinkIMDbPartlyReadListIsLinkedAsPartial(t *testing.T) {
 	h := newSyncHarness(t)

@@ -70,7 +70,18 @@ const (
 // @Router /api/watchlist/import [post]
 func (s *Server) importWatchlistHandler(c *gin.Context) {
 	start := time.Now()
-	user, ok := s.getUser(c)
+	// One deadline for the database from the very first read to the end of
+	// the reconcile. Hitting it during the reconcile ends the same way as
+	// TMDb being too slow: the rows that were written are reported as
+	// imported, the others as "upload again".
+	deadline := importReconcileDeadline
+	if s.reconcileDeadline > 0 {
+		deadline = s.reconcileDeadline
+	}
+	ctx, cancel := context.WithDeadline(c.Request.Context(), start.Add(deadline))
+	defer cancel()
+
+	user, ok := s.getUserWithin(ctx, c)
 	if !ok {
 		return
 	}
@@ -112,16 +123,6 @@ func (s *Server) importWatchlistHandler(c *gin.Context) {
 	for i, row := range rows {
 		ids[i] = row.imdbID
 	}
-	// One deadline for the whole reconcile, database time included. Hitting
-	// it ends the same way as TMDb being too slow: the rows that were
-	// written are reported as imported, the others as "upload again".
-	deadline := importReconcileDeadline
-	if s.reconcileDeadline > 0 {
-		deadline = s.reconcileDeadline
-	}
-	ctx, cancel := context.WithDeadline(c.Request.Context(), start.Add(deadline))
-	defer cancel()
-
 	budget := s.resolveBudget
 	if budget <= 0 {
 		budget = max(min(importLookupBudget, deadline-importWriteReserve-time.Since(start)), time.Second)

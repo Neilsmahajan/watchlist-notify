@@ -1603,6 +1603,14 @@ func TestSyncDoesNotPruneForALinkThatIsNoLongerInForce(t *testing.T) {
 }
 
 // The link is read again before the removals too, not only before the marks.
+//
+// This is the second line, behind the lease: in service the API refuses to
+// unlink for a minute from the run's claim, and the run stops marking and
+// removing after 45 seconds, so an unlink cannot land where this test puts
+// one unless the clocks are further apart than ClockMargin. The test shows
+// what happens then. The read catches the removal. It cannot catch the mark
+// whose write had already begun: no read before a write can. That mark is
+// made, and it is harmless, because a link made later is newer than it.
 func TestSyncReadsTheLinkAgainBeforeRemoving(t *testing.T) {
 	w := newWorld(t)
 	standardTMDb(w.tmdb)
@@ -1611,7 +1619,8 @@ func TestSyncReadsTheLinkAgainBeforeRemoving(t *testing.T) {
 	w.sync(matrix, thrones) // strike one for Inception
 	w.now = w.now.Add(24 * time.Hour)
 	// Today Game of Thrones is gone too: one mark and one removal are planned,
-	// and the user unlinks between the two.
+	// and the user unlinks after the link was read for the mark, just as the
+	// mark is written.
 	w.store.beforeMark = func() {
 		if _, err := w.store.UnlinkIMDb(context.Background(), w.user, w.now, 0); err != nil {
 			t.Fatal(err)
@@ -1629,6 +1638,26 @@ func TestSyncReadsTheLinkAgainBeforeRemoving(t *testing.T) {
 	if w.item(inceptn) == nil {
 		t.Error("Inception was removed after the user unlinked")
 	}
+	// The mark was not refused: the unlink came after the read it rests on.
+	if got := w.item(thrones).IMDbMissingSince; res.MarkedMissing != 1 || got == nil || !got.Equal(w.now) {
+		t.Fatalf("marked = %d, Game of Thrones missing since %v; want the one mark made, with the run's time %v",
+			res.MarkedMissing, got, w.now)
+	}
+	w.store.beforeMark = nil
+
+	// The user links the same list again a minute later. The next day both
+	// leftover marks are old enough for a second strike, but they are older
+	// than the link, so its sync clears them and removes nothing.
+	w.linked = w.now.Add(time.Minute)
+	w.relink(worldList, w.linked)
+	w.now = w.now.Add(24 * time.Hour)
+
+	res = w.sync(matrix)
+
+	if res.Removed != 0 || res.Unmarked != 2 || res.MarkedMissing != 0 {
+		t.Errorf("under the new link: removed = %d, unmarked = %d, marked = %d; want 0, 2, 0", res.Removed, res.Unmarked, res.MarkedMissing)
+	}
+	w.expect(map[string]string{matrix: syncedAs, inceptn: syncedAs, thrones: syncedAs})
 }
 
 // If the link cannot be read, nothing is marked or removed on a guess.
