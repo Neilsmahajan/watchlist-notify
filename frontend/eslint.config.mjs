@@ -12,6 +12,12 @@ const compat = new FlatCompat({
 const eslintConfig = [
   ...compat.extends("next/core-web-vitals", "next/typescript"),
   {
+    // Posters and service logos are <img> on purpose: TMDB's CDN already
+    // resizes them, and next/image would send every one through (and bill
+    // for) the image optimizer.
+    rules: { "@next/next/no-img-element": "off" },
+  },
+  {
     ignores: [
       "node_modules/**",
       ".next/**",

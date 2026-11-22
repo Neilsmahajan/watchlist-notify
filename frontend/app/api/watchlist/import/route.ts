@@ -1,16 +1,10 @@
 import { NextResponse } from "next/server";
-import { auth0 } from "@/lib/auth0";
-import { getAccessTokenOrResponse } from "@/lib/auth/api-token";
+import { authed, forward } from "@/lib/api/proxy";
 
-type AppRouteHandler = (
-  req: Request,
-) => void | Response | Promise<void | Response>;
+// A large export is matched against TMDB row by row.
+export const maxDuration = 60;
 
-const authedPost = auth0.withApiAuthRequired(async function handler(
-  req: Request,
-) {
-  const backend = process.env.BACKEND_URL || "http://localhost:8080";
-
+export const POST = authed(async (req) => {
   let incoming: FormData;
   try {
     incoming = await req.formData();
@@ -28,24 +22,9 @@ const authedPost = auth0.withApiAuthRequired(async function handler(
 
   const upload = new FormData();
   upload.set("file", file, file.name || "watchlist.csv");
-
-  const access = await getAccessTokenOrResponse();
-  if (!access.ok) {
-    return access.response;
-  }
-  const { token } = access;
-
-  const response = await fetch(`${backend}/api/watchlist/import`, {
+  return forward("/api/watchlist/import", {
     method: "POST",
-    headers: {
-      Authorization: `Bearer ${token}`,
-      Accept: "application/json",
-    },
     body: upload,
+    timeoutMs: 58_000,
   });
-
-  const data = await response.json().catch(() => ({}));
-  return NextResponse.json(data, { status: response.status });
 });
-
-export const POST = authedPost as unknown as AppRouteHandler;

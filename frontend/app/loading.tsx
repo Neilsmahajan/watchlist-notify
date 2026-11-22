@@ -1,23 +1,19 @@
-import { LoadingSpinner } from "@/components/ui";
+import { PageShell, Skeleton } from "@/components/ui";
 
-export default function RootLoading() {
+// Shown while a page's data is on its way from the API.
+export default function Loading() {
   return (
-    <div className="relative flex min-h-screen items-center justify-center overflow-hidden bg-gradient-to-br from-blue-50 via-white to-indigo-100">
-      <div
-        className="absolute inset-0 bg-[radial-gradient(circle_at_top,_rgba(79,70,229,0.12),_transparent_55%)]"
-        aria-hidden="true"
-      />
-      <div className="relative flex flex-col items-center gap-4 text-center">
-        <LoadingSpinner size="lg" className="text-blue-600" />
-        <div>
-          <p className="text-lg font-semibold text-gray-900">
-            Getting things ready…
-          </p>
-          <p className="text-sm text-gray-500">
-            We are preparing your personalized watchlist experience.
-          </p>
+    <PageShell>
+      <div role="status" aria-label="Loading">
+        <Skeleton className="h-3 w-28" />
+        <Skeleton className="mt-5 h-12 w-full max-w-xl" />
+        <Skeleton className="mt-3 h-12 w-2/3 max-w-md" />
+        <div className="mt-12 grid gap-3 sm:grid-cols-3">
+          <Skeleton className="h-28 rounded-2xl" />
+          <Skeleton className="h-28 rounded-2xl" />
+          <Skeleton className="h-28 rounded-2xl" />
         </div>
       </div>
-    </div>
+    </PageShell>
   );
 }
