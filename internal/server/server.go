@@ -11,7 +11,9 @@ import (
 	"github.com/neilsmahajan/watchlist-notify/internal/availability"
 	"github.com/neilsmahajan/watchlist-notify/internal/cache"
 	"github.com/neilsmahajan/watchlist-notify/internal/database"
+	"github.com/neilsmahajan/watchlist-notify/internal/imdbsync"
 	"github.com/neilsmahajan/watchlist-notify/internal/notifications"
+	"github.com/neilsmahajan/watchlist-notify/internal/providers/imdb"
 	"github.com/neilsmahajan/watchlist-notify/internal/providers/tmdb"
 	"github.com/neilsmahajan/watchlist-notify/internal/watchlist"
 )
@@ -29,6 +31,19 @@ type Server struct {
 	notificationsSender *notifications.Sender
 	// lookupBudget overrides upstreamLookupBudget; tests shorten it.
 	lookupBudget time.Duration
+
+	// imdbLists reads a public IMDb list when a user links one.
+	imdbLists imdbListFetcher
+	// reconciler adds the titles of an IMDb list or CSV export to a
+	// watchlist. Without a TMDb key it cannot resolve IMDb IDs, and linking
+	// and importing are off.
+	reconciler *imdbsync.Reconciler
+	// resolveBudget overrides how long a link or an import may spend asking
+	// TMDb; tests shorten it.
+	resolveBudget time.Duration
+	// reconcileDeadline overrides how long a link or an import may take up
+	// to the end of its reconcile, database time included; tests shorten it.
+	reconcileDeadline time.Duration
 }
 
 const (
@@ -68,6 +83,10 @@ func NewServer() *http.Server {
 	}
 	defaultRegion := database.DefaultRegion()
 	refresher := availability.NewRefresher(fetcher, db, nil)
+	var finder imdbsync.Finder
+	if tmdbClient != nil {
+		finder = tmdbClient
+	}
 
 	NewServer := &Server{
 		port:                port,
@@ -78,6 +97,8 @@ func NewServer() *http.Server {
 		lister:              watchlist.NewLister(db, refresher, defaultRegion),
 		defaultRegion:       defaultRegion,
 		notificationsSender: notificationsSender,
+		imdbLists:           imdb.New(),
+		reconciler:          imdbsync.New(db, finder),
 	}
 
 	// Declare Server config

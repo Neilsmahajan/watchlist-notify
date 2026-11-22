@@ -30,13 +30,31 @@ type Service interface {
 	CompareAndSwapDigestSchedule(ctx context.Context, userID primitive.ObjectID, from, to models.DigestSchedule, requireEnabled bool) (bool, error)
 	DistinctUserRegions(ctx context.Context) ([]string, error)
 
+	// IMDb list link and its fetch throttle (users_imdb_repo.go).
+	ClaimIMDbAttempt(ctx context.Context, userID primitive.ObjectID, now time.Time, minGap time.Duration) (bool, error)
+	LinkIMDb(ctx context.Context, userID primitive.ObjectID, sync models.IMDbSync) error
+	GetIMDbLink(ctx context.Context, userID primitive.ObjectID) (*models.IMDbSync, error)
+	UpdateIMDbSync(ctx context.Context, userID primitive.ObjectID, sync models.IMDbSync) (bool, error)
+	UnlinkIMDb(ctx context.Context, userID primitive.ObjectID, now time.Time, lockout time.Duration) (bool, error)
+	ListIMDbLinkedUsers(ctx context.Context, attemptedBefore time.Time) ([]*models.User, error)
+
 	CreateWatchlistItem(ctx context.Context, item *models.WatchlistItem) error
+	CreateWatchlistItems(ctx context.Context, items []*models.WatchlistItem) ([]*models.WatchlistItem, error)
 	ListWatchlistItems(ctx context.Context, opts models.ListWatchlistOptions) ([]*models.WatchlistItem, error)
 	UpdateWatchlistItem(ctx context.Context, userID, itemID primitive.ObjectID, fields map[string]any) (*models.WatchlistItem, error)
 	DeleteWatchlistItem(ctx context.Context, userID, itemID primitive.ObjectID) error
 	DistinctWatchlistTitles(ctx context.Context) ([]models.TitleRef, error)
 
+	// Bookkeeping of the IMDb sync on single items (watchlist_sync_repo.go).
+	// Every one is a conditional write scoped to the user.
+	AdoptWatchlistItem(ctx context.Context, userID, itemID primitive.ObjectID, imdbID string) (bool, error)
+	MarkWatchlistItemIMDbMissing(ctx context.Context, userID, itemID primitive.ObjectID, since time.Time) (bool, error)
+	ClearWatchlistItemIMDbMissing(ctx context.Context, userID, itemID primitive.ObjectID) (bool, error)
+	ClearIMDbMissingMarks(ctx context.Context, userID primitive.ObjectID) (int, error)
+	DeleteSyncedWatchlistItem(ctx context.Context, userID, itemID primitive.ObjectID, missingSince, updatedAt time.Time) (bool, error)
+
 	GetTitles(ctx context.Context, keys []string, regions []string) (map[string]*models.Title, error)
+	GetTitlesByIMDbIDs(ctx context.Context, imdbIDs []string) (map[string]*models.Title, error)
 	SaveTitleSnapshot(ctx context.Context, ref models.TitleRef, region string, prevVersion *time.Time, snap models.RegionSnapshot, meta *models.TitleMetadata) (bool, error)
 	MarkTitleNotFound(ctx context.Context, ref models.TitleRef, at time.Time) error
 
@@ -63,7 +81,8 @@ var (
 )
 
 var (
-	// ErrDuplicateWatchlistItem returned when unique constraint (user + tmdb id) violated
+	// ErrDuplicateWatchlistItem is returned when a unique index on watchlist
+	// items (user + type + TMDb ID, or user + IMDb ID) is violated.
 	ErrDuplicateWatchlistItem = errors.New("watchlist item already exists for user")
 	// ErrWatchlistItemNotFound when update target doesn't exist or not owned by user
 	ErrWatchlistItemNotFound = errors.New("watchlist item not found")
@@ -120,8 +139,18 @@ func (s *service) Health(ctx context.Context) error {
 	return s.db.Ping(ctx, nil)
 }
 
+// Names of the unique index on a user's TMDb titles. The old one left the
+// media type out, so a movie and a show that happen to share a TMDb ID (IDs
+// are per media type) could not both be on one watchlist.
+const (
+	indexUserTypeTMDb   = "uniq_user_type_tmdb_id"
+	legacyIndexUserTMDb = "uniq_user_tmdb_id"
+)
+
 // ensureIndexes creates the indexes the queries rely on. Index creation is
-// idempotent and additive: existing indexes are left as they are.
+// idempotent and additive, with one exception: the unique index on a user's
+// TMDb titles is replaced by one that includes the media type (see
+// replaceLegacyTMDbIndex).
 func ensureIndexes(ctx context.Context, db *mongo.Database) error {
 	users := db.Collection(collUsers)
 	// Unique email
@@ -151,9 +180,12 @@ func ensureIndexes(ctx context.Context, db *mongo.Database) error {
 			Options: options.Index().SetName("user_addedat_idx"),
 		},
 		{
-			// New canonical unique index using flat field tmdb_id as stored in WatchlistItem
-			Keys:    bson.D{{Key: "user_id", Value: 1}, {Key: "tmdb_id", Value: 1}},
-			Options: options.Index().SetUnique(true).SetPartialFilterExpression(bson.D{{Key: "tmdb_id", Value: bson.D{{Key: "$exists", Value: true}}}}).SetName("uniq_user_tmdb_id"),
+			// One item per user and TMDb title. A title is a media type plus
+			// an ID: movie 1399 and show 1399 are different titles.
+			Keys: bson.D{{Key: "user_id", Value: 1}, {Key: "type", Value: 1}, {Key: "tmdb_id", Value: 1}},
+			Options: options.Index().SetUnique(true).
+				SetPartialFilterExpression(bson.D{{Key: "tmdb_id", Value: bson.D{{Key: "$exists", Value: true}}}}).
+				SetName(indexUserTypeTMDb),
 		},
 		{
 			Keys: bson.D{{Key: "user_id", Value: 1}, {Key: "imdb_id", Value: 1}},
@@ -165,9 +197,20 @@ func ensureIndexes(ctx context.Context, db *mongo.Database) error {
 	if err != nil {
 		return err
 	}
+	replaceLegacyTMDbIndex(ctx, watchlist)
 
-	// Availability events. `titles` needs no index beyond _id, which is the
-	// deterministic title key; the same goes for event de-duplication, which
+	// Titles are read by _id, the deterministic title key, everywhere except
+	// one place: the IMDb sync and the CSV import resolve IMDb IDs against
+	// titles that are already stored before asking TMDb.
+	_, err = db.Collection(collTitles).Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys:    bson.D{{Key: "imdb_id", Value: 1}},
+		Options: options.Index().SetSparse(true).SetName("imdb_id_idx"),
+	})
+	if err != nil {
+		return err
+	}
+
+	// Availability events. Event de-duplication needs no index of its own: it
 	// rides on the deterministic event _id.
 	events := db.Collection(collEvents)
 	_, err = events.Indexes().CreateMany(ctx, []mongo.IndexModel{
@@ -202,3 +245,32 @@ func ensureIndexes(ctx context.Context, db *mongo.Database) error {
 	})
 	return err
 }
+
+// replaceLegacyTMDbIndex drops the unique index on (user_id, tmdb_id) once
+// its replacement on (user_id, type, tmdb_id) exists. The caller creates the
+// replacement first and calls this only when that succeeded, so there is
+// never a moment without a uniqueness guarantee. The replacement always
+// builds: any data the old, stricter index accepted satisfies the new one.
+//
+// A failed drop is logged and startup continues. Until it is dropped the old
+// index only keeps rejecting what it always rejected, and the next start
+// tries again. An older build that starts later (a rollback) creates the old
+// index again; see the rollback note in the IMDb sync pull request.
+func replaceLegacyTMDbIndex(ctx context.Context, watchlist *mongo.Collection) {
+	_, err := watchlist.Indexes().DropOne(ctx, legacyIndexUserTMDb)
+	if err == nil {
+		log.Printf("database: dropped index %s, replaced by %s", legacyIndexUserTMDb, indexUserTypeTMDb)
+		return
+	}
+	var cmdErr mongo.CommandError
+	if errors.As(err, &cmdErr) && (cmdErr.Code == codeIndexNotFound || cmdErr.Code == codeNamespaceNotFound) {
+		return // already gone
+	}
+	log.Printf("database: could not drop index %s (will retry on next start): %v", legacyIndexUserTMDb, err)
+}
+
+// MongoDB server error codes.
+const (
+	codeNamespaceNotFound = 26
+	codeIndexNotFound     = 27
+)

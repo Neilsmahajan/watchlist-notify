@@ -20,14 +20,16 @@ func TestParseTasks(t *testing.T) {
 		want    []string
 		wantErr bool
 	}{
-		{"", []string{TaskRefresh, TaskDigest}, false},
-		{" , ", []string{TaskRefresh, TaskDigest}, false},
+		{"", []string{TaskRefresh, TaskIMDb, TaskDigest}, false},
+		{" , ", []string{TaskRefresh, TaskIMDb, TaskDigest}, false},
 		{"refresh", []string{TaskRefresh}, false},
 		{"digest", []string{TaskDigest}, false},
 		{"refresh,digest", []string{TaskRefresh, TaskDigest}, false},
 		{"digest, refresh", []string{TaskRefresh, TaskDigest}, false}, // always run order
 		{"Digest,DIGEST", []string{TaskDigest}, false},
 		{"refresh,imdb,digest", []string{TaskRefresh, TaskIMDb, TaskDigest}, false},
+		{"digest,imdb", []string{TaskIMDb, TaskDigest}, false},
+		{"imdb", []string{TaskIMDb}, false},
 		{"refresh,emails", nil, true},
 	}
 	for _, tt := range tests {
@@ -82,7 +84,7 @@ func TestRunRejectsUnavailableTasksBeforeRunningAny(t *testing.T) {
 			return taskFunc(func(context.Context) error { ran = true; return nil }), nil
 		},
 	}
-	// imdb is a known name without an implementation yet.
+	// imdb is a known name this set of factories cannot build.
 	err := Run(context.Background(), nil, []string{TaskRefresh, TaskIMDb}, factories)
 	if err == nil || !strings.Contains(err.Error(), "imdb") {
 		t.Errorf("Run error = %v, want it to name the missing task", err)

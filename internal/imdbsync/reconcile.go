@@ -1,0 +1,597 @@
+package imdbsync
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/neilsmahajan/watchlist-notify/internal/models"
+	"github.com/neilsmahajan/watchlist-notify/internal/providers/tmdb"
+	"go.mongodb.org/mongo-driver/bson/primitive"
+)
+
+const (
+	// DefaultConcurrency bounds parallel TMDb lookups. TMDb allows roughly 50
+	// requests per second; 8 in flight stays far below that.
+	DefaultConcurrency = 8
+	// DefaultLookupTimeout bounds one TMDb lookup, so a single rate-limited
+	// request cannot spend the whole run on the client's retry schedule.
+	DefaultLookupTimeout = 8 * time.Second
+)
+
+// The lease and the lockout. Together they are what keeps a worker run from
+// changing whose an item is, or removing one, on behalf of a link the user
+// has since changed.
+//
+// A run that fetches a user's list first claims the fetch: one atomic update
+// that stamps imdb_attempt_at with the run's time (Request.At). From that
+// moment the run holds a lease of OwnershipLease on the user's items: only
+// while it lasts may it adopt, mark or remove. And for LinkLockout from that
+// same moment the API refuses to link or unlink (429), with the refusal
+// decided inside the write that would change the link. So no change of the
+// link can land while a run still has the right to act on it: the run reads
+// the link after its claim (linkUnchanged), and what it read holds until the
+// lease is over.
+//
+// The lease is measured on the worker's clock and the lockout on the API
+// instance's, against a time the worker wrote. ClockMargin, the difference
+// between the two, is how far those clocks may disagree before the two
+// windows could overlap. Reading the link again before each phase, and
+// stamping marks so that they are stale for any later link, remain as a
+// second line behind it.
+const (
+	// OwnershipLease is how long after its claim a run may adopt, mark and
+	// remove. Adding is not bound by it: an added title was on the list.
+	OwnershipLease = 45 * time.Second
+	// LinkLockout is how long after a claim the API refuses to link or
+	// unlink.
+	LinkLockout = 60 * time.Second
+	// ClockMargin assumes the clocks of the worker and of every API instance
+	// are within 15 seconds of each other.
+	ClockMargin = LinkLockout - OwnershipLease
+	// ownershipWriteTimeout bounds one adopt, mark or remove, and the read
+	// of the link before them. A write is also never given longer than the
+	// rest of the lease, so none is still being sent when the lease is over.
+	ownershipWriteTimeout = 3 * time.Second
+)
+
+// ErrMarksNotCleared is returned by Run in ModeLink when the user's missing
+// marks could not be cleared. Nothing else was written, and the caller must
+// not store the link: strikes made for the list linked before would still be
+// in place.
+var ErrMarksNotCleared = errors.New("missing marks could not be cleared")
+
+// Store is the persistence a reconcile needs. database.Service satisfies it.
+type Store interface {
+	ListWatchlistItems(ctx context.Context, opts models.ListWatchlistOptions) ([]*models.WatchlistItem, error)
+	GetTitlesByIMDbIDs(ctx context.Context, imdbIDs []string) (map[string]*models.Title, error)
+	CreateWatchlistItems(ctx context.Context, items []*models.WatchlistItem) ([]*models.WatchlistItem, error)
+	AdoptWatchlistItem(ctx context.Context, userID, itemID primitive.ObjectID, imdbID string) (bool, error)
+	MarkWatchlistItemIMDbMissing(ctx context.Context, userID, itemID primitive.ObjectID, since time.Time) (bool, error)
+	ClearWatchlistItemIMDbMissing(ctx context.Context, userID, itemID primitive.ObjectID) (bool, error)
+	ClearIMDbMissingMarks(ctx context.Context, userID primitive.ObjectID) (int, error)
+	GetIMDbLink(ctx context.Context, userID primitive.ObjectID) (*models.IMDbSync, error)
+	DeleteSyncedWatchlistItem(ctx context.Context, userID, itemID primitive.ObjectID, missingSince, updatedAt time.Time) (bool, error)
+}
+
+// Finder is the part of the TMDb client that maps an IMDb ID to a title.
+type Finder interface {
+	FindByExternalID(ctx context.Context, externalID, source string) (*tmdb.Result, error)
+}
+
+// Reconciler gathers what BuildPlan needs and applies the plan.
+type Reconciler struct {
+	store         Store
+	finder        Finder
+	now           func() time.Time
+	concurrency   int
+	lookupTimeout time.Duration
+	writeTimeout  time.Duration // ownershipWriteTimeout, shorter in tests
+}
+
+// Option configures a Reconciler.
+type Option func(*Reconciler)
+
+// WithClock replaces the source of the current time.
+func WithClock(now func() time.Time) Option {
+	return func(r *Reconciler) { r.now = now }
+}
+
+// WithLookupTimeout bounds each TMDb lookup.
+func WithLookupTimeout(d time.Duration) Option {
+	return func(r *Reconciler) {
+		if d > 0 {
+			r.lookupTimeout = d
+		}
+	}
+}
+
+// New returns a Reconciler. finder may be nil when no TMDb credentials are
+// configured; CanResolve then reports false and every ID that is not already
+// stored stays pending.
+func New(store Store, finder Finder, opts ...Option) *Reconciler {
+	r := &Reconciler{
+		store:         store,
+		finder:        finder,
+		now:           time.Now,
+		concurrency:   DefaultConcurrency,
+		lookupTimeout: DefaultLookupTimeout,
+		writeTimeout:  ownershipWriteTimeout,
+	}
+	for _, opt := range opts {
+		opt(r)
+	}
+	return r
+}
+
+// CanResolve reports whether IMDb IDs can be looked up on TMDb.
+func (r *Reconciler) CanResolve() bool {
+	return r != nil && r.finder != nil
+}
+
+// Request is one reconcile.
+type Request struct {
+	UserID primitive.ObjectID
+	Mode   Mode
+	// IDs are the incoming IMDb title IDs in list order.
+	IDs []string
+	// Complete says IDs is the whole of the linked list (see Input.Complete).
+	Complete bool
+	// SourceID and LinkedAt name the link this run is for: the list, and
+	// when it was linked (see Input.LinkedAt). ModeSync does not adopt, mark
+	// or remove without them, and reads the user's link again just before
+	// it does: if the user unlinked or linked afresh before the run claimed
+	// its fetch, what the run found says nothing about their watchlist, and
+	// nothing is adopted, marked or removed (Result.LinkChanged).
+	SourceID string
+	LinkedAt time.Time
+	// At is the time of the run; zero means now. A run that fetched a list
+	// passes the moment it claimed that fetch, which is before it read
+	// anything. The run's lease on the user's items starts then (see
+	// OwnershipLease). Marks are stamped with it, so a mark is never newer
+	// than the evidence it rests on, and a link made after the run is always
+	// newer than the run's marks (see Input.LinkedAt).
+	At time.Time
+	// LookupBudget, when positive, bounds the time spent asking TMDb. IDs
+	// not resolved in time stay pending; what was resolved is still applied.
+	LookupBudget time.Duration
+	// DryRun stops after planning: nothing is written.
+	DryRun bool
+}
+
+// Result says what a reconcile did. After a dry run it says what the plan
+// would do, as if every write had succeeded.
+type Result struct {
+	// Plan is the plan as decided, before any write.
+	Plan Plan
+	// Outcomes has one entry per distinct incoming ID, after the writes.
+	Outcomes map[string]Outcome
+
+	// Total is the number of distinct incoming IDs. Added, Existing,
+	// Unmatched and Pending add up to it.
+	Total     int
+	Added     int
+	Existing  int
+	Unmatched int
+	Pending   int
+
+	// Adopted counts items the user had imported from IMDb that the sync
+	// took over (see Adoption).
+	Adopted int
+	// MarkedMissing, Unmarked and Removed count the sync's three writes on
+	// items that left, came back to, or stayed off the list.
+	MarkedMissing int
+	Unmarked      int
+	Removed       int
+
+	// LinkChanged says the run had adoptions, marks or removals planned and
+	// left them undone, because the user's link was no longer the one the run
+	// was for (see Request.SourceID). Additions made before that stay.
+	LinkChanged bool
+	// LeaseExpired says the run had adoptions, marks or removals planned and
+	// left some or all of them undone, because OwnershipLease had passed
+	// since Request.At. What it did before that stays, and so do its
+	// additions; the next run plans the rest again.
+	LeaseExpired bool
+
+	// Lookups counts TMDb requests made.
+	Lookups int
+	// AddedTitles are the titles of the items that were created, for storing
+	// their availability baselines.
+	AddedTitles []models.TitleRef
+}
+
+// Run reconciles a user's watchlist with the incoming IDs.
+//
+// An error means the reconcile stopped early: before planning when the
+// watchlist or the stored titles could not be read, or part-way through the
+// writes. The Result is valid either way and counts what was actually done.
+// Writes run in the order additions, unmarks, adoptions, marks, removals,
+// and stop at the first failure, so nothing is ever removed after a write
+// went wrong. Adoptions, marks and removals also stop, without an error,
+// when the run's lease is over (Result.LeaseExpired).
+//
+// In ModeLink every missing mark of the user is cleared before anything is
+// read or written. If that fails the error is ErrMarksNotCleared and nothing
+// else has happened.
+func (r *Reconciler) Run(ctx context.Context, req Request) (Result, error) {
+	at := req.At
+	if at.IsZero() {
+		at = r.now()
+	}
+	at = at.UTC()
+
+	unmarked := 0
+	if req.Mode == ModeLink && !req.DryRun {
+		// First, and on its own: a link must never be stored on top of
+		// strikes that were made for the list linked before it.
+		n, err := r.store.ClearIMDbMissingMarks(ctx, req.UserID)
+		if err != nil {
+			return Result{}, fmt.Errorf("%w: %v", ErrMarksNotCleared, err)
+		}
+		unmarked = n
+	}
+
+	existing, err := r.store.ListWatchlistItems(ctx, models.ListWatchlistOptions{UserID: req.UserID})
+	if err != nil {
+		return Result{Unmarked: unmarked}, fmt.Errorf("list watchlist: %w", err)
+	}
+
+	resolved, unmatched, lookups, err := r.resolve(ctx, unknownIDs(existing, req.IDs), req.LookupBudget)
+	if err != nil {
+		return Result{Lookups: lookups, Unmarked: unmarked}, err
+	}
+
+	plan := BuildPlan(Input{
+		Mode:      req.Mode,
+		Now:       at,
+		LinkedAt:  req.LinkedAt,
+		Existing:  existing,
+		IDs:       req.IDs,
+		Complete:  req.Complete,
+		Resolved:  resolved,
+		Unmatched: unmatched,
+	})
+	res := Result{
+		Plan:      plan,
+		Outcomes:  make(map[string]Outcome, len(plan.Outcomes)),
+		Total:     plan.Total,
+		Existing:  plan.Existing,
+		Unmatched: plan.Unmatched,
+		Pending:   plan.Pending,
+		Lookups:   lookups,
+		Unmarked:  unmarked,
+	}
+	for id, outcome := range plan.Outcomes {
+		res.Outcomes[id] = outcome
+	}
+
+	if req.DryRun {
+		res.Added = len(plan.Add)
+		res.Adopted = len(plan.Adopt)
+		res.Unmarked += len(plan.ClearMissing)
+		res.MarkedMissing = len(plan.MarkMissing)
+		res.Removed = len(plan.Remove)
+		return res, nil
+	}
+	err = r.apply(ctx, req, plan, at, &res)
+	return res, err
+}
+
+// unknownIDs returns the distinct incoming IDs the user has no item for, in
+// list order. Only these need resolving: an ID the user already has costs no
+// lookup at all.
+func unknownIDs(existing []*models.WatchlistItem, ids []string) []string {
+	known := make(map[string]bool, len(existing)+len(ids))
+	for _, item := range existing {
+		if item.IMDbID != "" {
+			known[item.IMDbID] = true
+		}
+	}
+	var unknown []string
+	for _, id := range ids {
+		if !known[id] {
+			known[id] = true
+			unknown = append(unknown, id)
+		}
+	}
+	return unknown
+}
+
+// resolve maps IMDb IDs to TMDb titles: first from the titles this service
+// already stores, which costs one query, then by asking TMDb about the rest
+// with bounded concurrency. IDs it returns in neither map are pending.
+//
+// A failed or timed-out lookup is not an error; the ID is simply pending.
+func (r *Reconciler) resolve(ctx context.Context, ids []string, budget time.Duration) (resolved map[string]Target, unmatched map[string]bool, lookups int, err error) {
+	resolved = make(map[string]Target, len(ids))
+	unmatched = make(map[string]bool)
+	if len(ids) == 0 {
+		return resolved, unmatched, 0, nil
+	}
+
+	stored, err := r.store.GetTitlesByIMDbIDs(ctx, ids)
+	if err != nil {
+		return nil, nil, 0, fmt.Errorf("load stored titles: %w", err)
+	}
+	var ask []string
+	for _, id := range ids {
+		title := stored[id]
+		if title == nil || !validRef(title.Ref()) {
+			ask = append(ask, id)
+			continue
+		}
+		resolved[id] = Target{Ref: title.Ref(), Title: title.Title, Year: title.Year}
+	}
+	if len(ask) == 0 || r.finder == nil {
+		return resolved, unmatched, 0, nil
+	}
+
+	if budget > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, budget)
+		defer cancel()
+	}
+	var mu sync.Mutex
+	forEachLimit(ctx, r.concurrency, ask, func(id string) {
+		lookupCtx, cancel := context.WithTimeout(ctx, r.lookupTimeout)
+		defer cancel()
+		found, err := r.finder.FindByExternalID(lookupCtx, id, tmdb.ExternalSourceIMDbID)
+
+		mu.Lock()
+		defer mu.Unlock()
+		lookups++
+		if err != nil {
+			return // pending
+		}
+		target, ok := targetFrom(found)
+		if !ok {
+			unmatched[id] = true
+			return
+		}
+		resolved[id] = target
+	})
+	return resolved, unmatched, lookups, nil
+}
+
+// targetFrom converts a TMDb find result. ok is false when TMDb has no match
+// or matched something that is neither a movie nor a show.
+func targetFrom(found *tmdb.Result) (Target, bool) {
+	if found == nil {
+		return Target{}, false
+	}
+	mediaType, ok := models.TMDbMediaType(found.Type)
+	ref := models.TitleRef{MediaType: mediaType, TMDbID: found.TMDBID}
+	if !ok || !validRef(ref) {
+		return Target{}, false
+	}
+	return Target{Ref: ref, Title: found.Title, Year: found.Year}, true
+}
+
+func validRef(ref models.TitleRef) bool {
+	return ref.TMDbID > 0 && (ref.MediaType == models.MediaTypeMovie || ref.MediaType == models.MediaTypeTV)
+}
+
+// itemType converts a TMDb media type to a watchlist item type.
+func itemType(mediaType string) string {
+	if mediaType == models.MediaTypeTV {
+		return models.WatchlistTypeShow
+	}
+	return models.WatchlistTypeMovie
+}
+
+// apply performs the plan's writes and records what happened in res. Every
+// write is conditional in the store, so a write that no longer applies
+// (the user changed or deleted the item a moment ago) is skipped, not forced.
+//
+// Marks are stamped with at, the time of the run (see Request.At).
+//
+// Additions and unmarks are safe whatever the user did meanwhile. A worker
+// run's adoptions, marks and removals are not: they rest on the list the run
+// fetched being the list that is linked. What makes them safe is the lease
+// (see OwnershipLease): each of them starts only while less than
+// OwnershipLease has passed since at, the run's claim, and for longer than
+// that after the claim the link cannot be changed. The check is made before
+// every single write, not once per phase, because a phase can be long.
+//
+// The link is read before the adoptions and marks, and again before the
+// removals. The first read is part of the argument: the run was started for
+// the link as it was when the users were listed, and only a read made after
+// the claim says what the link is for as long as the lease lasts. The second
+// is a cheap second line. It matters only if the lease failed to hold, which
+// takes clocks that disagree by more than ClockMargin (15 seconds).
+//
+// The link request and the CSV import plan none of the three.
+func (r *Reconciler) apply(ctx context.Context, req Request, plan Plan, at time.Time, res *Result) error {
+	userID := req.UserID
+	if err := r.applyAdditions(ctx, userID, plan, res); err != nil {
+		return err
+	}
+	for _, itemID := range plan.ClearMissing {
+		done, err := r.store.ClearWatchlistItemIMDbMissing(ctx, userID, itemID)
+		if err != nil {
+			return fmt.Errorf("clear missing mark: %w", err)
+		}
+		if done {
+			res.Unmarked++
+		}
+	}
+
+	// leased runs one write that changes whose an item is, or removes it.
+	// held is false, and the write not made, when the lease is over.
+	leaseEnd := at.Add(OwnershipLease)
+	leased := func(write func(ctx context.Context) (bool, error)) (done, held bool, err error) {
+		left := leaseEnd.Sub(r.now())
+		if left <= 0 {
+			return false, false, nil
+		}
+		writeCtx, cancel := context.WithTimeout(ctx, min(left, r.writeTimeout))
+		defer cancel()
+		done, err = write(writeCtx)
+		return done, true, err
+	}
+	// linkHeld reads the link under the lease, before a phase.
+	linkHeld := func() (proceed bool, err error) {
+		same, held, err := leased(func(ctx context.Context) (bool, error) { return r.linkUnchanged(ctx, req) })
+		switch {
+		case !held:
+			res.LeaseExpired = true
+		case err == nil && !same:
+			res.LinkChanged = true
+		}
+		return held && same && err == nil, err
+	}
+
+	if len(plan.Adopt)+len(plan.MarkMissing) > 0 {
+		if proceed, err := linkHeld(); !proceed {
+			return err
+		}
+	}
+	for _, adoption := range plan.Adopt {
+		done, held, err := leased(func(ctx context.Context) (bool, error) {
+			return r.store.AdoptWatchlistItem(ctx, userID, adoption.ItemID, adoption.IMDbID)
+		})
+		if !held {
+			res.LeaseExpired = true
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("adopt item: %w", err)
+		}
+		if done {
+			res.Adopted++
+		}
+	}
+	for _, itemID := range plan.MarkMissing {
+		done, held, err := leased(func(ctx context.Context) (bool, error) {
+			return r.store.MarkWatchlistItemIMDbMissing(ctx, userID, itemID, at)
+		})
+		if !held {
+			res.LeaseExpired = true
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("mark missing: %w", err)
+		}
+		if done {
+			res.MarkedMissing++
+		}
+	}
+	if len(plan.Remove) > 0 {
+		if proceed, err := linkHeld(); !proceed {
+			return err
+		}
+	}
+	for _, removal := range plan.Remove {
+		done, held, err := leased(func(ctx context.Context) (bool, error) {
+			return r.store.DeleteSyncedWatchlistItem(ctx, userID, removal.ItemID, removal.MissingSince, removal.UpdatedAt)
+		})
+		if !held {
+			res.LeaseExpired = true
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("remove item: %w", err)
+		}
+		if done {
+			res.Removed++
+		}
+	}
+	return nil
+}
+
+// linkUnchanged reads the user's link and reports whether it is still the
+// one this run is for: the same list, linked at the same moment. Unlinking,
+// linking another list, and linking the same list again all make it false.
+func (r *Reconciler) linkUnchanged(ctx context.Context, req Request) (bool, error) {
+	link, err := r.store.GetIMDbLink(ctx, req.UserID)
+	if err != nil {
+		return false, fmt.Errorf("read link before removing: %w", err)
+	}
+	return link != nil && req.SourceID != "" && link.SourceID == req.SourceID && link.LinkedAt.Equal(req.LinkedAt), nil
+}
+
+// applyAdditions inserts the planned items in one batch. An item the store
+// refuses as a duplicate is one the user already has (they added it while
+// this run was resolving titles): it counts as existing, never as a failure.
+func (r *Reconciler) applyAdditions(ctx context.Context, userID primitive.ObjectID, plan Plan, res *Result) error {
+	if len(plan.Add) == 0 {
+		return nil
+	}
+	items := make([]*models.WatchlistItem, len(plan.Add))
+	for i, add := range plan.Add {
+		title := strings.TrimSpace(add.Target.Title)
+		if title == "" {
+			title = add.IMDbID
+		}
+		items[i] = &models.WatchlistItem{
+			UserID: userID,
+			Title:  title,
+			Type:   itemType(add.Target.Ref.MediaType),
+			Year:   add.Target.Year,
+			TMDbID: add.Target.Ref.TMDbID,
+			IMDbID: add.IMDbID,
+			Status: models.WatchlistStatusPlanned,
+			Source: plan.Mode.source(),
+		}
+	}
+
+	created, err := r.store.CreateWatchlistItems(ctx, items)
+	inserted := make(map[string]bool, len(created))
+	for _, item := range created {
+		inserted[item.IMDbID] = true
+		if ref, ok := item.TitleRef(); ok {
+			res.AddedTitles = append(res.AddedTitles, ref)
+		}
+	}
+	for _, add := range plan.Add {
+		switch {
+		case inserted[add.IMDbID]:
+			res.Added++
+		case err == nil:
+			res.Outcomes[add.IMDbID] = OutcomeExisting
+			res.Existing++
+		default:
+			// The batch failed part-way; whether this one is stored is not
+			// known, so it is neither added nor existing.
+			res.Outcomes[add.IMDbID] = OutcomePending
+			res.Pending++
+		}
+	}
+	if err != nil {
+		return fmt.Errorf("add items: %w", err)
+	}
+	return nil
+}
+
+// forEachLimit calls fn for every item with at most limit calls in flight.
+// Once ctx is done no further calls start; it returns when the started ones
+// have finished.
+func forEachLimit[T any](ctx context.Context, limit int, items []T, fn func(T)) {
+	if limit < 1 {
+		limit = 1
+	}
+	sem := make(chan struct{}, limit)
+	var wg sync.WaitGroup
+	defer wg.Wait()
+	for _, item := range items {
+		select {
+		case <-ctx.Done():
+			return
+		case sem <- struct{}{}:
+		}
+		if ctx.Err() != nil {
+			<-sem
+			return
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			defer func() { <-sem }()
+			fn(item)
+		}()
+	}
+}

@@ -1,7 +1,7 @@
 // Package worker runs the scheduled background tasks: refreshing stored
-// streaming availability and sending digest emails. One process runs the
-// selected tasks in a fixed order, so a digest always sees the availability
-// the same run just refreshed.
+// streaming availability, syncing linked IMDb lists and sending digest
+// emails. One process runs the selected tasks in a fixed order, so a digest
+// always sees the availability the same run just refreshed.
 package worker
 
 import (
@@ -21,12 +21,13 @@ const (
 )
 
 // order is the sequence tasks run in, whatever order they were asked for.
-// Each task feeds the next: refresh records what changed, imdb (not built
-// yet) will pull list changes in between, and digest reports on the result.
+// Each task feeds the next: refresh records what changed for the titles
+// already on watchlists, imdb pulls in list changes (new titles get a
+// baseline, which is not a change to report), and digest reports the result.
 var order = []string{TaskRefresh, TaskIMDb, TaskDigest}
 
 // defaultTasks run when no selection is given.
-var defaultTasks = []string{TaskRefresh, TaskDigest}
+var defaultTasks = []string{TaskRefresh, TaskIMDb, TaskDigest}
 
 // Task is one unit of scheduled work.
 type Task interface {

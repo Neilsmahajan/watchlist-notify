@@ -59,6 +59,43 @@ func (s *service) GetTitles(ctx context.Context, keys []string, regions []string
 	return titles, nil
 }
 
+// GetTitlesByIMDbIDs finds stored titles by IMDb ID, keyed by that ID, without
+// their provider snapshots. It answers "which TMDb title is tt0133093" from
+// what is already stored, so the IMDb sync and the CSV import ask TMDb only
+// about titles nobody has listed before. Titles TMDb no longer has are left
+// out. IDs without a stored title are absent from the result.
+func (s *service) GetTitlesByIMDbIDs(ctx context.Context, imdbIDs []string) (map[string]*models.Title, error) {
+	titles := make(map[string]*models.Title, len(imdbIDs))
+	if len(imdbIDs) == 0 {
+		return titles, nil
+	}
+	coll := s.db.Database(databaseName).Collection(collTitles)
+
+	projection := bson.M{}
+	for _, field := range titleMetadataFields {
+		projection[field] = 1
+	}
+	// Sorted by _id so that, should two titles ever claim one IMDb ID, the
+	// same one wins every time.
+	cursor, err := coll.Find(ctx, bson.M{
+		"imdb_id":      bson.M{"$in": imdbIDs},
+		"not_found_at": nil,
+	}, options.Find().SetProjection(projection).SetSort(bson.D{{Key: "_id", Value: 1}}))
+	if err != nil {
+		return nil, err
+	}
+	var docs []*models.Title
+	if err := cursor.All(ctx, &docs); err != nil {
+		return nil, err
+	}
+	for _, doc := range docs {
+		if _, taken := titles[doc.IMDbID]; !taken {
+			titles[doc.IMDbID] = doc
+		}
+	}
+	return titles, nil
+}
+
 // SaveTitleSnapshot stores a region's provider snapshot with a
 // compare-and-set on the snapshot's version (its providers_fetched_at):
 //

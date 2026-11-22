@@ -352,6 +352,134 @@ const docTemplate = `{
                 }
             }
         },
+        "/api/me/imdb": {
+            "put": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "Links the user's public IMDb Watchlist (by user ID, ur…) or any public IMDb list (ls…), adds its titles to the watchlist now, and keeps the watchlist in step with it once a day from then on. Linking again replaces the link. Titles are added as planned items with source \"imdb\". Linking itself leaves every item the user already has exactly as it is. The daily sync, from its first run on, adopts items the user imported from IMDb earlier: an item that carries the IMDb ID of a title on the list (which only an import stores), is still \"planned\" and has no tags gets source \"imdb\" and follows the list from then on. Items added by hand are never adopted. The daily sync removes an item only if its source is \"imdb\", the user has not changed its status or tagged it, and it has been missing from two complete fetches of the list at least 12 hours apart. IMDb does not permit public or commercial use of its data, so this is strictly opt-in, stores only IMDb title IDs (everything else comes from TMDb), and reads a list at most once a day: there is no \"sync now\", and a link request within 60 seconds of a fetch of the user's list (by an earlier link request or by the daily sync) is refused with 429. Every successful request sets linked_at, also one for the list that is linked already.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Users"
+                ],
+                "summary": "Link a public IMDb list",
+                "parameters": [
+                    {
+                        "description": "The IMDb user ID, list ID or URL to link",
+                        "name": "body",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/internal_server.IMDbLinkRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "The stored link and what the first sync did",
+                        "schema": {
+                            "$ref": "#/definitions/internal_server.IMDbLinkResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Not an IMDb user ID, list ID or URL; or the list is too large",
+                        "schema": {
+                            "$ref": "#/definitions/internal_server.ErrorResponse"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/internal_server.ErrorResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "IMDb has no such list, or it is not public",
+                        "schema": {
+                            "$ref": "#/definitions/internal_server.ErrorResponse"
+                        }
+                    },
+                    "429": {
+                        "description": "The list was fetched less than 60 seconds ago, by a link request or the daily sync",
+                        "schema": {
+                            "$ref": "#/definitions/internal_server.ErrorResponse"
+                        },
+                        "headers": {
+                            "Retry-After": {
+                                "type": "integer",
+                                "description": "Seconds to wait before trying again"
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "The link could not be stored",
+                        "schema": {
+                            "$ref": "#/definitions/internal_server.ErrorResponse"
+                        }
+                    },
+                    "502": {
+                        "description": "IMDb could not be reached",
+                        "schema": {
+                            "$ref": "#/definitions/internal_server.ErrorResponse"
+                        }
+                    },
+                    "503": {
+                        "description": "IMDb sync is not configured on this server",
+                        "schema": {
+                            "$ref": "#/definitions/internal_server.ErrorResponse"
+                        }
+                    }
+                }
+            },
+            "delete": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "Stops syncing with the linked IMDb list. Nothing is removed from the watchlist: items the sync added or adopted stay, and are never removed automatically afterwards. Every \"missing from the list\" mark (imdb_missing_since) on the user's items is cleared. Unlinking when nothing is linked also succeeds. Within 60 seconds of a fetch of the user's list, by a link request or by the daily sync, the answer is 429 with Retry-After and nothing is changed: the list is still linked; send the request again after that many seconds. On a 500 the list is still linked too.",
+                "tags": [
+                    "Users"
+                ],
+                "summary": "Unlink the IMDb list",
+                "responses": {
+                    "204": {
+                        "description": "Unlinked"
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/internal_server.ErrorResponse"
+                        }
+                    },
+                    "429": {
+                        "description": "The list was fetched less than a minute ago; still linked",
+                        "schema": {
+                            "$ref": "#/definitions/internal_server.ErrorResponse"
+                        },
+                        "headers": {
+                            "Retry-After": {
+                                "type": "integer",
+                                "description": "Seconds to wait before trying again"
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "The link could not be removed",
+                        "schema": {
+                            "$ref": "#/definitions/internal_server.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
         "/api/me/notifications/test": {
             "post": {
                 "security": [
@@ -933,7 +1061,7 @@ const docTemplate = `{
                         "BearerAuth": []
                     }
                 ],
-                "description": "Bulk import watchlist items from a CSV file (IMDb export format)",
+                "description": "Bulk import watchlist items from an IMDb CSV export (any CSV with a \"Const\" column of IMDb title IDs). Rows the user already has are counted as duplicates and cost nothing. New titles are added as planned items with source \"csv\". An import only ever adds; it never removes or changes an item. When TMDb is slow, the rows that could not be looked up in time are reported in \"errors\"; uploading the same file again continues where it stopped.",
                 "consumes": [
                     "multipart/form-data"
                 ],
@@ -957,18 +1085,23 @@ const docTemplate = `{
                     "200": {
                         "description": "Import results with counts",
                         "schema": {
-                            "type": "object",
-                            "additionalProperties": true
+                            "$ref": "#/definitions/internal_server.WatchlistImportResponse"
                         }
                     },
                     "400": {
-                        "description": "Invalid file or format",
+                        "description": "Invalid file or format, or no row could be imported",
                         "schema": {
                             "$ref": "#/definitions/internal_server.ErrorResponse"
                         }
                     },
                     "401": {
                         "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/internal_server.ErrorResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "Import failed",
                         "schema": {
                             "$ref": "#/definitions/internal_server.ErrorResponse"
                         }
@@ -1193,6 +1326,47 @@ const docTemplate = `{
                 }
             }
         },
+        "github_com_neilsmahajan_watchlist-notify_internal_models.IMDbSync": {
+            "type": "object",
+            "properties": {
+                "added": {
+                    "description": "Added, Removed and Unmatched are counts from the last run. Unmatched\nare IMDb titles TMDb has no movie or show for (episodes, games, …).",
+                    "type": "integer"
+                },
+                "last_attempt_at": {
+                    "description": "LastAttemptAt is when the list was last fetched, successfully or not.",
+                    "type": "string"
+                },
+                "last_error": {
+                    "type": "string"
+                },
+                "last_status": {
+                    "description": "ok | partial | failed | not_found",
+                    "type": "string"
+                },
+                "last_synced_at": {
+                    "description": "LastSyncedAt is when the list was last read completely.",
+                    "type": "string"
+                },
+                "linked_at": {
+                    "type": "string"
+                },
+                "removed": {
+                    "type": "integer"
+                },
+                "source_id": {
+                    "description": "SourceID is an IMDb user ID (ur…, meaning that user's Watchlist) or a\nlist ID (ls…).",
+                    "type": "string"
+                },
+                "total": {
+                    "description": "Total is the number of entries IMDb reported for the list.",
+                    "type": "integer"
+                },
+                "unmatched": {
+                    "type": "integer"
+                }
+            }
+        },
         "github_com_neilsmahajan_watchlist-notify_internal_models.Preferences": {
             "type": "object",
             "properties": {
@@ -1244,6 +1418,14 @@ const docTemplate = `{
                 "id": {
                     "type": "string"
                 },
+                "imdb_sync": {
+                    "description": "IMDbSync is present while the user has a public IMDb list linked.",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/github_com_neilsmahajan_watchlist-notify_internal_models.IMDbSync"
+                        }
+                    ]
+                },
                 "name": {
                     "type": "string"
                 },
@@ -1277,6 +1459,14 @@ const docTemplate = `{
                     "type": "string"
                 },
                 "imdb_id": {
+                    "type": "string"
+                },
+                "imdb_missing_since": {
+                    "description": "IMDbMissingSince is set by the IMDb sync when a complete fetch of the\nuser's linked list no longer contains this item. It is the first of the\ntwo strikes the sync needs before it removes an item; seeing the title\non the list again clears it.",
+                    "type": "string"
+                },
+                "source": {
+                    "description": "Source is SourceIMDb, SourceCSV, or empty for items added by hand.",
                     "type": "string"
                 },
                 "status": {
@@ -1391,6 +1581,10 @@ const docTemplate = `{
                 "imdb_id": {
                     "type": "string"
                 },
+                "imdb_missing_since": {
+                    "description": "IMDbMissingSince is set by the IMDb sync when a complete fetch of the\nuser's linked list no longer contains this item. It is the first of the\ntwo strikes the sync needs before it removes an item; seeing the title\non the list again clears it.",
+                    "type": "string"
+                },
                 "overview": {
                     "type": "string"
                 },
@@ -1402,6 +1596,10 @@ const docTemplate = `{
                 },
                 "runtime": {
                     "type": "integer"
+                },
+                "source": {
+                    "description": "Source is SourceIMDb, SourceCSV, or empty for items added by hand.",
+                    "type": "string"
                 },
                 "status": {
                     "description": "enum: planned | watching | finished",
@@ -1576,6 +1774,57 @@ const docTemplate = `{
                 }
             }
         },
+        "internal_server.IMDbLinkRequest": {
+            "type": "object",
+            "properties": {
+                "source": {
+                    "description": "Source is an IMDb user ID (ur…), a list ID (ls…), or an IMDb URL\ncontaining one.",
+                    "type": "string",
+                    "example": "https://www.imdb.com/user/ur12345678/watchlist"
+                }
+            }
+        },
+        "internal_server.IMDbLinkResponse": {
+            "type": "object",
+            "properties": {
+                "imdb_sync": {
+                    "$ref": "#/definitions/github_com_neilsmahajan_watchlist-notify_internal_models.IMDbSync"
+                },
+                "result": {
+                    "$ref": "#/definitions/internal_server.IMDbLinkResult"
+                }
+            }
+        },
+        "internal_server.IMDbLinkResult": {
+            "type": "object",
+            "properties": {
+                "added": {
+                    "description": "Added is how many of them became new watchlist items.",
+                    "type": "integer",
+                    "example": 230
+                },
+                "complete": {
+                    "description": "Complete is false when the list was only partly read or some titles\nare still to be looked up; the daily sync finishes the job.",
+                    "type": "boolean",
+                    "example": true
+                },
+                "existing": {
+                    "description": "Existing is how many were already on the watchlist.",
+                    "type": "integer",
+                    "example": 10
+                },
+                "total": {
+                    "description": "Total is the number of titles on the IMDb list.",
+                    "type": "integer",
+                    "example": 242
+                },
+                "unmatched": {
+                    "description": "Unmatched is how many TMDb does not know, so they cannot be tracked.",
+                    "type": "integer",
+                    "example": 2
+                }
+            }
+        },
         "internal_server.ProviderInfo": {
             "type": "object",
             "properties": {
@@ -1596,6 +1845,28 @@ const docTemplate = `{
                 },
                 "name": {
                     "type": "string"
+                }
+            }
+        },
+        "internal_server.WatchlistImportResponse": {
+            "type": "object",
+            "properties": {
+                "duplicates": {
+                    "description": "Duplicates counts rows the user already had, or that repeat an\nearlier row of the file.",
+                    "type": "integer",
+                    "example": 230
+                },
+                "errors": {
+                    "description": "Errors lists rows that were not imported, in file order.",
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/internal_server.WatchlistRowError"
+                    }
+                },
+                "imported": {
+                    "description": "Imported counts rows that became new watchlist items.",
+                    "type": "integer",
+                    "example": 12
                 }
             }
         },
@@ -1639,6 +1910,20 @@ const docTemplate = `{
                 },
                 "meta": {
                     "$ref": "#/definitions/internal_server.WatchlistListMeta"
+                }
+            }
+        },
+        "internal_server.WatchlistRowError": {
+            "type": "object",
+            "properties": {
+                "reason": {
+                    "type": "string",
+                    "example": "no tmdb match for imdb id tt0000001"
+                },
+                "row": {
+                    "description": "Row is the line of the file, counting the header as row 1.",
+                    "type": "integer",
+                    "example": 7
                 }
             }
         }

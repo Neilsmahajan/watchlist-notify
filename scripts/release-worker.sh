@@ -55,6 +55,13 @@ PLATFORM="${PLATFORM:-linux/amd64}"
 WORKER_IMAGE="${WORKER_IMAGE:-digest-worker}"
 WORKER_SERVICE="${WORKER_SERVICE:-digest-worker}"
 
+# How long Cloud Run lets one run of the job take before it kills it. The
+# job's tasks (refresh, imdb, digest) run one after another inside this time,
+# so it has to cover all three. The imdb task alone can take about 7 minutes
+# at worst; the sums are next to the budgets in internal/worker/imdb.go, and a
+# test there fails if this value and those budgets drift apart.
+TASK_TIMEOUT="1800s"
+
 # --- Defaults / state -------------------------------------------------------
 DATE_UTC=$(date -u +%Y%m%d-%H%M%S)
 SHORT_SHA=$(git rev-parse --short HEAD 2>/dev/null || echo "nosha")
@@ -203,7 +210,7 @@ if [[ ${DO_DEPLOY} -eq 1 ]]; then
         --region "${REGION}" \
         --project "${PROJECT_ID}" \
         --max-retries 1 \
-        --task-timeout 540s)
+        --task-timeout "${TASK_TIMEOUT}")
       if [[ ${#SET_ENV_ARGS[@]} -gt 0 ]]; then
         CMD+=("${SET_ENV_ARGS[@]}")
       fi
@@ -223,7 +230,7 @@ if [[ ${DO_DEPLOY} -eq 1 ]]; then
         --region "${REGION}" \
         --project "${PROJECT_ID}" \
         --max-retries 1 \
-        --task-timeout 540s \
+        --task-timeout "${TASK_TIMEOUT}" \
         --memory 512Mi)
       if [[ ${#SET_ENV_ARGS[@]} -gt 0 ]]; then
         CMD+=("${SET_ENV_ARGS[@]}")

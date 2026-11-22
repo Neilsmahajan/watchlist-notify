@@ -53,6 +53,8 @@ func (s *Server) RegisterRoutes() http.Handler {
 	protected.GET("/me/services", s.listUserServicesHandler)
 	protected.PATCH("/me/services", s.updateUserServicesHandler)
 	protected.POST("/me/notifications/test", s.testNotificationHandler)
+	protected.PUT("/me/imdb", s.linkIMDbHandler)
+	protected.DELETE("/me/imdb", s.unlinkIMDbHandler)
 
 	protected.POST("/watchlist", s.createWatchlistItemHandler)
 	protected.GET("/watchlist", s.listWatchlistItemsHandler)

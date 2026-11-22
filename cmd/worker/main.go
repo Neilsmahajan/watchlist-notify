@@ -1,9 +1,10 @@
 // Command worker runs the scheduled background tasks. It is deployed as a
 // Cloud Run job and triggered once a day.
 //
-//	worker                      # refresh, then digest (dry run)
+//	worker                      # refresh, then imdb, then digest (dry run)
 //	WORKER_TASKS=refresh worker # only refresh stored availability
 //	worker -tasks digest        # only the digest
+//	IMDB_SYNC_MODE=dry-run worker -tasks imdb # plan the IMDb syncs, write nothing
 //
 // See README.md next to this file for the environment it reads.
 package main
@@ -24,7 +25,9 @@ import (
 	"github.com/neilsmahajan/watchlist-notify/internal/availability"
 	"github.com/neilsmahajan/watchlist-notify/internal/database"
 	"github.com/neilsmahajan/watchlist-notify/internal/digest"
+	"github.com/neilsmahajan/watchlist-notify/internal/imdbsync"
 	"github.com/neilsmahajan/watchlist-notify/internal/notifications"
+	"github.com/neilsmahajan/watchlist-notify/internal/providers/imdb"
 	"github.com/neilsmahajan/watchlist-notify/internal/providers/tmdb"
 	"github.com/neilsmahajan/watchlist-notify/internal/worker"
 )
@@ -39,7 +42,7 @@ func run() int {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	slog.SetDefault(logger)
 
-	tasksFlag := flag.String("tasks", "", "comma-separated tasks to run (overrides WORKER_TASKS); default: refresh,digest")
+	tasksFlag := flag.String("tasks", "", "comma-separated tasks to run (overrides WORKER_TASKS); default: refresh,imdb,digest")
 	flag.Parse()
 
 	spec := os.Getenv("WORKER_TASKS")
@@ -61,6 +64,7 @@ func run() int {
 
 	factories := map[string]worker.Factory{
 		worker.TaskRefresh: func() (worker.Task, error) { return newRefreshTask(db, logger) },
+		worker.TaskIMDb:    func() (worker.Task, error) { return newIMDbTask(db, logger) },
 		worker.TaskDigest:  func() (worker.Task, error) { return newDigestTask(db, logger) },
 	}
 	if err := worker.Run(ctx, logger, tasks, factories); err != nil {
@@ -110,6 +114,37 @@ func refreshMinAge(value string) (time.Duration, error) {
 		return 0, fmt.Errorf("REFRESH_MIN_AGE %q is not a duration such as 20h or 0", value)
 	}
 	return d, nil
+}
+
+// newIMDbTask builds the task that syncs linked IMDb lists. It needs TMDb:
+// IMDb supplies only title IDs, and TMDb says which movie or show each is.
+func newIMDbTask(db database.Service, logger *slog.Logger) (worker.Task, error) {
+	dryRun, err := worker.ParseIMDbSyncMode(os.Getenv("IMDB_SYNC_MODE"))
+	if err != nil {
+		return nil, err
+	}
+	apiKey := strings.TrimSpace(os.Getenv("TMDB_API_KEY"))
+	if apiKey == "" {
+		return nil, errors.New("TMDB_API_KEY is not set")
+	}
+	client, err := tmdb.New(apiKey)
+	if err != nil {
+		return nil, err
+	}
+	mode := "apply"
+	if dryRun {
+		mode = "dry-run"
+	}
+	logger.Info("imdb configured", "mode", mode, "min_gap", worker.IMDbSyncMinGap.String())
+	return &worker.IMDbTask{
+		Store:         db,
+		Fetcher:       imdb.New(),
+		Syncer:        imdbsync.New(db, client),
+		Baselines:     availability.NewRefresher(client, db, logger),
+		DefaultRegion: database.DefaultRegion(),
+		DryRun:        dryRun,
+		Logger:        logger,
+	}, nil
 }
 
 func newDigestTask(db database.Service, logger *slog.Logger) (worker.Task, error) {
