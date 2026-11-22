@@ -15,13 +15,19 @@ import (
 
 // healthHandler godoc
 // @Summary Health check
-// @Description Returns the current health status of the API and database connection
+// @Description Reports whether the API can reach its database. A failed check answers 503 and the process keeps running.
 // @Tags System
 // @Produce json
-// @Success 200 {object} map[string]interface{} "Service health status"
+// @Success 200 {object} map[string]string "Service is healthy"
+// @Failure 503 {object} map[string]string "Database unreachable"
 // @Router /health [get]
 func (s *Server) healthHandler(c *gin.Context) {
-	c.JSON(http.StatusOK, s.db.Health())
+	if err := s.db.Health(c.Request.Context()); err != nil {
+		log.Printf("health: database check failed: %v", err)
+		c.JSON(http.StatusServiceUnavailable, gin.H{"status": "unavailable", "message": "database unreachable"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"status": "ok", "message": "It's healthy"})
 }
 
 // searchHandler proxies a minimal search to TMDb for movies or TV shows.

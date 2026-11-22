@@ -184,6 +184,31 @@ func (r *Refresher) Peek(ctx context.Context, ref models.TitleRef, region string
 	return BuildSnapshot(details.Providers[region], r.now()), nil
 }
 
+// CanFetch reports whether the refresher has a TMDb client to fetch with.
+func (r *Refresher) CanFetch() bool {
+	return r.fetcher != nil
+}
+
+// PeekAll is Peek for many titles with bounded concurrency. It returns the
+// snapshots it could fetch before ctx ended, keyed by title key.
+func (r *Refresher) PeekAll(ctx context.Context, refs []models.TitleRef, region string) map[string]models.RegionSnapshot {
+	snapshots := make(map[string]models.RegionSnapshot, len(refs))
+	if r.fetcher == nil {
+		return snapshots
+	}
+	var mu sync.Mutex
+	forEachLimit(ctx, r.concurrency, refs, func(ref models.TitleRef) {
+		snap, err := r.Peek(ctx, ref, region)
+		if err != nil {
+			return
+		}
+		mu.Lock()
+		snapshots[ref.Key()] = snap
+		mu.Unlock()
+	})
+	return snapshots
+}
+
 // Ensure makes sure the given titles have a stored snapshot for region,
 // fetching the ones that do not. It is the read path's miss handler and the
 // way a newly added item gets its title row. stored holds whatever the caller

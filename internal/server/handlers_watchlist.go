@@ -5,7 +5,9 @@ import (
 	"encoding/csv"
 	"errors"
 	"io"
+	"log"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -13,6 +15,7 @@ import (
 	"github.com/neilsmahajan/watchlist-notify/internal/database"
 	"github.com/neilsmahajan/watchlist-notify/internal/models"
 	"github.com/neilsmahajan/watchlist-notify/internal/providers/tmdb"
+	"github.com/neilsmahajan/watchlist-notify/internal/watchlist"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 )
 
@@ -108,12 +111,71 @@ func (s *Server) createWatchlistItemHandler(c *gin.Context) {
 		return
 	}
 
+	// Fetch the title's availability now so the item shows it on the next
+	// list. It is best effort: on a timeout or TMDb failure the list's miss
+	// handling or the daily refresh fills it in.
+	if ref, ok := item.TitleRef(); ok {
+		s.ensureTitles(c.Request.Context(), user, []models.TitleRef{ref}, createEnsureBudget)
+	}
+
 	c.JSON(http.StatusCreated, item)
+}
+
+const (
+	// createEnsureBudget bounds the availability fetch when adding one item.
+	createEnsureBudget = 1500 * time.Millisecond
+	// importEnsureBudget bounds it after a CSV import, however many rows.
+	importEnsureBudget = 6 * time.Second
+	// importDeadline leaves room under the server's 30 s write timeout.
+	importDeadline = 25 * time.Second
+)
+
+// ensureTitles stores availability baselines for titles that have none in the
+// user's region, spending at most budget. Failures are logged by the
+// refresher and otherwise ignored.
+func (s *Server) ensureTitles(ctx context.Context, user *models.User, refs []models.TitleRef, budget time.Duration) {
+	if len(refs) == 0 || budget <= 0 || !s.refresher.CanFetch() {
+		return
+	}
+	ctx, cancel := context.WithTimeout(ctx, budget)
+	defer cancel()
+
+	region := user.RegionOr(s.defaultRegion)
+	keys := make([]string, len(refs))
+	for i, ref := range refs {
+		keys[i] = ref.Key()
+	}
+	stored, err := s.db.GetTitles(ctx, keys, []string{region})
+	if err != nil {
+		log.Printf("watchlist: loading titles before fetch failed: %v", err)
+		return
+	}
+	s.refresher.Ensure(ctx, refs, stored, region)
+}
+
+// WatchlistListResponse is the body of GET /api/watchlist.
+type WatchlistListResponse struct {
+	Items []watchlist.Item  `json:"items"`
+	Meta  WatchlistListMeta `json:"meta"`
+}
+
+// WatchlistListMeta describes the page and the list around it.
+type WatchlistListMeta struct {
+	Limit    int `json:"limit"`
+	Offset   int `json:"offset"`
+	Returned int `json:"returned"`
+	// Total is the number of items matching the filters, before paging.
+	Total int `json:"total"`
+	// NextOffset is present when there are more items after this page.
+	NextOffset *int `json:"next_offset,omitempty"`
+	// Region is the region availability is reported for.
+	Region string           `json:"region"`
+	Facets watchlist.Facets `json:"facets"`
 }
 
 // listWatchlistItemsHandler godoc
 // @Summary List watchlist items
-// @Description Get all items in the user's watchlist with optional filtering, pagination, and sorting
+// @Description Get the user's watchlist with title metadata and streaming availability attached to every item, with optional filtering, sorting and pagination. Availability comes from stored data: the request costs two database queries regardless of list size. The Server-Timing response header reports the database, TMDb and total durations.
 // @Tags Watchlist
 // @Security BearerAuth
 // @Produce json
@@ -121,64 +183,117 @@ func (s *Server) createWatchlistItemHandler(c *gin.Context) {
 // @Param offset query int false "Number of items to skip" default(0)
 // @Param status query string false "Filter by status" Enums(planned, watching, finished)
 // @Param type query string false "Filter by content type" Enums(movie, show)
-// @Param search query string false "Search in title"
-// @Param sort query string false "Sort field (prefix with - for descending)" default(-added_at)
-// @Param with_count query boolean false "Include total count in response" default(false)
-// @Success 200 {object} map[string]interface{} "Watchlist items with pagination metadata"
+// @Param search query string false "Case-insensitive search in title"
+// @Param service query []string false "Keep items streaming on any of these service codes (repeat the parameter or separate with commas)" collectionFormat(multi)
+// @Param available query boolean false "Keep items that are (true) or are not (false) streaming on one of the user's active services"
+// @Param sort query string false "Sort field (prefix with - for descending): added_at, title, year, status, rating, runtime, available" default(-added_at)
+// @Success 200 {object} WatchlistListResponse "Watchlist items with pagination metadata and facets"
+// @Header 200 {string} Server-Timing "db, tmdb and total durations in milliseconds"
 // @Failure 400 {object} ErrorResponse "Invalid query parameters"
 // @Failure 401 {object} ErrorResponse "Unauthorized"
 // @Failure 500 {object} ErrorResponse "Failed to fetch items"
 // @Router /api/watchlist [get]
 func (s *Server) listWatchlistItemsHandler(c *gin.Context) {
+	start := time.Now()
 	user, ok := s.getUser(c)
 	if !ok {
 		return
 	}
 
-	// Parse query params
 	q := c.Request.URL.Query()
 	limit, offset, ok := parseLimitOffset(c)
 	if !ok {
 		return
 	}
-	status := strings.ToLower(q.Get("status"))
-	if !validWatchlistStatus(status) {
+	opts := watchlist.Options{
+		Status: strings.ToLower(q.Get("status")),
+		Type:   strings.ToLower(q.Get("type")),
+		Search: q.Get("search"),
+		Sort:   q.Get("sort"), // e.g. -added_at, title, -rating
+		Limit:  limit,
+		Offset: offset,
+	}
+	if !validWatchlistStatus(opts.Status) {
 		jsonError(c, http.StatusBadRequest, "invalid status filter")
 		return
 	}
-	itemType := strings.ToLower(q.Get("type"))
-	if !validWatchlistType(itemType) {
+	if !validWatchlistType(opts.Type) {
 		jsonError(c, http.StatusBadRequest, "invalid type filter")
 		return
 	}
-	search := q.Get("search")
-	sort := q.Get("sort") // e.g. -added_at, title, -year
-	withCount := q.Get("with_count") == "1"
-
-	opts := models.ListWatchlistOptions{
-		UserID: user.ID,
-		Limit:  limit,
-		Offset: offset,
-		Status: status,
-		Type:   itemType,
-		Search: search,
-		Sort:   sort,
-	}
-	items, err := s.db.ListWatchlistItems(c.Request.Context(), opts)
-	if err != nil {
-		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "failed to fetch items"})
+	if opts.Services, ok = parseServiceFilter(q["service"]); !ok {
+		jsonError(c, http.StatusBadRequest, "invalid service filter")
 		return
 	}
-	meta := gin.H{"limit": limit, "offset": offset, "returned": len(items)}
-	if len(items) == limit {
-		meta["next_offset"] = offset + limit
+	if opts.Available, ok = parseOptionalBool(q.Get("available")); !ok {
+		jsonError(c, http.StatusBadRequest, "invalid available filter")
+		return
 	}
-	if withCount {
-		if total, cntErr := s.db.CountWatchlistItems(c.Request.Context(), opts); cntErr == nil {
-			meta["total"] = total
+
+	view, err := s.lister.List(c.Request.Context(), user, opts)
+	if err != nil {
+		log.Printf("watchlist: list failed: %v", err)
+		jsonError(c, http.StatusInternalServerError, "failed to fetch items")
+		return
+	}
+
+	meta := WatchlistListMeta{
+		Limit:    limit,
+		Offset:   offset,
+		Returned: len(view.Items),
+		Total:    view.Total,
+		Region:   view.Region,
+		Facets:   view.Facets,
+	}
+	if next := offset + len(view.Items); next < view.Total {
+		meta.NextOffset = &next
+	}
+	c.Header("Server-Timing", serverTiming(view.Timings, time.Since(start)))
+	c.JSON(http.StatusOK, WatchlistListResponse{Items: view.Items, Meta: meta})
+}
+
+// parseServiceFilter reads service codes given as repeated parameters,
+// comma-separated lists, or both. ok is false when a code is not a known
+// service.
+func parseServiceFilter(values []string) (codes []string, ok bool) {
+	seen := make(map[string]bool)
+	for _, value := range values {
+		for _, part := range strings.Split(value, ",") {
+			code := strings.ToLower(strings.TrimSpace(part))
+			if code == "" || seen[code] {
+				continue
+			}
+			if !models.ServiceCodeSet[code] {
+				return nil, false
+			}
+			seen[code] = true
+			codes = append(codes, code)
 		}
 	}
-	c.JSON(http.StatusOK, gin.H{"items": items, "meta": meta})
+	return codes, true
+}
+
+// parseOptionalBool reads a tri-state query flag: absent, true or false.
+func parseOptionalBool(value string) (*bool, bool) {
+	var b bool
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "":
+		return nil, true
+	case "true", "1":
+		b = true
+	case "false", "0":
+	default:
+		return nil, false
+	}
+	return &b, true
+}
+
+// serverTiming formats a Server-Timing header value in milliseconds.
+func serverTiming(t watchlist.Timings, total time.Duration) string {
+	ms := func(d time.Duration) string {
+		return strconv.FormatFloat(float64(d.Microseconds())/1000, 'f', 1, 64)
+	}
+	return "db;dur=" + ms(t.DB) + ", tmdb;dur=" + ms(t.TMDb) + ", total;dur=" + ms(total)
 }
 
 // updateWatchlistItemHandler godoc
@@ -365,11 +480,22 @@ func (s *Server) importWatchlistHandler(c *gin.Context) {
 		_ = closer.Close()
 	}(file)
 
-	result, err := s.importWatchlistFromCSV(c.Request.Context(), user.ID, file)
+	start := time.Now()
+	result, imported, err := s.importWatchlistFromCSV(c.Request.Context(), user.ID, file)
 	if err != nil {
 		jsonError(c, http.StatusBadRequest, err.Error())
 		return
 	}
+
+	// Availability for the new titles is fetched once, after the rows are in,
+	// with bounded concurrency and a fixed budget: the import does not get
+	// slower per row. Whatever does not fit is picked up by the list's miss
+	// handling or the daily refresh.
+	budget := importEnsureBudget
+	if remaining := importDeadline - time.Since(start); remaining < budget {
+		budget = remaining
+	}
+	s.ensureTitles(c.Request.Context(), user, imported, budget)
 
 	c.JSON(http.StatusOK, gin.H{
 		"imported":   result.Imported,
@@ -389,9 +515,11 @@ type watchlistRowError struct {
 	Reason string `json:"reason"`
 }
 
-func (s *Server) importWatchlistFromCSV(ctx context.Context, userID primitive.ObjectID, reader io.Reader) (*watchlistImportResult, error) {
+// importWatchlistFromCSV creates a watchlist item per CSV row. Besides the
+// result it returns the titles of the items it created.
+func (s *Server) importWatchlistFromCSV(ctx context.Context, userID primitive.ObjectID, reader io.Reader) (*watchlistImportResult, []models.TitleRef, error) {
 	if s.tmdb == nil {
-		return nil, errors.New("tmdb client not configured")
+		return nil, nil, errors.New("tmdb client not configured")
 	}
 
 	csvReader := csv.NewReader(reader)
@@ -401,10 +529,10 @@ func (s *Server) importWatchlistFromCSV(ctx context.Context, userID primitive.Ob
 
 	header, err := csvReader.Read()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if len(header) == 0 {
-		return nil, errors.New("missing header row")
+		return nil, nil, errors.New("missing header row")
 	}
 	header[0] = strings.TrimPrefix(header[0], "\ufeff")
 
@@ -414,10 +542,11 @@ func (s *Server) importWatchlistFromCSV(ctx context.Context, userID primitive.Ob
 	}
 	constIdx, ok := colIndex["Const"]
 	if !ok {
-		return nil, errors.New("missing required column: Const")
+		return nil, nil, errors.New("missing required column: Const")
 	}
 
 	result := &watchlistImportResult{}
+	var imported []models.TitleRef
 	cache := make(map[string]*tmdb.Result)
 	rowNumber := 1
 
@@ -487,13 +616,16 @@ func (s *Server) importWatchlistFromCSV(ctx context.Context, userID primitive.Ob
 		}
 
 		result.Imported++
+		if ref, ok := item.TitleRef(); ok {
+			imported = append(imported, ref)
+		}
 	}
 
 	if result.Imported == 0 && result.Duplicates == 0 && len(result.Errors) > 0 {
-		return nil, errors.New("no rows imported")
+		return nil, nil, errors.New("no rows imported")
 	}
 
-	return result, nil
+	return result, imported, nil
 }
 
 func (s *Server) lookupTMDbByIMDb(ctx context.Context, imdbID string, cache map[string]*tmdb.Result) (*tmdb.Result, error) {
