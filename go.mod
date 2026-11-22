@@ -5,6 +5,7 @@ go 1.25.0
 require (
 	github.com/auth0/go-jwt-middleware/v2 v2.3.0
 	github.com/gin-contrib/cors v1.7.6
+	github.com/gin-contrib/gzip v1.2.5
 	github.com/gin-gonic/gin v1.11.0
 	github.com/joho/godotenv v1.5.1
 	github.com/redis/go-redis/v9 v9.14.0

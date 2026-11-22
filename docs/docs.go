@@ -167,6 +167,154 @@ const docTemplate = `{
                 }
             }
         },
+        "/api/demo/services": {
+            "get": {
+                "description": "The supported streaming services, each marked with whether the demo account has it: the same shape as GET /api/me/services. Public and read-only.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Demo"
+                ],
+                "summary": "Public demo services",
+                "responses": {
+                    "200": {
+                        "description": "Service catalog with the demo account's selection",
+                        "schema": {
+                            "$ref": "#/definitions/internal_server.DemoServicesResponse"
+                        },
+                        "headers": {
+                            "Cache-Control": {
+                                "type": "string",
+                                "description": "public, max-age=300"
+                            }
+                        }
+                    },
+                    "404": {
+                        "description": "The demo account has not been seeded",
+                        "schema": {
+                            "$ref": "#/definitions/internal_server.ErrorResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "Failed to load the demo",
+                        "schema": {
+                            "$ref": "#/definitions/internal_server.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/demo/watchlist": {
+            "get": {
+                "description": "The watchlist of a seeded demo account, in the same shape and with the same filters, sorts and paging as GET /api/watchlist. Public and read-only. A page holds at most 60 items (limit=0 means 60), search is limited to 64 characters, and the response is served from an in-memory copy that is refreshed every five minutes, so it never triggers a TMDb lookup.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Demo"
+                ],
+                "summary": "Public demo watchlist",
+                "parameters": [
+                    {
+                        "type": "integer",
+                        "default": 20,
+                        "description": "Number of items to return (max 60; 0 means 60)",
+                        "name": "limit",
+                        "in": "query"
+                    },
+                    {
+                        "type": "integer",
+                        "default": 0,
+                        "description": "Number of items to skip",
+                        "name": "offset",
+                        "in": "query"
+                    },
+                    {
+                        "enum": [
+                            "planned",
+                            "watching",
+                            "finished"
+                        ],
+                        "type": "string",
+                        "description": "Filter by status",
+                        "name": "status",
+                        "in": "query"
+                    },
+                    {
+                        "enum": [
+                            "movie",
+                            "show"
+                        ],
+                        "type": "string",
+                        "description": "Filter by content type",
+                        "name": "type",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Case-insensitive search in title (max 64 characters)",
+                        "name": "search",
+                        "in": "query"
+                    },
+                    {
+                        "type": "array",
+                        "items": {
+                            "type": "string"
+                        },
+                        "collectionFormat": "multi",
+                        "description": "Keep items streaming on any of these service codes (repeat the parameter or separate with commas)",
+                        "name": "service",
+                        "in": "query"
+                    },
+                    {
+                        "type": "boolean",
+                        "description": "Keep items that are (true) or are not (false) streaming on one of the demo account's services",
+                        "name": "available",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "default": "-added_at",
+                        "description": "Sort field (prefix with - for descending): added_at, title, year, status, rating, runtime, available",
+                        "name": "sort",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Demo watchlist items with pagination metadata and facets",
+                        "schema": {
+                            "$ref": "#/definitions/internal_server.WatchlistListResponse"
+                        },
+                        "headers": {
+                            "Cache-Control": {
+                                "type": "string",
+                                "description": "public, max-age=300"
+                            }
+                        }
+                    },
+                    "400": {
+                        "description": "Invalid query parameters",
+                        "schema": {
+                            "$ref": "#/definitions/internal_server.ErrorResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "The demo account has not been seeded",
+                        "schema": {
+                            "$ref": "#/definitions/internal_server.ErrorResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "Failed to load the demo",
+                        "schema": {
+                            "$ref": "#/definitions/internal_server.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
         "/api/me": {
             "get": {
                 "security": [
@@ -1385,6 +1533,35 @@ const docTemplate = `{
                     "type": "object",
                     "additionalProperties": {
                         "$ref": "#/definitions/internal_server.AvailabilityItemResponse"
+                    }
+                }
+            }
+        },
+        "internal_server.DemoService": {
+            "type": "object",
+            "properties": {
+                "access": {
+                    "type": "string"
+                },
+                "active": {
+                    "description": "Active says whether the demo account has the service.",
+                    "type": "boolean"
+                },
+                "code": {
+                    "type": "string"
+                },
+                "name": {
+                    "type": "string"
+                }
+            }
+        },
+        "internal_server.DemoServicesResponse": {
+            "type": "object",
+            "properties": {
+                "services": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/internal_server.DemoService"
                     }
                 }
             }
