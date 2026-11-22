@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
-# release-worker.sh - Build, push, and deploy the digest worker to Cloud Run
+# release-worker.sh - Build, push, and deploy the worker (cmd/worker) as a Cloud Run job
+#
+# The worker refreshes stored availability and sends digests; see
+# cmd/worker/README.md. The image and job keep the name "digest-worker" so the
+# existing Cloud Run job and its Cloud Scheduler trigger carry over unchanged.
 #
 # Usage:
 #   scripts/release-worker.sh [--tag TAG] [--cloud-build] [--no-deploy] [--env "K=V"] [--env-file FILE] [--dry-run]
@@ -47,7 +51,7 @@ REGION="${REGION:-}"
 REPO="${REPO:-}"
 PLATFORM="${PLATFORM:-linux/amd64}"
 
-# Worker-specific defaults
+# Worker-specific defaults. Override with WORKER_IMAGE / WORKER_SERVICE.
 WORKER_IMAGE="${WORKER_IMAGE:-digest-worker}"
 WORKER_SERVICE="${WORKER_SERVICE:-digest-worker}"
 
@@ -123,14 +127,12 @@ log "Cloud Build  : $([[ ${USE_CLOUD_BUILD} -eq 1 ]] && echo yes || echo no)"
 if [[ ${USE_CLOUD_BUILD} -eq 1 ]]; then
   log "Building worker via Cloud Build..."
   if [[ ${DRY_RUN} -eq 0 ]]; then
-    gcloud builds submit \
-      --project "${PROJECT_ID}" \
-      --region "${REGION}" \
-      --config - \
-      --substitutions "_IMAGE_PATH=${IMAGE_PATH},_TAG=${TAG}" \
-      . <<'EOF'
+    BUILD_CONFIG="$(mktemp)"
+    trap 'rm -f "${BUILD_CONFIG}"' EXIT
+    cat > "${BUILD_CONFIG}" <<'EOF'
 steps:
   - name: 'gcr.io/cloud-builders/docker'
+    env: ['DOCKER_BUILDKIT=1'] # the Dockerfile uses RUN --mount cache mounts
     args:
       - 'build'
       - '-f'
@@ -141,9 +143,14 @@ steps:
 images:
   - '${_IMAGE_PATH}:${_TAG}'
 options:
-  machineType: 'E2_HIGHCPU_8'
   logging: CLOUD_LOGGING_ONLY
 EOF
+    gcloud builds submit \
+      --project "${PROJECT_ID}" \
+      --region "${REGION}" \
+      --config "${BUILD_CONFIG}" \
+      --substitutions "_IMAGE_PATH=${IMAGE_PATH},_TAG=${TAG}" \
+      .
   else
     log "[DRY RUN] Would submit Cloud Build for ${FULL_IMAGE}"
   fi
@@ -226,11 +233,11 @@ if [[ ${DO_DEPLOY} -eq 1 ]]; then
       log "Job created. Next steps:"
       if [[ ${#SET_ENV_ARGS[@]} -eq 0 ]]; then
         warn "NOTE: No environment variables were set. You may need to set:"
-        warn "  - MONGODB_URI"
-        warn "  - POSTMARK_SERVER_TOKEN"
-        warn "  - POSTMARK_BASE_URL"
+        warn "  - MONGODB_URI, DB_DATABASE"
+        warn "  - TMDB_API_KEY (refresh task)"
+        warn "  - DIGEST_MODE, DIGEST_ALLOWLIST, POSTMARK_SERVER_TOKEN (digest task; dry-run unless DIGEST_MODE=send)"
       fi
-      log "Create Cloud Scheduler job (see docs/DIGEST_WORKER_DEPLOYMENT.md)"
+      log "Create the Cloud Scheduler trigger (see cmd/worker/README.md)"
     else
       log "[DRY RUN] Would create new job ${WORKER_SERVICE}"
       if [[ ${#SET_ENV_ARGS[@]} -gt 0 ]]; then

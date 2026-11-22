@@ -15,6 +15,7 @@ import {
   WatchlistResponse,
   WatchlistStatus,
   WatchlistType,
+  availabilityByItemId,
   getPrimaryAccess,
   typeLabels,
 } from "@/lib/watchlist/types";
@@ -43,6 +44,20 @@ function retainByIds<T>(
     }
   }
   return next;
+}
+
+// The user's active services that do not stream a title, for availability
+// that came embedded in the watchlist (which lists only the matches).
+function unmatchedServiceCodes(
+  providers: AvailabilityProvider[] | undefined,
+  activeServiceCodes: Set<string>,
+): string[] {
+  const matched = new Set(
+    (providers ?? []).map((provider) => provider.code.toLowerCase()),
+  );
+  return Array.from(activeServiceCodes)
+    .filter((code) => !matched.has(code))
+    .sort();
 }
 
 function createAvailabilityLoadingMap(
@@ -85,15 +100,11 @@ const statusLabels: Record<WatchlistStatus, string> = {
 
 type WatchlistClientProps = {
   initialItems: WatchlistItem[];
-  initialAvailability: Record<string, AvailabilityResponse | null>;
-  initialAvailabilityErrors: Record<string, string>;
   initialListError: string | null;
 };
 
 export default function WatchlistClient({
   initialItems,
-  initialAvailability,
-  initialAvailabilityErrors,
   initialListError,
 }: WatchlistClientProps) {
   const [items, setItems] = useState<WatchlistItem[]>(initialItems);
@@ -114,22 +125,21 @@ export default function WatchlistClient({
   const [servicesLoading, setServicesLoading] = useState(false);
   const [availability, setAvailability] = useState<
     Record<string, AvailabilityResponse | null>
-  >(() => ({ ...initialAvailability }));
+  >(() => availabilityByItemId(initialItems));
   const [availabilityLoading, setAvailabilityLoading] = useState<
     Record<string, boolean>
   >(() => createAvailabilityLoadingMap(initialItems));
   const [availabilityError, setAvailabilityError] = useState<
     Record<string, string>
-  >(() => ({ ...initialAvailabilityErrors }));
+  >({});
   const [importing, setImporting] = useState(false);
   const [importResult, setImportResult] =
     useState<WatchlistImportResponse | null>(null);
 
   const isMountedRef = useRef(true);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
-  const availabilityRef = useRef<Record<string, AvailabilityResponse | null>>({
-    ...initialAvailability,
-  });
+  const availabilityRef =
+    useRef<Record<string, AvailabilityResponse | null>>(availability);
   const availabilityLoadingRef = useRef<Record<string, boolean>>(
     createAvailabilityLoadingMap(initialItems),
   );
@@ -228,9 +238,7 @@ export default function WatchlistClient({
         }
 
         const data = (await response.json().catch(() => null)) as
-          | AvailabilityResponse
-          | { error?: string }
-          | null;
+          AvailabilityResponse | { error?: string } | null;
 
         if (!isMountedRef.current) {
           return;
@@ -284,74 +292,6 @@ export default function WatchlistClient({
     [handleUnauthorized],
   );
 
-  const fetchAvailabilityForItems = useCallback(
-    async (list: WatchlistItem[]) => {
-      const itemsToFetch = list.filter((item) => item.tmdb_id);
-      if (itemsToFetch.length === 0) {
-        return;
-      }
-
-      // Use batch endpoint for better performance
-      try {
-        const typeMapping: Record<string, string> = {
-          movie: "movie",
-          show: "tv",
-        };
-
-        const batchRequest = {
-          items: itemsToFetch.map((item) => ({
-            id: item.tmdb_id,
-            type: typeMapping[item.type] || item.type,
-          })),
-        };
-
-        const response = await fetch("/api/availability/batch", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(batchRequest),
-        });
-
-        if (handleUnauthorized(response)) {
-          return;
-        }
-
-        if (!response.ok) {
-          console.error("Batch availability check failed");
-          return;
-        }
-
-        const data = await response.json();
-        const results = data?.results || {};
-
-        if (!isMountedRef.current) {
-          return;
-        }
-
-        // Update availability state with batch results
-        setAvailability((prev) => {
-          const next = { ...prev };
-          for (const item of itemsToFetch) {
-            const typeParam = typeMapping[item.type] || item.type;
-            const key = `${typeParam}_${item.tmdb_id}`;
-            const result = results[key];
-            if (result) {
-              next[item.id] = {
-                region: data.region || "US",
-                providers: (result.providers || []) as AvailabilityProvider[],
-                unmatched_user_services: result.unmatched_user_services || [],
-              };
-            }
-          }
-          availabilityRef.current = next;
-          return next;
-        });
-      } catch (err) {
-        console.error("Batch availability error", err);
-      }
-    },
-    [handleUnauthorized],
-  );
-
   const loadWatchlist = useCallback(
     async (signal?: AbortSignal) => {
       setListError(null);
@@ -399,18 +339,16 @@ export default function WatchlistClient({
 
         const fetchedItems = Array.isArray(data?.items) ? data.items : [];
         setItems(fetchedItems);
-        setAvailability((prev) => {
-          const next = retainByIds(prev, fetchedItems);
-          availabilityRef.current = next;
-          return next;
-        });
+        // Every item arrives with its availability attached.
+        const fetchedAvailability = availabilityByItemId(fetchedItems);
+        availabilityRef.current = fetchedAvailability;
+        setAvailability(fetchedAvailability);
         setAvailabilityLoading((prev) => {
           const next = retainByIds(prev, fetchedItems);
           availabilityLoadingRef.current = next;
           return next;
         });
         setAvailabilityError((prev) => retainByIds(prev, fetchedItems));
-        void fetchAvailabilityForItems(fetchedItems);
       } catch (err) {
         if ((err as { name?: string }).name === "AbortError") {
           return;
@@ -424,13 +362,7 @@ export default function WatchlistClient({
         }
       }
     },
-    [
-      filterType,
-      sortOption,
-      debouncedSearch,
-      fetchAvailabilityForItems,
-      handleUnauthorized,
-    ],
+    [filterType, sortOption, debouncedSearch, handleUnauthorized],
   );
 
   useEffect(() => {
@@ -561,9 +493,7 @@ export default function WatchlistClient({
       }
 
       const data = (await response.json().catch(() => null)) as
-        | (WatchlistItem & { error?: string })
-        | { error?: string }
-        | null;
+        (WatchlistItem & { error?: string }) | { error?: string } | null;
 
       if (!response.ok) {
         const message =
@@ -1036,6 +966,13 @@ export default function WatchlistClient({
                   const availabilityIsLoading =
                     availabilityLoading[item.id] ?? false;
                   const availabilityMessage = availabilityError[item.id];
+                  const unmatchedServices = availabilityData
+                    ? (availabilityData.unmatched_user_services ??
+                      unmatchedServiceCodes(
+                        availabilityData.providers,
+                        activeServiceCodes,
+                      ))
+                    : [];
                   const groupedProviders: Record<
                     AvailabilityAccess,
                     AvailabilityProvider[]
@@ -1241,13 +1178,9 @@ export default function WatchlistClient({
                                 </div>
                               );
                             })}
-                            {availabilityData?.unmatched_user_services &&
-                            availabilityData.unmatched_user_services.length ? (
+                            {unmatchedServices.length ? (
                               <p className="text-xs text-gray-500">
-                                Not seeing:{" "}
-                                {availabilityData.unmatched_user_services.join(
-                                  ", ",
-                                )}
+                                Not seeing: {unmatchedServices.join(", ")}
                               </p>
                             ) : null}
                           </div>
@@ -1257,13 +1190,9 @@ export default function WatchlistClient({
                               Not currently available on your connected
                               services.
                             </p>
-                            {availabilityData.unmatched_user_services &&
-                            availabilityData.unmatched_user_services.length ? (
+                            {unmatchedServices.length ? (
                               <p className="text-xs text-gray-500">
-                                Still missing:{" "}
-                                {availabilityData.unmatched_user_services.join(
-                                  ", ",
-                                )}
+                                Still missing: {unmatchedServices.join(", ")}
                               </p>
                             ) : null}
                           </div>

@@ -166,7 +166,21 @@ log "Also latest  : $([[ ${TAG_LATEST} -eq 1 ]] && echo yes || echo no)"
 if [[ ${DEPLOY_ONLY} -eq 0 ]]; then
   if [[ ${USE_CLOUD_BUILD} -eq 1 ]]; then
     log "Building with Cloud Build: ${FULL_IMAGE}"
-    CMD=(gcloud builds submit --region "${REGION}" --tag "${FULL_IMAGE}" .)
+    # An inline config rather than --tag: the Dockerfile uses RUN --mount cache
+    # mounts, which need BuildKit, and --tag builds without it.
+    BUILD_CONFIG="$(mktemp)"
+    trap 'rm -f "${BUILD_CONFIG}"' EXIT
+    cat > "${BUILD_CONFIG}" <<'CLOUDBUILD'
+steps:
+  - name: 'gcr.io/cloud-builders/docker'
+    env: ['DOCKER_BUILDKIT=1']
+    args: ['build', '-t', '${_IMAGE}', '.']
+images:
+  - '${_IMAGE}'
+options:
+  logging: CLOUD_LOGGING_ONLY
+CLOUDBUILD
+    CMD=(gcloud builds submit --region "${REGION}" --config "${BUILD_CONFIG}" --substitutions "_IMAGE=${FULL_IMAGE}" .)
     if [[ ${DRY_RUN} -eq 1 ]]; then echo "DRY: ${CMD[*]}"; else
       if ! "${CMD[@]}"; then err "Cloud Build failed"; exit 2; fi
     fi

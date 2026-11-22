@@ -210,8 +210,7 @@ swag init -g cmd/api/main.go -o docs --parseDependency --parseInternal
 - `internal/server/handlers_misc.go` - Health, Search
 - `internal/server/handlers_me.go` - User, Services, Notifications
 - `internal/server/handlers_watchlist.go` - Watchlist CRUD + Import
-- `internal/server/handlers_availability.go` - Single availability
-- `internal/server/handlers_availability_batch.go` - Batch availability
+- `internal/server/handlers_availability.go` - Single and batch availability
 
 ### Build Configuration
 

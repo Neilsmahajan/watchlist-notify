@@ -29,7 +29,7 @@ The Watchlist Notify API provides RESTful endpoints for managing personal movie 
 - **Watchlist Operations** - CRUD operations for movies and TV shows
 - **Service Management** - Track streaming service subscriptions
 - **Content Discovery** - Search via TMDb integration
-- **Availability Checking** - Real-time and batch availability queries
+- **Availability** - Stored streaming availability, refreshed daily and embedded in the watchlist
 - **Email Notifications** - Customizable digest emails
 
 ## Authentication
@@ -154,6 +154,7 @@ All errors return a consistent JSON structure:
 | `500` | Internal Server Error | Server-side error                         |
 | `502` | Bad Gateway           | Upstream service (TMDb) error             |
 | `503` | Service Unavailable   | Service temporarily unavailable           |
+| `504` | Gateway Timeout       | TMDb did not answer within 8 seconds      |
 
 ### Error Examples
 
@@ -200,12 +201,15 @@ List endpoints support pagination via query parameters.
   "meta": {
     "limit": 20,
     "offset": 0,
-    "returned": 15,
+    "returned": 20,
     "next_offset": 20,
     "total": 42
   }
 }
 ```
+
+`total` is the number of items matching the filters. `next_offset` is present
+only when there is a further page.
 
 ### Example
 
@@ -225,14 +229,23 @@ GET /api/watchlist?limit=10&offset=20
 GET /health
 ```
 
-Returns database connection status and service health.
+Pings the database.
 
-**Response:**
+**Response:** `200 OK`
 
 ```json
 {
   "status": "ok",
   "message": "It's healthy"
+}
+```
+
+**Response when the database is unreachable:** `503 Service Unavailable`
+
+```json
+{
+  "status": "unavailable",
+  "message": "database unreachable"
 }
 ```
 
@@ -420,17 +433,93 @@ GET /api/watchlist
 - `offset` - Pagination offset (default: 0)
 - `status` - Filter by status: `planned`, `watching`, `finished`
 - `type` - Filter by type: `movie`, `show`
-- `search` - Search in title
-- `sort` - Sort field: `title`, `year`, `added_at`, `-added_at` (prefix `-` for descending)
-- `with_count` - Include total count: `1` or `true`
+- `search` - Case-insensitive match anywhere in the title
+- `service` - Only items streaming on one of these services. Repeat the
+  parameter or separate codes with commas: `service=netflix&service=hulu`,
+  `service=netflix,hulu`
+- `available` - `true`: only items streaming on a service the user has;
+  `false`: only items that are not
+- `sort` - `added_at`, `title`, `year`, `status`, `rating`, `runtime`,
+  `available`; prefix `-` for descending (default `-added_at`). Items without
+  a year, rating or runtime sort last in either direction.
 
 **Examples:**
 
 ```
 GET /api/watchlist?status=planned&type=movie&limit=10
 GET /api/watchlist?search=inception&sort=-year
-GET /api/watchlist?with_count=1
+GET /api/watchlist?available=true&sort=-rating
+GET /api/watchlist?service=netflix,hulu&limit=0
 ```
+
+**Response:**
+
+Each item carries its title metadata and its availability in the user's
+region, read from stored data: the whole list costs two database queries
+however long it is, and no upstream calls.
+
+```json
+{
+  "items": [
+    {
+      "id": "665f1c2e8b3e4a0012345678",
+      "user_id": "665f1b9a8b3e4a0012345600",
+      "title": "Inception",
+      "type": "movie",
+      "year": 2010,
+      "tmdb_id": 27205,
+      "status": "planned",
+      "added_at": "2026-01-04T18:22:10Z",
+      "updated_at": "2026-01-04T18:22:10Z",
+      "poster_path": "/poster.jpg",
+      "runtime": 148,
+      "genres": ["Action", "Science Fiction"],
+      "rating": 8.4,
+      "overview": "A thief who steals corporate secrets...",
+      "availability": {
+        "region": "US",
+        "checked_at": "2026-03-15T06:00:12Z",
+        "link": "https://www.themoviedb.org/movie/27205/watch?locale=US",
+        "providers": [
+          { "code": "netflix", "name": "Netflix", "logo_path": "/logo.jpg", "access": ["subscription"] }
+        ],
+        "elsewhere": [
+          { "code": "max", "name": "HBO Max", "logo_path": "/logo.jpg", "access": ["subscription"] },
+          { "name": "Apple TV Store", "logo_path": "/logo.jpg", "access": ["rent", "buy"] }
+        ]
+      }
+    }
+  ],
+  "meta": {
+    "limit": 20,
+    "offset": 0,
+    "returned": 1,
+    "total": 1,
+    "region": "US",
+    "facets": {
+      "services": { "netflix": 1, "max": 1 },
+      "available": 1,
+      "unavailable": 0,
+      "status": { "planned": 1 }
+    }
+  }
+}
+```
+
+- `availability.providers` - the user's active services streaming the title
+  (`subscription`, `free` or `ads` access).
+- `availability.elsewhere` - every other offer: services the user does not
+  have, and rent or buy. Providers that are not one of the supported services
+  have no `code`.
+- `availability` is `null` for an item without a TMDb ID, and for a title that
+  could not be resolved yet. A title added moments ago is fetched on demand
+  (bounded to about two seconds); otherwise the daily refresh fills it in.
+- `meta.facets` counts items for building filter controls. `type` and `search`
+  narrow every count. `status` counts ignore the `status` filter, so tabs keep
+  their totals; `services`, `available` and `unavailable` respect `status` but
+  ignore the `service` and `available` filters.
+- The `Server-Timing` response header reports `db`, `tmdb` and `total` in
+  milliseconds.
 
 #### Update Watchlist Item
 
@@ -562,10 +651,16 @@ GET /api/availability/{id}
 
 - `id` - TMDb content ID
 
+Availability is stored and refreshed daily by the worker, so this endpoint
+reads from the database. TMDb is called only for a title that is not stored
+yet. `GET /api/watchlist` already embeds the same data for every item; use
+this endpoint for a title that is not on the list, or to re-check one.
+
 **Query Parameters:**
 
 - `type` _(required)_ - `"movie"` or `"tv"`
-- `region` - ISO 3166-1 code (default: user's region or `US`)
+- `region` - ISO 3166-1 code (default: user's region or `US`). A region other
+  than the user's is looked up live and not stored.
 
 **Example:**
 
@@ -587,9 +682,12 @@ GET /api/availability/27205?type=movie&region=US
       "access": ["subscription"]
     }
   ],
-  "unmatched_user_services": ["hulu", "prime-video"]
+  "unmatched_user_services": ["hulu", "prime_video"]
 }
 ```
+
+`providers` lists only the user's active services; it is `[]` when none of
+them has the title, or when TMDb does not know the title.
 
 **Access Types:**
 
@@ -603,7 +701,9 @@ GET /api/availability/27205?type=movie&region=US
 POST /api/availability/batch
 ```
 
-Check availability for multiple items (max 500).
+Check availability for multiple items (max 500), from stored data. Prefer
+`GET /api/watchlist`, which embeds availability for every item on the list.
+Titles that cannot be resolved come back with empty `providers`.
 
 **Request Body:**
 
@@ -796,6 +896,15 @@ await api.patch("/api/me/preferences", {
 - Batch availability endpoint
 - CSV import functionality
 - Digest email notifications
+
+### Unreleased
+
+- `GET /api/watchlist` embeds title metadata and availability, and adds the
+  `service` and `available` filters, more sort keys, `meta.total`,
+  `meta.region`, `meta.facets` and a `Server-Timing` header
+- Availability is stored and refreshed daily instead of fetched per request
+- `GET /health` returns `503` when the database is unreachable
+- CORS is limited to the frontend's origin
 
 ### Upcoming
 

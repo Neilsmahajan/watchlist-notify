@@ -12,10 +12,55 @@ export type WatchlistItem = {
   tags?: string[];
   added_at?: string;
   updated_at?: string;
+  // Title details and availability, attached by GET /api/watchlist.
+  poster_path?: string;
+  runtime?: number;
+  genres?: string[];
+  rating?: number;
+  overview?: string;
+  availability?: WatchlistAvailability | null;
+};
+
+// One provider in an item's embedded availability. Providers that are not
+// one of the supported services have no code.
+export type WatchlistAvailabilityProvider = {
+  code?: string;
+  name: string;
+  logo_path?: string;
+  access?: string[];
+};
+
+// Where a title streams in the user's region, as stored by the backend.
+export type WatchlistAvailability = {
+  region: string;
+  checked_at?: string;
+  link?: string;
+  // The user's active services streaming the title.
+  providers?: WatchlistAvailabilityProvider[];
+  // Every other offer: services the user does not have, rent and buy.
+  elsewhere?: WatchlistAvailabilityProvider[];
+};
+
+export type WatchlistFacets = {
+  services?: Record<string, number>;
+  available?: number;
+  unavailable?: number;
+  status?: Record<string, number>;
+};
+
+export type WatchlistMeta = {
+  limit: number;
+  offset: number;
+  returned: number;
+  total: number;
+  next_offset?: number;
+  region?: string;
+  facets?: WatchlistFacets;
 };
 
 export type WatchlistResponse = {
   items?: WatchlistItem[];
+  meta?: WatchlistMeta;
   error?: string;
 };
 
@@ -117,4 +162,44 @@ export const getPrimaryAccess = (
 ): AvailabilityAccess => {
   const [first] = provider.access ?? [];
   return first ?? DEFAULT_AVAILABILITY_ACCESS;
+};
+
+const isStreamingAccess = (value: string): value is AvailabilityAccess =>
+  (AVAILABILITY_ACCESS_ORDER as string[]).includes(value);
+
+// availabilityFromItem reads the availability the backend embedded in a
+// watchlist item, in the shape the availability endpoint returns. It is null
+// for an item whose availability is not known (yet).
+export const availabilityFromItem = (
+  item: WatchlistItem,
+): AvailabilityResponse | null => {
+  const embedded = item.availability;
+  if (!embedded) {
+    return null;
+  }
+  const providers: AvailabilityProvider[] = [];
+  for (const provider of embedded.providers ?? []) {
+    if (!provider?.code) {
+      continue;
+    }
+    providers.push({
+      code: provider.code,
+      name: provider.name,
+      logo_path: provider.logo_path,
+      link: embedded.link,
+      access: (provider.access ?? []).filter(isStreamingAccess),
+    });
+  }
+  return { region: embedded.region, providers };
+};
+
+// availabilityByItemId maps every item to its embedded availability.
+export const availabilityByItemId = (
+  items: WatchlistItem[],
+): Record<string, AvailabilityResponse | null> => {
+  const byId: Record<string, AvailabilityResponse | null> = {};
+  for (const item of items) {
+    byId[item.id] = availabilityFromItem(item);
+  }
+  return byId;
 };

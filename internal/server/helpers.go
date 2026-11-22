@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"net/http"
 	"strconv"
 	"time"
@@ -124,23 +125,19 @@ func validWatchlistType(t string) bool {
 	}
 }
 
-// CalculateNextDigestTime calculates when the next digest should be sent
-// based on the interval, unit, and last sent time. Exported for use by digest worker.
-func CalculateNextDigestTime(interval int, unit string, lastSent *time.Time) time.Time {
-	base := time.Now()
-	if lastSent != nil && !lastSent.IsZero() {
-		base = *lastSent
-	}
+// upstreamLookupBudget is how long a request may spend on one TMDb lookup,
+// retries included. The TMDb client backs off on rate limiting and gateway
+// errors for up to about half a minute, which suits the background worker.
+// A request must answer well inside the server's 30 s write timeout, so the
+// handlers that call TMDb directly put this deadline on the call and report
+// a timeout instead of letting the connection be cut.
+const upstreamLookupBudget = 8 * time.Second
 
-	switch unit {
-	case "days":
-		return base.AddDate(0, 0, interval)
-	case "weeks":
-		return base.AddDate(0, 0, interval*7)
-	case "months":
-		return base.AddDate(0, interval, 0)
-	default:
-		// Fallback to 7 days if unit is unrecognized
-		return base.AddDate(0, 0, 7)
+// lookupContext returns ctx limited to the upstream lookup budget.
+func (s *Server) lookupContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	budget := s.lookupBudget
+	if budget <= 0 {
+		budget = upstreamLookupBudget
 	}
+	return context.WithTimeout(ctx, budget)
 }

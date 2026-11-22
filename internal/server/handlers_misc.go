@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"errors"
 	"log"
 	"net/http"
@@ -15,13 +16,19 @@ import (
 
 // healthHandler godoc
 // @Summary Health check
-// @Description Returns the current health status of the API and database connection
+// @Description Reports whether the API can reach its database. A failed check answers 503 and the process keeps running.
 // @Tags System
 // @Produce json
-// @Success 200 {object} map[string]interface{} "Service health status"
+// @Success 200 {object} map[string]string "Service is healthy"
+// @Failure 503 {object} map[string]string "Database unreachable"
 // @Router /health [get]
 func (s *Server) healthHandler(c *gin.Context) {
-	c.JSON(http.StatusOK, s.db.Health())
+	if err := s.db.Health(c.Request.Context()); err != nil {
+		log.Printf("health: database check failed: %v", err)
+		c.JSON(http.StatusServiceUnavailable, gin.H{"status": "unavailable", "message": "database unreachable"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"status": "ok", "message": "It's healthy"})
 }
 
 // searchHandler proxies a minimal search to TMDb for movies or TV shows.
@@ -43,6 +50,7 @@ func (s *Server) healthHandler(c *gin.Context) {
 // @Failure 401 {object} ErrorResponse "Unauthorized"
 // @Failure 502 {object} ErrorResponse "Upstream TMDb API error"
 // @Failure 503 {object} ErrorResponse "Search service unavailable"
+// @Failure 504 {object} ErrorResponse "Upstream TMDb API timed out"
 // @Router /api/search [get]
 func (s *Server) searchHandler(c *gin.Context) {
 	if s.tmdb == nil {
@@ -109,8 +117,15 @@ func (s *Server) searchHandler(c *gin.Context) {
 		if err != nil && !errors.Is(err, cache.ErrMiss) {
 			log.Printf("cache: search lookup failed: %v", err)
 		}
-		results, pageNow, totalPages, err = s.tmdb.SearchTMDb(c.Request.Context(), q, page, includeAdult, language, region, typ)
+		searchCtx, cancel := s.lookupContext(c.Request.Context())
+		results, pageNow, totalPages, err = s.tmdb.SearchTMDb(searchCtx, q, page, includeAdult, language, region, typ)
+		timedOut := errors.Is(searchCtx.Err(), context.DeadlineExceeded)
+		cancel()
 		if err != nil {
+			if timedOut {
+				jsonError(c, http.StatusGatewayTimeout, "upstream search timed out")
+				return
+			}
 			jsonError(c, http.StatusBadGateway, "upstream search failed")
 			return
 		}

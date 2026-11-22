@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -15,7 +17,7 @@ import (
 )
 
 func (s *service) CreateWatchlistItem(ctx context.Context, item *models.WatchlistItem) error {
-	coll := s.db.Database(databaseName).Collection("watchlist_items")
+	coll := s.db.Database(databaseName).Collection(collWatchlist)
 	if item == nil {
 		return errors.New("item is required")
 	}
@@ -82,7 +84,7 @@ func (s *service) CreateWatchlistItem(ctx context.Context, item *models.Watchlis
 }
 
 func (s *service) ListWatchlistItems(ctx context.Context, opts models.ListWatchlistOptions) ([]*models.WatchlistItem, error) {
-	coll := s.db.Database(databaseName).Collection("watchlist_items")
+	coll := s.db.Database(databaseName).Collection(collWatchlist)
 	var items []*models.WatchlistItem
 	filter := buildWatchlistFilter(opts)
 	sort := resolveWatchlistSort(opts.Sort)
@@ -118,12 +120,6 @@ func (s *service) ListWatchlistItems(ctx context.Context, opts models.ListWatchl
 	return items, nil
 }
 
-func (s *service) CountWatchlistItems(ctx context.Context, opts models.ListWatchlistOptions) (int64, error) {
-	coll := s.db.Database(databaseName).Collection("watchlist_items")
-	filter := buildWatchlistFilter(opts)
-	return coll.CountDocuments(ctx, filter)
-}
-
 func buildWatchlistFilter(opts models.ListWatchlistOptions) bson.M {
 	filter := bson.M{"user_id": opts.UserID}
 	if opts.Status != "" {
@@ -133,7 +129,8 @@ func buildWatchlistFilter(opts models.ListWatchlistOptions) bson.M {
 		filter["type"] = opts.Type
 	}
 	if opts.Search != "" {
-		filter["title"] = bson.M{"$regex": opts.Search, "$options": "i"}
+		// The search term is user input: match it literally, not as a regex.
+		filter["title"] = bson.M{"$regex": regexp.QuoteMeta(opts.Search), "$options": "i"}
 	}
 	return filter
 }
@@ -157,7 +154,7 @@ func resolveWatchlistSort(sortStr string) bson.D {
 }
 
 func (s *service) UpdateWatchlistItem(ctx context.Context, userID, itemID primitive.ObjectID, fields map[string]any) (*models.WatchlistItem, error) {
-	coll := s.db.Database(databaseName).Collection("watchlist_items")
+	coll := s.db.Database(databaseName).Collection(collWatchlist)
 	if len(fields) == 0 {
 		return nil, errors.New("no fields to update")
 	}
@@ -193,7 +190,7 @@ func (s *service) UpdateWatchlistItem(ctx context.Context, userID, itemID primit
 }
 
 func (s *service) DeleteWatchlistItem(ctx context.Context, userID, itemID primitive.ObjectID) error {
-	coll := s.db.Database(databaseName).Collection("watchlist_items")
+	coll := s.db.Database(databaseName).Collection(collWatchlist)
 	res, err := coll.DeleteOne(ctx, bson.M{"_id": itemID, "user_id": userID})
 	if err != nil {
 		return err
@@ -202,4 +199,36 @@ func (s *service) DeleteWatchlistItem(ctx context.Context, userID, itemID primit
 		return ErrWatchlistItemNotFound
 	}
 	return nil
+}
+
+// DistinctWatchlistTitles returns every TMDb title that is on at least one
+// watchlist. Items without a TMDb ID cannot be tracked and are left out.
+func (s *service) DistinctWatchlistTitles(ctx context.Context) ([]models.TitleRef, error) {
+	coll := s.db.Database(databaseName).Collection(collWatchlist)
+	cursor, err := coll.Aggregate(ctx, mongo.Pipeline{
+		{{Key: "$match", Value: bson.M{"tmdb_id": bson.M{"$gt": 0}}}},
+		{{Key: "$group", Value: bson.M{"_id": bson.M{"type": "$type", "tmdb_id": "$tmdb_id"}}}},
+	})
+	if err != nil {
+		return nil, err
+	}
+	var rows []struct {
+		ID struct {
+			Type   string `bson:"type"`
+			TMDbID int    `bson:"tmdb_id"`
+		} `bson:"_id"`
+	}
+	if err := cursor.All(ctx, &rows); err != nil {
+		return nil, err
+	}
+	refs := make([]models.TitleRef, 0, len(rows))
+	for _, row := range rows {
+		mediaType, ok := models.TMDbMediaType(row.ID.Type)
+		if !ok {
+			continue
+		}
+		refs = append(refs, models.TitleRef{MediaType: mediaType, TMDbID: row.ID.TMDbID})
+	}
+	sort.Slice(refs, func(i, j int) bool { return refs[i].Key() < refs[j].Key() })
+	return refs, nil
 }

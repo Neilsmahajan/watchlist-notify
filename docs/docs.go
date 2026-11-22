@@ -30,7 +30,7 @@ const docTemplate = `{
                         "BearerAuth": []
                     }
                 ],
-                "description": "Check availability for multiple movies/TV shows across user's subscribed services in a single request",
+                "description": "Check availability for multiple movies/TV shows across user's subscribed services in a single request. Served from stored availability; prefer GET /api/watchlist, which already embeds availability for every item.",
                 "consumes": [
                     "application/json"
                 ],
@@ -71,8 +71,8 @@ const docTemplate = `{
                             "$ref": "#/definitions/internal_server.ErrorResponse"
                         }
                     },
-                    "503": {
-                        "description": "Availability service unavailable",
+                    "500": {
+                        "description": "Failed to load availability",
                         "schema": {
                             "$ref": "#/definitions/internal_server.ErrorResponse"
                         }
@@ -87,7 +87,7 @@ const docTemplate = `{
                         "BearerAuth": []
                     }
                 ],
-                "description": "Check which of the user's subscribed services have a specific movie or TV show available",
+                "description": "Check which of the user's subscribed services have a specific movie or TV show available. Served from stored availability (refreshed daily); TMDb is called only for a title that is not stored yet.",
                 "produces": [
                     "application/json"
                 ],
@@ -125,8 +125,7 @@ const docTemplate = `{
                     "200": {
                         "description": "Availability details for user's services",
                         "schema": {
-                            "type": "object",
-                            "additionalProperties": true
+                            "$ref": "#/definitions/internal_server.AvailabilityResponse"
                         }
                     },
                     "400": {
@@ -141,6 +140,12 @@ const docTemplate = `{
                             "$ref": "#/definitions/internal_server.ErrorResponse"
                         }
                     },
+                    "500": {
+                        "description": "Failed to load availability",
+                        "schema": {
+                            "$ref": "#/definitions/internal_server.ErrorResponse"
+                        }
+                    },
                     "502": {
                         "description": "Upstream TMDb API error",
                         "schema": {
@@ -149,6 +154,12 @@ const docTemplate = `{
                     },
                     "503": {
                         "description": "Availability service unavailable",
+                        "schema": {
+                            "$ref": "#/definitions/internal_server.ErrorResponse"
+                        }
+                    },
+                    "504": {
+                        "description": "Availability lookup timed out",
                         "schema": {
                             "$ref": "#/definitions/internal_server.ErrorResponse"
                         }
@@ -555,6 +566,12 @@ const docTemplate = `{
                         "schema": {
                             "$ref": "#/definitions/internal_server.ErrorResponse"
                         }
+                    },
+                    "504": {
+                        "description": "Upstream TMDb API timed out",
+                        "schema": {
+                            "$ref": "#/definitions/internal_server.ErrorResponse"
+                        }
                     }
                 }
             }
@@ -566,7 +583,7 @@ const docTemplate = `{
                         "BearerAuth": []
                     }
                 ],
-                "description": "Get all items in the user's watchlist with optional filtering, pagination, and sorting",
+                "description": "Get the user's watchlist with title metadata and streaming availability attached to every item, with optional filtering, sorting and pagination. Availability comes from stored data: the request costs two database queries regardless of list size. The Server-Timing response header reports the database, TMDb and total durations.",
                 "produces": [
                     "application/json"
                 ],
@@ -612,31 +629,45 @@ const docTemplate = `{
                     },
                     {
                         "type": "string",
-                        "description": "Search in title",
+                        "description": "Case-insensitive search in title",
                         "name": "search",
+                        "in": "query"
+                    },
+                    {
+                        "type": "array",
+                        "items": {
+                            "type": "string"
+                        },
+                        "collectionFormat": "multi",
+                        "description": "Keep items streaming on any of these service codes (repeat the parameter or separate with commas)",
+                        "name": "service",
+                        "in": "query"
+                    },
+                    {
+                        "type": "boolean",
+                        "description": "Keep items that are (true) or are not (false) streaming on one of the user's active services",
+                        "name": "available",
                         "in": "query"
                     },
                     {
                         "type": "string",
                         "default": "-added_at",
-                        "description": "Sort field (prefix with - for descending)",
+                        "description": "Sort field (prefix with - for descending): added_at, title, year, status, rating, runtime, available",
                         "name": "sort",
-                        "in": "query"
-                    },
-                    {
-                        "type": "boolean",
-                        "default": false,
-                        "description": "Include total count in response",
-                        "name": "with_count",
                         "in": "query"
                     }
                 ],
                 "responses": {
                     "200": {
-                        "description": "Watchlist items with pagination metadata",
+                        "description": "Watchlist items with pagination metadata and facets",
                         "schema": {
-                            "type": "object",
-                            "additionalProperties": true
+                            "$ref": "#/definitions/internal_server.WatchlistListResponse"
+                        },
+                        "headers": {
+                            "Server-Timing": {
+                                "type": "string",
+                                "description": "db, tmdb and total durations in milliseconds"
+                            }
                         }
                     },
                     "400": {
@@ -960,7 +991,7 @@ const docTemplate = `{
         },
         "/health": {
             "get": {
-                "description": "Returns the current health status of the API and database connection",
+                "description": "Reports whether the API can reach its database. A failed check answers 503 and the process keeps running.",
                 "produces": [
                     "application/json"
                 ],
@@ -970,10 +1001,21 @@ const docTemplate = `{
                 "summary": "Health check",
                 "responses": {
                     "200": {
-                        "description": "Service health status",
+                        "description": "Service is healthy",
                         "schema": {
                             "type": "object",
-                            "additionalProperties": true
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    },
+                    "503": {
+                        "description": "Database unreachable",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
                         }
                     }
                 }
@@ -981,26 +1023,6 @@ const docTemplate = `{
         }
     },
     "definitions": {
-        "github_com_neilsmahajan_watchlist-notify_internal_models.AvailabilityMatch": {
-            "type": "object",
-            "properties": {
-                "available": {
-                    "type": "boolean"
-                },
-                "checked_at": {
-                    "type": "string"
-                },
-                "region": {
-                    "type": "string"
-                },
-                "service_code": {
-                    "type": "string"
-                },
-                "url": {
-                    "type": "string"
-                }
-            }
-        },
         "github_com_neilsmahajan_watchlist-notify_internal_models.DigestSettings": {
             "type": "object",
             "properties": {
@@ -1103,20 +1125,10 @@ const docTemplate = `{
                 "added_at": {
                     "type": "string"
                 },
-                "availability": {
-                    "description": "optional embeded or compute",
-                    "type": "array",
-                    "items": {
-                        "$ref": "#/definitions/github_com_neilsmahajan_watchlist-notify_internal_models.AvailabilityMatch"
-                    }
-                },
                 "id": {
                     "type": "string"
                 },
                 "imdb_id": {
-                    "type": "string"
-                },
-                "last_checked_at": {
                     "type": "string"
                 },
                 "status": {
@@ -1150,6 +1162,152 @@ const docTemplate = `{
                 }
             }
         },
+        "github_com_neilsmahajan_watchlist-notify_internal_watchlist.Availability": {
+            "type": "object",
+            "properties": {
+                "checked_at": {
+                    "type": "string"
+                },
+                "elsewhere": {
+                    "description": "Elsewhere is everything else: services the user does not have, and\nrent or buy offers.",
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/github_com_neilsmahajan_watchlist-notify_internal_watchlist.Provider"
+                    }
+                },
+                "link": {
+                    "description": "Link is TMDb's \"where to watch\" page for the title and region.",
+                    "type": "string"
+                },
+                "providers": {
+                    "description": "Providers are the user's active services that stream the title.",
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/github_com_neilsmahajan_watchlist-notify_internal_watchlist.Provider"
+                    }
+                },
+                "region": {
+                    "type": "string"
+                }
+            }
+        },
+        "github_com_neilsmahajan_watchlist-notify_internal_watchlist.Facets": {
+            "type": "object",
+            "properties": {
+                "available": {
+                    "description": "Available and Unavailable split the same items by whether one of the\nuser's active services streams them.",
+                    "type": "integer"
+                },
+                "services": {
+                    "description": "Services counts items streaming on each service code, for every\nservice that streams at least one.",
+                    "type": "object",
+                    "additionalProperties": {
+                        "type": "integer"
+                    }
+                },
+                "status": {
+                    "description": "Status counts items per status.",
+                    "type": "object",
+                    "additionalProperties": {
+                        "type": "integer"
+                    }
+                },
+                "unavailable": {
+                    "type": "integer"
+                }
+            }
+        },
+        "github_com_neilsmahajan_watchlist-notify_internal_watchlist.Item": {
+            "type": "object",
+            "properties": {
+                "added_at": {
+                    "type": "string"
+                },
+                "availability": {
+                    "description": "Availability is null when the title has no stored snapshot: it is not\nlinked to TMDb, TMDb no longer has it, or the fetch has not succeeded yet.",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/github_com_neilsmahajan_watchlist-notify_internal_watchlist.Availability"
+                        }
+                    ]
+                },
+                "genres": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "id": {
+                    "type": "string"
+                },
+                "imdb_id": {
+                    "type": "string"
+                },
+                "overview": {
+                    "type": "string"
+                },
+                "poster_path": {
+                    "type": "string"
+                },
+                "rating": {
+                    "type": "number"
+                },
+                "runtime": {
+                    "type": "integer"
+                },
+                "status": {
+                    "description": "enum: planned | watching | finished",
+                    "type": "string"
+                },
+                "tags": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "title": {
+                    "type": "string"
+                },
+                "tmdb_id": {
+                    "type": "integer"
+                },
+                "type": {
+                    "description": "enum: movie | show (See constants)",
+                    "type": "string"
+                },
+                "updated_at": {
+                    "type": "string"
+                },
+                "user_id": {
+                    "type": "string"
+                },
+                "year": {
+                    "type": "integer"
+                }
+            }
+        },
+        "github_com_neilsmahajan_watchlist-notify_internal_watchlist.Provider": {
+            "type": "object",
+            "properties": {
+                "access": {
+                    "description": "subscription | free | ads | rent | buy",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "code": {
+                    "description": "Code is our service code; empty for providers we do not model.",
+                    "type": "string"
+                },
+                "logo_path": {
+                    "type": "string"
+                },
+                "name": {
+                    "type": "string"
+                }
+            }
+        },
         "internal_server.AvailabilityItemResponse": {
             "type": "object",
             "properties": {
@@ -1158,6 +1316,26 @@ const docTemplate = `{
                     "items": {
                         "$ref": "#/definitions/internal_server.ProviderInfo"
                     }
+                },
+                "unmatched_user_services": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                }
+            }
+        },
+        "internal_server.AvailabilityResponse": {
+            "type": "object",
+            "properties": {
+                "providers": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/internal_server.ProviderInfo"
+                    }
+                },
+                "region": {
+                    "type": "string"
                 },
                 "unmatched_user_services": {
                     "type": "array",
@@ -1204,7 +1382,6 @@ const docTemplate = `{
                     "type": "string"
                 },
                 "results": {
-                    "description": "key: \"movie_123\" or \"tv_456\"",
                     "type": "object",
                     "additionalProperties": {
                         "$ref": "#/definitions/internal_server.AvailabilityItemResponse"
@@ -1242,6 +1419,49 @@ const docTemplate = `{
                 },
                 "name": {
                     "type": "string"
+                }
+            }
+        },
+        "internal_server.WatchlistListMeta": {
+            "type": "object",
+            "properties": {
+                "facets": {
+                    "$ref": "#/definitions/github_com_neilsmahajan_watchlist-notify_internal_watchlist.Facets"
+                },
+                "limit": {
+                    "type": "integer"
+                },
+                "next_offset": {
+                    "description": "NextOffset is present when there are more items after this page.",
+                    "type": "integer"
+                },
+                "offset": {
+                    "type": "integer"
+                },
+                "region": {
+                    "description": "Region is the region availability is reported for.",
+                    "type": "string"
+                },
+                "returned": {
+                    "type": "integer"
+                },
+                "total": {
+                    "description": "Total is the number of items matching the filters, before paging.",
+                    "type": "integer"
+                }
+            }
+        },
+        "internal_server.WatchlistListResponse": {
+            "type": "object",
+            "properties": {
+                "items": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/github_com_neilsmahajan_watchlist-notify_internal_watchlist.Item"
+                    }
+                },
+                "meta": {
+                    "$ref": "#/definitions/internal_server.WatchlistListMeta"
                 }
             }
         }

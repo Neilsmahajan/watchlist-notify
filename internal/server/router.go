@@ -1,8 +1,11 @@
 package server
 
 import (
+	"log"
 	"net/http"
+	"net/url"
 	"os"
+	"strings"
 
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
@@ -17,14 +20,14 @@ import (
 func (s *Server) RegisterRoutes() http.Handler {
 	r := gin.Default()
 
-	frontendURL := os.Getenv("FRONTEND_URL")
-
-	r.Use(cors.New(cors.Config{
-		AllowOrigins:     []string{"*", frontendURL}, // Add your frontend URL
-		AllowMethods:     []string{"GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"},
-		AllowHeaders:     []string{"Accept", "Authorization", "Content-Type"},
-		AllowCredentials: true, // Enable cookies/auth
-	}))
+	// With no allowed origin there is nothing for the middleware to do, and
+	// browsers already refuse cross-origin reads of responses without CORS
+	// headers.
+	if origins := allowedOrigins(os.Getenv("FRONTEND_URL"), os.Getenv("APP_ENV")); len(origins) > 0 {
+		r.Use(newCORS(origins))
+	} else {
+		log.Println("cors: FRONTEND_URL is not set to a valid origin; cross-origin requests are not allowed")
+	}
 
 	r.GET("/health", s.healthHandler)
 
@@ -53,4 +56,47 @@ func (s *Server) RegisterRoutes() http.Handler {
 	protected.GET("/availability/:id", s.availabilityHandler)
 	protected.POST("/availability/batch", s.batchAvailabilityHandler)
 	return r
+}
+
+// newCORS allows browser calls, with credentials, from exactly origins.
+func newCORS(origins []string) gin.HandlerFunc {
+	return cors.New(cors.Config{
+		AllowOrigins:     origins,
+		AllowMethods:     []string{"GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"},
+		AllowHeaders:     []string{"Accept", "Authorization", "Content-Type"},
+		ExposeHeaders:    []string{"Server-Timing"},
+		AllowCredentials: true,
+	})
+}
+
+// localOrigins are allowed outside production, for the frontend dev server.
+var localOrigins = []string{"http://localhost:3000", "http://127.0.0.1:3000"}
+
+// allowedOrigins returns the origins that may call the API from a browser:
+// the frontend's origin, plus the local dev server unless appEnv is
+// "production". A wildcard is never allowed, because the API accepts
+// credentials.
+func allowedOrigins(frontendURL, appEnv string) []string {
+	var origins []string
+	if origin, ok := originOf(frontendURL); ok {
+		origins = append(origins, origin)
+	}
+	if !strings.EqualFold(strings.TrimSpace(appEnv), "production") {
+		for _, origin := range localOrigins {
+			if len(origins) == 0 || origins[0] != origin {
+				origins = append(origins, origin)
+			}
+		}
+	}
+	return origins
+}
+
+// originOf reduces a URL to its origin (scheme://host[:port]). It rejects
+// anything that is not an absolute http(s) URL.
+func originOf(raw string) (string, bool) {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
+		return "", false
+	}
+	return u.Scheme + "://" + u.Host, true
 }

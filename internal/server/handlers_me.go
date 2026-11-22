@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/neilsmahajan/watchlist-notify/internal/digest"
 	"github.com/neilsmahajan/watchlist-notify/internal/models"
 )
 
@@ -137,7 +138,7 @@ func (s *Server) updateUserPreferencesHandler(c *gin.Context) {
 				unit = newUnit
 			}
 
-			nextTime := CalculateNextDigestTime(interval, unit, user.Preferences.Digest.LastSentAt)
+			nextTime := digest.NextSendTime(interval, unit, user.Preferences.Digest.LastSentAt, time.Now())
 			updates["preferences.digest.next_scheduled_at"] = nextTime
 		}
 	} else if _, hasInterval := updates["preferences.digest.interval"]; hasInterval || updates["preferences.digest.interval_unit"] != nil {
@@ -153,7 +154,7 @@ func (s *Server) updateUserPreferencesHandler(c *gin.Context) {
 				unit = newUnit
 			}
 
-			nextTime := CalculateNextDigestTime(interval, unit, user.Preferences.Digest.LastSentAt)
+			nextTime := digest.NextSendTime(interval, unit, user.Preferences.Digest.LastSentAt, time.Now())
 			updates["preferences.digest.next_scheduled_at"] = nextTime
 		}
 	}

@@ -64,9 +64,7 @@ func TestNew(t *testing.T) {
 func TestHealth(t *testing.T) {
 	srv := New()
 
-	stats := srv.Health()
-
-	if stats["message"] != "It's healthy" {
-		t.Fatalf("expected message to be 'It's healthy', got %s", stats["message"])
+	if err := srv.Health(context.Background()); err != nil {
+		t.Fatalf("expected a healthy database, got %v", err)
 	}
 }

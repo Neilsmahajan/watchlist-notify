@@ -8,18 +8,27 @@ import (
 	"time"
 
 	_ "github.com/joho/godotenv/autoload"
+	"github.com/neilsmahajan/watchlist-notify/internal/availability"
 	"github.com/neilsmahajan/watchlist-notify/internal/cache"
 	"github.com/neilsmahajan/watchlist-notify/internal/database"
 	"github.com/neilsmahajan/watchlist-notify/internal/notifications"
 	"github.com/neilsmahajan/watchlist-notify/internal/providers/tmdb"
+	"github.com/neilsmahajan/watchlist-notify/internal/watchlist"
 )
 
 type Server struct {
-	port                int
-	db                  database.Service
-	cache               cache.Service
-	tmdb                *tmdb.Client
+	port  int
+	db    database.Service
+	cache cache.Service // TMDb search results
+	tmdb  *tmdb.Client  // nil without TMDB_API_KEY: search and import are off
+	// refresher fetches and stores availability for titles that have none yet.
+	refresher *availability.Refresher
+	// lister builds the watchlist view served by GET /api/watchlist.
+	lister              *watchlist.Lister
+	defaultRegion       string
 	notificationsSender *notifications.Sender
+	// lookupBudget overrides upstreamLookupBudget; tests shorten it.
+	lookupBudget time.Duration
 }
 
 const (
@@ -50,11 +59,24 @@ func NewServer() *http.Server {
 		notificationsSender = nil
 	}
 
+	db := database.New()
+	// A nil *tmdb.Client must stay a nil interface, or the refresher would
+	// think it has a client.
+	var fetcher availability.Fetcher
+	if tmdbClient != nil {
+		fetcher = tmdbClient
+	}
+	defaultRegion := database.DefaultRegion()
+	refresher := availability.NewRefresher(fetcher, db, nil)
+
 	NewServer := &Server{
 		port:                port,
-		db:                  database.New(),
+		db:                  db,
 		cache:               cache.New(),
 		tmdb:                tmdbClient,
+		refresher:           refresher,
+		lister:              watchlist.NewLister(db, refresher, defaultRegion),
+		defaultRegion:       defaultRegion,
 		notificationsSender: notificationsSender,
 	}
 
