@@ -129,17 +129,27 @@ type Entry struct {
 // List is the result of FetchList.
 type List struct {
 	SourceID string
-	// Entries are the titles that were read, in list order.
+	// Entries are the titles that were read, in list order, each once.
 	Entries []Entry
 	// Total is the number of entries IMDb says the list has.
 	Total int
 	// Other counts entries that were read and are not titles (a list can
 	// hold people, for one). They count towards Total.
 	Other int
+	// Repeated counts title entries whose ID had already been read.
+	Repeated int
 	// Complete reports that the whole list was read: every page arrived, the
 	// last one said there were no more, IMDb gave the same Total throughout,
-	// every entry could be understood, and titles plus other entries add up
-	// to Total. Absence from a list that is not Complete proves nothing.
+	// every entry could be understood, no title came twice, and the distinct
+	// titles plus the other entries add up to Total. Absence from a list that
+	// is not Complete proves nothing.
+	//
+	// A repeated title makes the fetch incomplete because it is what two
+	// overlapping pages look like: [A, B] then [B, D] of a list of four adds
+	// up to four entries although C was never read. A list that really does
+	// hold a title twice is therefore never Complete, and the sync never
+	// removes anything for it. That is the safe side of a case that cannot be
+	// told apart from a paging fault.
 	Complete bool
 }
 
@@ -237,6 +247,8 @@ func (c *Client) FetchList(ctx context.Context, sourceID string) (List, error) {
 		cursor       string
 		unreadable   int
 		totalChanged bool
+		seenCursors  = map[string]bool{}
+		seenTitles   = map[string]bool{}
 	)
 	for page := 1; ; page++ {
 		if page > c.maxPages {
@@ -256,7 +268,10 @@ func (c *Client) FetchList(ctx context.Context, sourceID string) (List, error) {
 		for _, edge := range items.Edges {
 			node := edge.Node.entry()
 			switch {
+			case node != nil && ValidTitleID(node.ID) && seenTitles[node.ID]:
+				list.Repeated++
 			case node != nil && ValidTitleID(node.ID):
+				seenTitles[node.ID] = true
 				list.Entries = append(list.Entries, Entry{
 					IMDbID:   node.ID,
 					Title:    node.TitleText.Text,
@@ -273,14 +288,18 @@ func (c *Client) FetchList(ctx context.Context, sourceID string) (List, error) {
 		if !items.PageInfo.HasNextPage {
 			break
 		}
+		// A cursor that was handed out before, not only the one just used,
+		// means the pages go round in a circle.
 		next := items.PageInfo.EndCursor
-		if next == "" || next == cursor {
+		if next == "" || seenCursors[next] {
 			return list, errors.New("imdb: paging did not advance")
 		}
+		seenCursors[next] = true
 		cursor = next
 	}
 
-	list.Complete = !totalChanged && unreadable == 0 && len(list.Entries)+list.Other == list.Total
+	list.Complete = !totalChanged && unreadable == 0 && list.Repeated == 0 &&
+		len(list.Entries)+list.Other == list.Total
 	return list, nil
 }
 

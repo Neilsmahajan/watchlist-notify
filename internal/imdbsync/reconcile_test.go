@@ -835,6 +835,15 @@ func TestSyncListStatus(t *testing.T) {
 			wantItems:  2, wantTotal: 5,
 		},
 		{
+			// What the client reports for overlapping pages and for a list
+			// that holds a title twice: never complete, so never pruned.
+			name:       "a title read twice",
+			list:       imdb.List{Entries: entries(matrix, inceptn), Total: 3, Repeated: 1},
+			wantStatus: models.IMDbStatusPartial,
+			wantError:  "a title is on the IMDb list twice, so titles taken off it are not removed here; remove the duplicate on IMDb",
+			wantItems:  2, wantTotal: 2,
+		},
+		{
 			name:       "a title could not be looked up",
 			list:       completeList(matrix, inceptn),
 			tmdbErr:    inceptn,

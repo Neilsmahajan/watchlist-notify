@@ -305,6 +305,7 @@ func TestFetchListCompleteness(t *testing.T) {
 		pages        []response
 		wantEntries  int
 		wantOther    int
+		wantRepeated int
 		wantComplete bool
 	}{
 		{
@@ -376,6 +377,50 @@ func TestFetchListCompleteness(t *testing.T) {
 			wantEntries:  3,
 			wantComplete: false,
 		},
+		{
+			// Two pages that overlap: four entries arrive for a list of four,
+			// and tt0000003 was never read.
+			name: "overlapping pages that add up to the total",
+			pages: []response{
+				listPage(4, "cursor-1", title("tt0000001"), title("tt0000002")),
+				listPage(4, "", title("tt0000002"), title("tt0000004")),
+			},
+			wantEntries:  3,
+			wantRepeated: 1,
+			wantComplete: false,
+		},
+		{
+			// Every title arrived, and one of them twice: the pages are not a
+			// clean walk over the list, so nothing is concluded from them.
+			name: "a repeat although the distinct titles add up",
+			pages: []response{
+				listPage(3, "cursor-1", title("tt0000001"), title("tt0000002")),
+				listPage(3, "", title("tt0000002"), title("tt0000003")),
+			},
+			wantEntries:  3,
+			wantRepeated: 1,
+			wantComplete: false,
+		},
+		{
+			// Indistinguishable from an overlap, so it is treated the same.
+			name:         "a list that holds a title twice",
+			pages:        []response{listPage(3, "", title("tt0000001"), title("tt0000002"), title("tt0000001"))},
+			wantEntries:  2,
+			wantRepeated: 1,
+			wantComplete: false,
+		},
+		{
+			// The repeat hides a title even when a person fills the count.
+			name: "a repeat next to entries that are not titles",
+			pages: []response{
+				listPage(4, "cursor-1", title("tt0000001"), person),
+				listPage(4, "", title("tt0000001"), title("tt0000002")),
+			},
+			wantEntries:  2,
+			wantOther:    1,
+			wantRepeated: 1,
+			wantComplete: false,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -385,9 +430,9 @@ func TestFetchListCompleteness(t *testing.T) {
 			if err != nil {
 				t.Fatalf("FetchList: %v", err)
 			}
-			if len(list.Entries) != tt.wantEntries || list.Other != tt.wantOther || list.Complete != tt.wantComplete {
-				t.Errorf("entries = %d, other = %d, complete = %v; want %d, %d, %v",
-					len(list.Entries), list.Other, list.Complete, tt.wantEntries, tt.wantOther, tt.wantComplete)
+			if len(list.Entries) != tt.wantEntries || list.Other != tt.wantOther || list.Repeated != tt.wantRepeated || list.Complete != tt.wantComplete {
+				t.Errorf("entries = %d, other = %d, repeated = %d, complete = %v; want %d, %d, %d, %v",
+					len(list.Entries), list.Other, list.Repeated, list.Complete, tt.wantEntries, tt.wantOther, tt.wantRepeated, tt.wantComplete)
 			}
 		})
 	}
@@ -571,6 +616,12 @@ func TestFetchListStopsWhenPagingDoesNotAdvance(t *testing.T) {
 		"the same cursor twice": {
 			listPage(4, "cursor-1", title("tt0000001")),
 			listPage(4, "cursor-1", title("tt0000002")),
+		},
+		"a cursor from two pages back": {
+			listPage(6, "cursor-1", title("tt0000001")),
+			listPage(6, "cursor-2", title("tt0000002")),
+			listPage(6, "cursor-1", title("tt0000003")),
+			listPage(6, "", title("tt0000004"), title("tt0000005"), title("tt0000006")),
 		},
 		"more pages promised without a cursor": {
 			{body: `{"data":{"list":{"items":{"total":4,"pageInfo":{"hasNextPage":true,"endCursor":""},"edges":[]}}}}`},

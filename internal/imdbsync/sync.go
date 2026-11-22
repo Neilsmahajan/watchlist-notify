@@ -18,6 +18,7 @@ const (
 	msgNotFound   = "IMDb list not found or not public"
 	msgUnreached  = "IMDb could not be reached"
 	msgPartList   = "only part of the IMDb list could be read"
+	msgRepeated   = "a title is on the IMDb list twice, so titles taken off it are not removed here; remove the duplicate on IMDb"
 	msgNotApplied = "the list was read but the watchlist could not be fully updated"
 )
 
@@ -96,11 +97,15 @@ func (r *Reconciler) SyncList(ctx context.Context, req SyncRequest) SyncResult {
 
 	// Total is the number of titles on the list as IMDb reports it, which is
 	// more than was read when the fetch was partial.
-	state.Total = max(req.List.Total-req.List.Other, res.Total)
+	state.Total = max(req.List.Total-req.List.Other-req.List.Repeated, res.Total)
 	state.Added = res.Added
 	state.Removed = res.Removed
 	state.Unmatched = res.Unmatched
 	switch {
+	case !complete && req.FetchErr == nil && req.List.Repeated > 0:
+		// The client cannot tell a title listed twice from two pages that
+		// overlap, so it never calls such a list complete (see imdb.List).
+		state.LastStatus, state.LastError = models.IMDbStatusPartial, msgRepeated
 	case !complete:
 		state.LastStatus, state.LastError = models.IMDbStatusPartial, msgPartList
 	case err != nil:
