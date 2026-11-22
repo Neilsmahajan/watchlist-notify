@@ -24,13 +24,7 @@ func (s *Server) RegisterRoutes() http.Handler {
 	// browsers already refuse cross-origin reads of responses without CORS
 	// headers.
 	if origins := allowedOrigins(os.Getenv("FRONTEND_URL"), os.Getenv("APP_ENV")); len(origins) > 0 {
-		r.Use(cors.New(cors.Config{
-			AllowOrigins:     origins,
-			AllowMethods:     []string{"GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"},
-			AllowHeaders:     []string{"Accept", "Authorization", "Content-Type"},
-			ExposeHeaders:    []string{"Server-Timing"},
-			AllowCredentials: true,
-		}))
+		r.Use(newCORS(origins))
 	} else {
 		log.Println("cors: FRONTEND_URL is not set to a valid origin; cross-origin requests are not allowed")
 	}
@@ -62,6 +56,17 @@ func (s *Server) RegisterRoutes() http.Handler {
 	protected.GET("/availability/:id", s.availabilityHandler)
 	protected.POST("/availability/batch", s.batchAvailabilityHandler)
 	return r
+}
+
+// newCORS allows browser calls, with credentials, from exactly origins.
+func newCORS(origins []string) gin.HandlerFunc {
+	return cors.New(cors.Config{
+		AllowOrigins:     origins,
+		AllowMethods:     []string{"GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"},
+		AllowHeaders:     []string{"Accept", "Authorization", "Content-Type"},
+		ExposeHeaders:    []string{"Server-Timing"},
+		AllowCredentials: true,
+	})
 }
 
 // localOrigins are allowed outside production, for the frontend dev server.
