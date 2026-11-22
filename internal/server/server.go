@@ -27,6 +27,8 @@ type Server struct {
 	lister              *watchlist.Lister
 	defaultRegion       string
 	notificationsSender *notifications.Sender
+	// lookupBudget overrides upstreamLookupBudget; tests shorten it.
+	lookupBudget time.Duration
 }
 
 const (

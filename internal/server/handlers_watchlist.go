@@ -632,6 +632,10 @@ func (s *Server) lookupTMDbByIMDb(ctx context.Context, imdbID string, cache map[
 	if cached, seen := cache[imdbID]; seen {
 		return cached, nil
 	}
+	// Bounded per row, so one rate-limited lookup cannot hold the import for
+	// the length of the client's whole retry schedule.
+	ctx, cancel := s.lookupContext(ctx)
+	defer cancel()
 	res, err := s.tmdb.FindByExternalID(ctx, imdbID, tmdb.ExternalSourceIMDbID)
 	if err != nil {
 		return nil, err

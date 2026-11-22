@@ -126,6 +126,18 @@ func (s *Server) snapshotsFor(ctx context.Context, user *models.User, refs []mod
 	return snapshots, nil
 }
 
+// storedSnapshot reads one title's snapshot from the store with a short
+// deadline of its own. It is the fallback for a lookup that ran out of time.
+func (s *Server) storedSnapshot(ctx context.Context, ref models.TitleRef, region string) (models.RegionSnapshot, bool) {
+	ctx, cancel := context.WithTimeout(ctx, time.Second)
+	defer cancel()
+	titles, err := s.db.GetTitles(ctx, []string{ref.Key()}, []string{region})
+	if err != nil {
+		return models.RegionSnapshot{}, false
+	}
+	return titles[ref.Key()].Snapshot(region)
+}
+
 // providerInfos converts a user's view of a snapshot into the response shape
 // these endpoints have always had.
 func providerInfos(av *watchlist.Availability) []ProviderInfo {
@@ -157,6 +169,7 @@ func providerInfos(av *watchlist.Availability) []ProviderInfo {
 // @Failure 500 {object} ErrorResponse "Failed to load availability"
 // @Failure 502 {object} ErrorResponse "Upstream TMDb API error"
 // @Failure 503 {object} ErrorResponse "Availability service unavailable"
+// @Failure 504 {object} ErrorResponse "Availability lookup timed out"
 // @Router /api/availability/{id} [get]
 func (s *Server) availabilityHandler(c *gin.Context) {
 	user, ok := s.getUser(c)
@@ -175,11 +188,19 @@ func (s *Server) availabilityHandler(c *gin.Context) {
 	}
 	region := s.resolveRegion(c, user)
 	ref := models.TitleRef{MediaType: typ, TMDbID: id}
-	ctx := c.Request.Context()
 	active := user.ActiveServiceCodes()
+
+	// One deadline for the whole lookup: the store read and, for a title that
+	// is not stored, the TMDb fetch with its retries.
+	ctx, cancel := s.lookupContext(c.Request.Context())
+	defer cancel()
 
 	titles, err := s.db.GetTitles(ctx, []string{ref.Key()}, []string{region})
 	if err != nil {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			jsonError(c, http.StatusGatewayTimeout, "availability lookup timed out")
+			return
+		}
 		jsonError(c, http.StatusInternalServerError, "failed to load availability")
 		return
 	}
@@ -191,7 +212,8 @@ func (s *Server) availabilityHandler(c *gin.Context) {
 			jsonError(c, http.StatusServiceUnavailable, "availability unavailable")
 			return
 		}
-		if s.regionIsStored(user, region) {
+		stored := s.regionIsStored(user, region)
+		if stored {
 			var res availability.Result
 			if res, err = s.refresher.Refresh(ctx, ref, title, []string{region}); err == nil {
 				snap, found = res.Title.Snapshot(region)
@@ -199,7 +221,21 @@ func (s *Server) availabilityHandler(c *gin.Context) {
 		} else if snap, err = s.refresher.Peek(ctx, ref, region); err == nil {
 			found = true
 		}
-		if err != nil && !errors.Is(err, availability.ErrTitleNotFound) {
+		switch {
+		case err == nil || errors.Is(err, availability.ErrTitleNotFound):
+		case errors.Is(ctx.Err(), context.DeadlineExceeded):
+			// Out of time. The title may have been stored meanwhile, by
+			// another request or by this one's own write; answer from the
+			// store if so, and say it timed out if not.
+			if stored {
+				snap, found = s.storedSnapshot(c.Request.Context(), ref, region)
+			}
+			if !found {
+				log.Printf("availability: lookup timed out for %s", ref.Key())
+				jsonError(c, http.StatusGatewayTimeout, "availability lookup timed out")
+				return
+			}
+		default:
 			log.Printf("availability: lookup failed for %s: %v", ref.Key(), err)
 			jsonError(c, http.StatusBadGateway, "upstream providers failed")
 			return

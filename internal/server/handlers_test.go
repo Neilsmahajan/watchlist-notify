@@ -32,9 +32,24 @@ type fakeTMDb struct {
 	titles map[string]*tmdb.TitleDetails
 	err    error
 	calls  int
+	// hang, when set, runs and then blocks the lookup until its context
+	// ends, the way a rate-limited TMDb keeps the client backing off.
+	hang func()
 }
 
-func (f *fakeTMDb) GetTitle(_ context.Context, mediaType string, id int) (*tmdb.TitleDetails, error) {
+func (f *fakeTMDb) GetTitle(ctx context.Context, mediaType string, id int) (*tmdb.TitleDetails, error) {
+	f.mu.Lock()
+	hang := f.hang
+	f.mu.Unlock()
+	if hang != nil {
+		hang()
+		<-ctx.Done()
+		f.mu.Lock()
+		f.calls++
+		f.mu.Unlock()
+		return nil, ctx.Err()
+	}
+
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls++
@@ -68,6 +83,9 @@ type harness struct {
 	tmdb   *fakeTMDb
 	user   *models.User
 	router *gin.Engine
+	// lookupBudget shortens the upstream lookup deadline for routers built
+	// after it is set.
+	lookupBudget time.Duration
 }
 
 func newHarness(t *testing.T) *harness {
@@ -99,6 +117,7 @@ func (h *harness) newRouter(fetcher availability.Fetcher) *gin.Engine {
 		refresher:     refresher,
 		lister:        watchlist.NewLister(h.store, refresher, "US"),
 		defaultRegion: "US",
+		lookupBudget:  h.lookupBudget,
 	}
 	r := gin.New()
 	r.GET("/health", s.healthHandler)
@@ -534,6 +553,79 @@ func TestAvailabilityErrors(t *testing.T) {
 		h.store.Err = errors.New("database down")
 		h.get("/api/availability/603?type=movie", http.StatusInternalServerError)
 	})
+}
+
+// A rate-limited TMDb keeps the client backing off for longer than the
+// server's write timeout. The handler has to answer inside a deadline of its
+// own instead of holding the connection until it is cut.
+func TestAvailabilityLookupHasADeadline(t *testing.T) {
+	slow := func(t *testing.T) *harness {
+		h := newHarness(t)
+		h.lookupBudget = 50 * time.Millisecond
+		h.router = h.newRouter(h.tmdb)
+		h.tmdb.hang = func() {}
+		return h
+	}
+	// timed runs a request against a hanging TMDb and fails if the handler
+	// waited for anything like the client's full retry schedule.
+	timed := func(t *testing.T, h *harness, target string, wantStatus int) map[string]any {
+		t.Helper()
+		start := time.Now()
+		body := h.get(target, wantStatus)
+		if elapsed := time.Since(start); elapsed > 3*time.Second {
+			t.Errorf("the request took %v, want it cut off at the lookup deadline", elapsed)
+		}
+		return body
+	}
+
+	t.Run("nothing stored", func(t *testing.T) {
+		h := slow(t)
+		body := timed(t, h, "/api/availability/603?type=movie", http.StatusGatewayTimeout)
+		if body["error"] != "availability lookup timed out" {
+			t.Errorf("body = %v", body)
+		}
+		if h.store.Title("movie:603") != nil {
+			t.Error("a lookup that timed out stored something")
+		}
+	})
+
+	t.Run("a region that is not stored", func(t *testing.T) {
+		h := slow(t)
+		timed(t, h, "/api/availability/603?type=movie&region=ca", http.StatusGatewayTimeout)
+	})
+
+	t.Run("stored by someone else meanwhile", func(t *testing.T) {
+		h := slow(t)
+		h.tmdb.hang = func() { h.putTitle("movie:603", offer(8, "Netflix", models.AccessSubscription)) }
+
+		body := timed(t, h, "/api/availability/603?type=movie", http.StatusOK)
+		if providers := body["providers"].([]any); len(providers) != 1 || providers[0].(map[string]any)["code"] != "netflix" {
+			t.Errorf("providers = %v, want what the store holds", body["providers"])
+		}
+	})
+
+	t.Run("a stored title never waits on TMDb", func(t *testing.T) {
+		h := slow(t)
+		h.seed()
+		timed(t, h, "/api/availability/603?type=movie", http.StatusOK)
+		if h.tmdb.calls != 0 {
+			t.Errorf("a stored title cost %d TMDb calls", h.tmdb.calls)
+		}
+	})
+}
+
+// Adding an item fetches its availability on a best-effort budget; a TMDb
+// that never answers must not hold the response.
+func TestCreateWatchlistItemDoesNotWaitOnASlowTMDb(t *testing.T) {
+	h := newHarness(t)
+	h.tmdb.hang = func() {}
+
+	start := time.Now()
+	h.post("/api/watchlist", `{"title":"The Matrix","type":"movie","tmdb_id":603}`, http.StatusCreated)
+
+	if elapsed := time.Since(start); elapsed > createEnsureBudget+2*time.Second {
+		t.Errorf("the request took %v, want it bounded by the %v fetch budget", elapsed, createEnsureBudget)
+	}
 }
 
 func TestBatchAvailability(t *testing.T) {

@@ -154,6 +154,7 @@ All errors return a consistent JSON structure:
 | `500` | Internal Server Error | Server-side error                         |
 | `502` | Bad Gateway           | Upstream service (TMDb) error             |
 | `503` | Service Unavailable   | Service temporarily unavailable           |
+| `504` | Gateway Timeout       | TMDb did not answer within 8 seconds      |
 
 ### Error Examples
 

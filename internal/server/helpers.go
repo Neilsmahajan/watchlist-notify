@@ -1,8 +1,10 @@
 package server
 
 import (
+	"context"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/neilsmahajan/watchlist-notify/internal/models"
@@ -121,4 +123,21 @@ func validWatchlistType(t string) bool {
 	default:
 		return false
 	}
+}
+
+// upstreamLookupBudget is how long a request may spend on one TMDb lookup,
+// retries included. The TMDb client backs off on rate limiting and gateway
+// errors for up to about half a minute, which suits the background worker.
+// A request must answer well inside the server's 30 s write timeout, so the
+// handlers that call TMDb directly put this deadline on the call and report
+// a timeout instead of letting the connection be cut.
+const upstreamLookupBudget = 8 * time.Second
+
+// lookupContext returns ctx limited to the upstream lookup budget.
+func (s *Server) lookupContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	budget := s.lookupBudget
+	if budget <= 0 {
+		budget = upstreamLookupBudget
+	}
+	return context.WithTimeout(ctx, budget)
 }

@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"errors"
 	"log"
 	"net/http"
@@ -49,6 +50,7 @@ func (s *Server) healthHandler(c *gin.Context) {
 // @Failure 401 {object} ErrorResponse "Unauthorized"
 // @Failure 502 {object} ErrorResponse "Upstream TMDb API error"
 // @Failure 503 {object} ErrorResponse "Search service unavailable"
+// @Failure 504 {object} ErrorResponse "Upstream TMDb API timed out"
 // @Router /api/search [get]
 func (s *Server) searchHandler(c *gin.Context) {
 	if s.tmdb == nil {
@@ -115,8 +117,15 @@ func (s *Server) searchHandler(c *gin.Context) {
 		if err != nil && !errors.Is(err, cache.ErrMiss) {
 			log.Printf("cache: search lookup failed: %v", err)
 		}
-		results, pageNow, totalPages, err = s.tmdb.SearchTMDb(c.Request.Context(), q, page, includeAdult, language, region, typ)
+		searchCtx, cancel := s.lookupContext(c.Request.Context())
+		results, pageNow, totalPages, err = s.tmdb.SearchTMDb(searchCtx, q, page, includeAdult, language, region, typ)
+		timedOut := errors.Is(searchCtx.Err(), context.DeadlineExceeded)
+		cancel()
 		if err != nil {
+			if timedOut {
+				jsonError(c, http.StatusGatewayTimeout, "upstream search timed out")
+				return
+			}
 			jsonError(c, http.StatusBadGateway, "upstream search failed")
 			return
 		}

@@ -157,6 +157,12 @@ const docTemplate = `{
                         "schema": {
                             "$ref": "#/definitions/internal_server.ErrorResponse"
                         }
+                    },
+                    "504": {
+                        "description": "Availability lookup timed out",
+                        "schema": {
+                            "$ref": "#/definitions/internal_server.ErrorResponse"
+                        }
                     }
                 }
             }
@@ -557,6 +563,12 @@ const docTemplate = `{
                     },
                     "503": {
                         "description": "Search service unavailable",
+                        "schema": {
+                            "$ref": "#/definitions/internal_server.ErrorResponse"
+                        }
+                    },
+                    "504": {
+                        "description": "Upstream TMDb API timed out",
                         "schema": {
                             "$ref": "#/definitions/internal_server.ErrorResponse"
                         }
