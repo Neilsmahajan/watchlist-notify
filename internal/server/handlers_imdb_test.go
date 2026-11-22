@@ -68,10 +68,14 @@ func (f *fakeIMDbLists) put(sourceID string, ids ...string) {
 // fakeFinder is TMDb's find-by-IMDb-ID. Every "tt00NNNNN" below 9000000
 // resolves to movie NNNNN unless told otherwise; the rest are unknown.
 type fakeFinder struct {
-	mu      sync.Mutex
-	errs    map[string]error
-	calls   []string
-	delay   time.Duration
+	mu    sync.Mutex
+	errs  map[string]error
+	calls []string
+	delay time.Duration
+	// hang holds IDs TMDb never answers for: the lookup lasts until its
+	// context ends. It makes "ran out of time" tests independent of how
+	// fast the machine is.
+	hang    map[string]bool
 	active  int
 	maxSeen int
 }
@@ -81,7 +85,7 @@ func (f *fakeFinder) FindByExternalID(ctx context.Context, id, _ string) (*tmdb.
 	f.calls = append(f.calls, id)
 	f.active++
 	f.maxSeen = max(f.maxSeen, f.active)
-	delay, err := f.delay, f.errs[id]
+	delay, err, hang := f.delay, f.errs[id], f.hang[id]
 	f.mu.Unlock()
 	defer func() {
 		f.mu.Lock()
@@ -89,6 +93,10 @@ func (f *fakeFinder) FindByExternalID(ctx context.Context, id, _ string) (*tmdb.
 		f.mu.Unlock()
 	}()
 
+	if hang {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
 	if delay > 0 {
 		select {
 		case <-time.After(delay):
@@ -514,15 +522,19 @@ func TestLinkIMDbConcurrentRequestsFetchOnce(t *testing.T) {
 func TestLinkIMDbOverBudgetLinksAndReportsPartial(t *testing.T) {
 	h := newSyncHarness(t)
 	h.lists.put(testList, ttIDs(1000, 64)...)
-	h.finder.delay = 30 * time.Millisecond
-	h.server.resolveBudget = 75 * time.Millisecond
+	// TMDb answers for the first 16 titles and not at all for the other 48.
+	h.finder.hang = map[string]bool{}
+	for _, id := range ttIDs(1016, 48) {
+		h.finder.hang[id] = true
+	}
+	h.server.resolveBudget = 300 * time.Millisecond
 
 	body := h.link(testList, http.StatusOK)
 
 	result := body["result"].(map[string]any)
 	added := int(result["added"].(float64))
-	if result["complete"] != false || result["total"] != 64.0 || added == 0 || added == 64 {
-		t.Errorf("result = %v; want an incomplete result with some of the 64 added", result)
+	if result["complete"] != false || result["total"] != 64.0 || added != 16 {
+		t.Errorf("result = %v; want an incomplete result with 16 of the 64 added", result)
 	}
 	sync := body["imdb_sync"].(map[string]any)
 	if sync["last_status"] != "partial" || !strings.Contains(sync["last_error"].(string), "could not be looked up yet") {
@@ -538,7 +550,7 @@ func TestLinkIMDbOverBudgetLinksAndReportsPartial(t *testing.T) {
 
 	// The next run over the same list (the worker's, a day later) only has
 	// the rest to look up.
-	h.finder.delay = 0
+	h.finder.hang = nil
 	h.finder.reset()
 	h.server.resolveBudget = 0
 	h.rewind(2 * time.Minute)

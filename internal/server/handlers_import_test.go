@@ -83,9 +83,7 @@ func TestImportNewRowsCostOneConcurrentLookupEach(t *testing.T) {
 	h.finder.delay = 20 * time.Millisecond
 	fresh := ttIDs(2000, 40)
 
-	start := time.Now()
 	body := h.json(h.upload(csvOf(append(ttIDs(100, 30), fresh...)...)), http.StatusOK)
-	elapsed := time.Since(start)
 
 	if body["imported"] != 40.0 || body["duplicates"] != 30.0 || len(rowErrors(body)) != 0 {
 		t.Errorf("response = %v, want 40 imported and 30 duplicates", body)
@@ -95,9 +93,6 @@ func TestImportNewRowsCostOneConcurrentLookupEach(t *testing.T) {
 	}
 	if h.finder.maxSeen < 2 || h.finder.maxSeen > 8 {
 		t.Errorf("at most %d lookups were in flight, want more than one and no more than 8", h.finder.maxSeen)
-	}
-	if serial := 40 * h.finder.delay; elapsed > serial*3/4 {
-		t.Errorf("the import took %v; one lookup at a time would take %v", elapsed, serial)
 	}
 	if n := h.store.Queries["CreateWatchlistItems"]; n != 1 {
 		t.Errorf("rows were inserted in %d batches, want 1", n)
@@ -118,14 +113,18 @@ func TestImportNewRowsCostOneConcurrentLookupEach(t *testing.T) {
 func TestImportDeadlineLeavesAConsistentPartialResult(t *testing.T) {
 	h := newSyncHarness(t)
 	ids := ttIDs(3000, 64)
-	h.finder.delay = 30 * time.Millisecond
-	h.server.resolveBudget = 75 * time.Millisecond
+	// TMDb answers for the first 16 rows and not at all for the other 48.
+	h.finder.hang = map[string]bool{}
+	for _, id := range ids[16:] {
+		h.finder.hang[id] = true
+	}
+	h.server.resolveBudget = 300 * time.Millisecond
 
 	body := h.json(h.upload(csvOf(ids...)), http.StatusOK)
 
 	imported := int(body["imported"].(float64))
-	if imported == 0 || imported == 64 || body["duplicates"] != 0.0 {
-		t.Fatalf("response = %v, want part of the file imported", body)
+	if imported != 16 || body["duplicates"] != 0.0 {
+		t.Fatalf("response = %v, want the 16 rows TMDb answered for imported", body)
 	}
 	if stored := len(h.items()); stored != imported {
 		t.Errorf("%d items stored but %d reported imported", stored, imported)
@@ -142,7 +141,7 @@ func TestImportDeadlineLeavesAConsistentPartialResult(t *testing.T) {
 	}
 
 	// Uploading the same file again continues where it stopped.
-	h.finder.delay = 0
+	h.finder.hang = nil
 	h.finder.reset()
 	h.server.resolveBudget = 0
 	again := h.json(h.upload(csvOf(ids...)), http.StatusOK)
