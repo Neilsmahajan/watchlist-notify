@@ -30,7 +30,7 @@ go run ./cmd/worker -tasks refresh,digest
 | `TMDB_API_KEY`          | refresh | required                      | TMDb key.                                                                                            |
 | `REFRESH_MIN_AGE`       | refresh | `20h`                         | Titles checked more recently than this are left alone. `0` refetches everything on every run.         |
 | `DIGEST_MODE`           | digest  | `dry-run`                     | `dry-run` logs what would be sent and writes nothing. `send` delivers through Postmark.              |
-| `DIGEST_ALLOWLIST`      | digest  | empty                         | Comma-separated account emails that may be emailed in `send` mode. Empty means nobody.               |
+| `DIGEST_ALLOWLIST`      | digest  | empty                         | Comma-separated addresses that may be emailed in `send` mode. Empty means nobody.                    |
 | `POSTMARK_SERVER_TOKEN` | digest  | required in `send` mode       | Postmark server token. Not read in a dry run.                                                        |
 | `FRONTEND_URL`          | digest  | `https://watchlistnotify.com` | Site the email links to (`/watchlist`, `/settings`).                                                 |
 
@@ -85,9 +85,13 @@ is looked at again on the next run. One email lists at most 20 titles.
 - **Dry run is the default.** Without `DIGEST_MODE=send` the task builds no
   mail client, sends nothing and writes nothing. It logs how many users it
   would email and how many titles.
-- **Sending needs an allowlist.** In `send` mode only accounts whose email is
-  in `DIGEST_ALLOWLIST` are emailed. Due users outside it are counted
-  (`not_allowlisted`) and skipped, schedule untouched.
+- **Sending needs an allowlist.** In `send` mode a user is emailed only if
+  their account email is in `DIGEST_ALLOWLIST` **and** the address the digest
+  is delivered to is the account email or is itself in the list. The second
+  half matters because the notification address is a preference the user
+  types in and nobody verifies; an allowlisted account cannot aim its digest
+  at an address that is not listed. Due users who fail either check are
+  counted (`not_allowlisted`) and skipped, schedule untouched.
 - **At most one email per user per interval.** Before sending, the run moves
   the user's schedule forward with a compare-and-set on the values it read.
   Of two overlapping runs, one wins that write and only the winner sends.

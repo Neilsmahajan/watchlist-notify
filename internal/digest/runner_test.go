@@ -128,7 +128,7 @@ func TestRunNeverEmailsUsersOffTheAllowlist(t *testing.T) {
 	allowlists := map[string]string{
 		"empty allowlist":      "",
 		"someone else":         "other@example.com",
-		"notification address": "alerts@example.com", // the allowlist holds account emails
+		"notification address": "alerts@example.com", // the account must be listed too
 	}
 	for name, allowlist := range allowlists {
 		t.Run(name, func(t *testing.T) {
@@ -190,18 +190,52 @@ func TestRunSendsToAllowlistedUsers(t *testing.T) {
 	}
 }
 
-func TestRunSendsToTheNotificationAddress(t *testing.T) {
-	w := newWorld(t)
+// notifyAt points the world's user at a separate notification address.
+func (w *world) notifyAt(address string) {
 	u := w.store.User(w.user.ID)
-	u.Preferences.NotifyEmail = "alerts@example.com"
+	u.Preferences.NotifyEmail = address
 	u.Preferences.UseAccountEmail = false
 	w.store.AddUser(u)
+}
 
-	// Allowlisting is by account; delivery follows the user's preference.
-	w.run(w.runner(ModeSend, "viewer@example.com"))
+func TestRunSendsToAnAllowlistedNotificationAddress(t *testing.T) {
+	w := newWorld(t)
+	w.notifyAt(" Alerts@Example.com ")
 
-	if len(w.mailer.sent) != 1 || w.mailer.sent[0].to != "alerts@example.com" {
+	// The account and the address the mail goes to are both listed.
+	sum := w.run(w.runner(ModeSend, "viewer@example.com,alerts@example.com"))
+
+	if sum.Sent != 1 {
+		t.Errorf("summary = %+v", sum)
+	}
+	if len(w.mailer.sent) != 1 || w.mailer.sent[0].to != "Alerts@Example.com" {
 		t.Errorf("sent = %+v, want one email to the notification address", w.mailer.sent)
+	}
+}
+
+// The notification address is typed in by the user and never verified. An
+// allowlisted account must not be able to aim its digest at an address that
+// is not on the list.
+func TestRunNeverEmailsANotificationAddressOffTheAllowlist(t *testing.T) {
+	w := newWorld(t)
+	w.notifyAt("stranger@example.net")
+
+	sum := w.run(w.runner(ModeSend, "viewer@example.com"))
+
+	if sum.NotAllowlisted != 1 || sum.Sent != 0 || sum.Titles != 1 {
+		t.Errorf("summary = %+v, want the user counted as not allowlisted", sum)
+	}
+	if len(w.mailer.sent) != 0 {
+		t.Errorf("sent %d emails to an address that is not allowlisted", len(w.mailer.sent))
+	}
+	w.assertUntouched()
+
+	// Switching back to the account email makes the same user deliverable.
+	u := w.store.User(w.user.ID)
+	u.Preferences.UseAccountEmail = true
+	w.store.AddUser(u)
+	if sum := w.run(w.runner(ModeSend, "viewer@example.com")); sum.Sent != 1 || w.mailer.sent[0].to != "viewer@example.com" {
+		t.Errorf("summary = %+v, sent = %+v; want one email to the account address", sum, w.mailer.sent)
 	}
 }
 
@@ -425,6 +459,48 @@ func TestGateRefusesEveryoneItShould(t *testing.T) {
 	mailer := &fakeMailer{}
 	if err := (gate{mode: ModeSend, allow: allow, mailer: mailer}).send(user, email); err != nil || len(mailer.sent) != 1 {
 		t.Errorf("an allowlisted send in send mode failed: %v", err)
+	}
+}
+
+func TestGateChecksTheAddressItDeliversTo(t *testing.T) {
+	email := Email{Subject: "s", HTML: "h"}
+	const account = "viewer@example.com"
+
+	tests := []struct {
+		name            string
+		notifyEmail     string
+		useAccountEmail bool
+		allowlist       string
+		wantTo          string // empty: refused
+	}{
+		{"account email", "", true, account, account},
+		{"notification address not listed", "stranger@example.net", false, account, ""},
+		{"notification address listed, account not", "alerts@example.com", false, "alerts@example.com", ""},
+		{"both listed", "alerts@example.com", false, account + ",alerts@example.com", "alerts@example.com"},
+		{"notification address is the account email", " Viewer@Example.com ", false, account, "Viewer@Example.com"},
+		{"notification address set but not in use", "stranger@example.net", true, account, account},
+		{"blank notification address falls back to the account", "  ", false, account, account},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			user := subscriber(models.ServiceNetflix)
+			user.Preferences.NotifyEmail = tt.notifyEmail
+			user.Preferences.UseAccountEmail = tt.useAccountEmail
+			mailer := &fakeMailer{}
+			g := gate{mode: ModeSend, allow: ParseAllowlist(tt.allowlist), mailer: mailer}
+
+			err := g.send(user, email)
+
+			if tt.wantTo == "" {
+				if !errors.Is(err, errNotPermitted) || len(mailer.sent) != 0 || g.permits(user) {
+					t.Errorf("send() = %v with %d emails, permits = %v; want it refused", err, len(mailer.sent), g.permits(user))
+				}
+				return
+			}
+			if err != nil || len(mailer.sent) != 1 || mailer.sent[0].to != tt.wantTo || !g.permits(user) {
+				t.Errorf("send() = %v, sent = %+v; want one email to %q", err, mailer.sent, tt.wantTo)
+			}
+		})
 	}
 }
 

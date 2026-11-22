@@ -37,8 +37,8 @@ func ParseMode(value string) (Mode, error) {
 	}
 }
 
-// Allowlist is the set of account emails the digest job may email. The zero
-// value allows no one.
+// Allowlist is the set of email addresses the digest job may deliver to. The
+// zero value allows no one.
 type Allowlist map[string]struct{}
 
 // ParseAllowlist reads a comma-separated DIGEST_ALLOWLIST value.
@@ -52,9 +52,9 @@ func ParseAllowlist(value string) Allowlist {
 	return allow
 }
 
-// Allows reports whether the account with this email may be emailed.
-func (a Allowlist) Allows(accountEmail string) bool {
-	email := normalizeEmail(accountEmail)
+// Allows reports whether this address is on the list.
+func (a Allowlist) Allows(address string) bool {
+	email := normalizeEmail(address)
 	if email == "" {
 		return false
 	}
@@ -105,15 +105,40 @@ type gate struct {
 	mailer Mailer
 }
 
-func (g gate) permits(user *models.User) bool {
-	return g.mode == ModeSend && g.mailer != nil && g.allow.Allows(user.Email)
+// recipient returns the address this user's digest goes to and whether the
+// gate lets mail through to it. Two things must hold:
+//
+//   - the account's email is on the allowlist, and
+//   - the address the mail would actually be delivered to is the account's
+//     email, or is itself on the allowlist.
+//
+// The second matters because the delivery address is a preference the user
+// types in and nobody verifies. Without it, an allowlisted account could point
+// its digest at any address at all.
+func (g gate) recipient(user *models.User) (string, bool) {
+	if g.mode != ModeSend || g.mailer == nil || !g.allow.Allows(user.Email) {
+		return "", false
+	}
+	to := user.DigestRecipient()
+	if normalizeEmail(to) != normalizeEmail(user.Email) && !g.allow.Allows(to) {
+		return "", false
+	}
+	return to, true
 }
 
+func (g gate) permits(user *models.User) bool {
+	_, ok := g.recipient(user)
+	return ok
+}
+
+// send delivers to the address recipient approved, never to one resolved a
+// second time.
 func (g gate) send(user *models.User, email Email) error {
-	if !g.permits(user) {
+	to, ok := g.recipient(user)
+	if !ok {
 		return errNotPermitted
 	}
-	return g.mailer.SendEmail(user.DigestRecipient(), email.Subject, email.HTML)
+	return g.mailer.SendEmail(to, email.Subject, email.HTML)
 }
 
 // Runner sends digests to the users who are due.
@@ -164,8 +189,8 @@ type Summary struct {
 	NothingNew int
 	// DryRun: would have been emailed, but the job ran in dry-run mode.
 	DryRun int
-	// NotAllowlisted: would have been emailed, but their account is not on
-	// the allowlist.
+	// NotAllowlisted: would have been emailed, but their account, or the
+	// address their digest goes to, is not on the allowlist.
 	NotAllowlisted int
 	// Sent: emailed, schedule advanced.
 	Sent int
