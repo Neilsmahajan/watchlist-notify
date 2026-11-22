@@ -9,6 +9,7 @@ import {
   UserService,
   WatchlistItem,
   WatchlistResponse,
+  availabilityByItemId,
   getPrimaryAccess,
 } from "@/lib/watchlist/types";
 import { redirectToLogin } from "@/lib/auth/client";
@@ -87,7 +88,9 @@ export function useWatchlistInsights(
   const [availabilityMap, setAvailabilityMap] = useState<
     Record<string, AvailabilityResponse | null>
   >({});
-  const [availabilityLoading, setAvailabilityLoading] = useState(false);
+  // Availability arrives with the watchlist, so it is never loading on its
+  // own. The flag stays in the result for the components that read it.
+  const availabilityLoading = false;
 
   const isMountedRef = useRef(false);
 
@@ -105,164 +108,6 @@ export function useWatchlistInsights(
       isMountedRef.current = false;
     };
   }, []);
-
-  const loadAvailability = useCallback(
-    async (items: WatchlistItem[]) => {
-      if (!enabled) {
-        return;
-      }
-
-      if (!items.length) {
-        if (isMountedRef.current) {
-          setAvailabilityMap({});
-        }
-        return;
-      }
-
-      const itemsToFetch = items.filter((entry) => entry.tmdb_id);
-
-      if (!itemsToFetch.length) {
-        if (isMountedRef.current) {
-          setAvailabilityMap((prev) => {
-            const next = { ...prev };
-            for (const entry of items) {
-              next[entry.id] = null;
-            }
-            return next;
-          });
-        }
-        return;
-      }
-
-      if (isMountedRef.current) {
-        setAvailabilityLoading(true);
-      }
-
-      try {
-        // Use batch endpoint for better performance
-        const batchRequest = {
-          items: itemsToFetch.map((item) => ({
-            id: item.tmdb_id,
-            type: item.type === "show" ? "tv" : "movie",
-          })),
-        };
-
-        const response = await fetch("/api/availability/batch", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify(batchRequest),
-        });
-
-        if (handleUnauthorized(response)) {
-          return;
-        }
-
-        if (!response.ok) {
-          console.error("Batch availability fetch failed", response.status);
-          // Fall back to setting null for all items
-          if (isMountedRef.current) {
-            setAvailabilityMap((prev) => {
-              const next: Record<string, AvailabilityResponse | null> = {
-                ...prev,
-              };
-              for (const entry of items) {
-                next[entry.id] = null;
-              }
-              return next;
-            });
-          }
-          return;
-        }
-
-        const data = (await response.json().catch(() => null)) as {
-          region?: string;
-          results?: Record<
-            string,
-            {
-              providers: Array<{
-                code: string;
-                name: string;
-                logo_path?: string;
-                link?: string;
-                access: string[];
-              }>;
-              unmatched_user_services: string[];
-            }
-          >;
-        } | null;
-
-        if (!isMountedRef.current) {
-          return;
-        }
-
-        if (!data || !data.results) {
-          setAvailabilityMap((prev) => {
-            const next: Record<string, AvailabilityResponse | null> = {
-              ...prev,
-            };
-            for (const entry of items) {
-              next[entry.id] = null;
-            }
-            return next;
-          });
-          return;
-        }
-
-        // Map batch results back to watchlist items
-        setAvailabilityMap((prev) => {
-          const next: Record<string, AvailabilityResponse | null> = {
-            ...prev,
-          };
-
-          for (const item of itemsToFetch) {
-            const typeParam = item.type === "show" ? "tv" : "movie";
-            const key = `${typeParam}_${item.tmdb_id}`;
-            const result = data.results![key];
-
-            if (result) {
-              next[item.id] = {
-                region: data.region || "US",
-                providers: (result.providers || []) as AvailabilityProvider[],
-                unmatched_user_services: result.unmatched_user_services || [],
-              };
-            } else {
-              next[item.id] = null;
-            }
-          }
-
-          // Set null for items without tmdb_id
-          for (const entry of items) {
-            if (!entry.tmdb_id && !(entry.id in next)) {
-              next[entry.id] = null;
-            }
-          }
-
-          return next;
-        });
-      } catch (err) {
-        console.error("Batch availability fetch error", err);
-        if (!isMountedRef.current) {
-          return;
-        }
-        setAvailabilityMap((prev) => {
-          const next: Record<string, AvailabilityResponse | null> = {
-            ...prev,
-          };
-          for (const entry of items) {
-            next[entry.id] = null;
-          }
-          return next;
-        });
-      } finally {
-        if (isMountedRef.current) {
-          setAvailabilityLoading(false);
-        }
-      }
-    },
-    [enabled, handleUnauthorized],
-  );
 
   const loadWatchlist = useCallback(
     async (options: { signal?: AbortSignal; silent?: boolean } = {}) => {
@@ -305,7 +150,7 @@ export function useWatchlistInsights(
 
         const fetchedItems = Array.isArray(data?.items) ? data.items : [];
         setWatchlist(fetchedItems);
-        void loadAvailability(fetchedItems);
+        setAvailabilityMap(availabilityByItemId(fetchedItems));
       } catch (err) {
         if ((err as { name?: string }).name === "AbortError") {
           return;
@@ -322,7 +167,7 @@ export function useWatchlistInsights(
         }
       }
     },
-    [enabled, handleUnauthorized, loadAvailability],
+    [enabled, handleUnauthorized],
   );
 
   const loadServices = useCallback(
@@ -389,7 +234,6 @@ export function useWatchlistInsights(
       setWatchlistError(null);
       setWatchlistLoading(false);
       setAvailabilityMap({});
-      setAvailabilityLoading(false);
       setServices([]);
       setServicesError(null);
       setServicesLoading(false);
