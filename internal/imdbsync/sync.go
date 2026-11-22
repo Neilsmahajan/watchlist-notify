@@ -36,10 +36,10 @@ type SyncRequest struct {
 	FetchErr error
 	// At is when this run claimed its fetch of the list (the time given to
 	// ClaimIMDbAttempt); zero means now. It becomes last_attempt_at, the
-	// linked_at of a new link and the time on any mark the run makes. Claims
-	// of one user's list are at least a minute apart, so a link made while a
-	// worker run is under way is always newer than that run's marks, and
-	// those marks are stale for it (see Input.LinkedAt).
+	// time on any mark the run makes and, for a link request, linked_at.
+	// Claims of one user's list are at least a minute apart, so a link made
+	// while a worker run is under way is always newer than that run's marks,
+	// and those marks are stale for it (see Input.LinkedAt).
 	At time.Time
 	// LookupBudget and DryRun are passed on to the reconcile.
 	LookupBudget time.Duration
@@ -81,6 +81,15 @@ func (r *Reconciler) SyncList(ctx context.Context, req SyncRequest) SyncResult {
 		// Same list as before: keep when it was linked, when it last synced
 		// and the counts of the last run that read it.
 		state = *req.Previous
+	}
+	if req.Mode == ModeLink {
+		// Every link request starts a link of its own, also one for the
+		// list that is linked already. linked_at is what tells one link
+		// from the next: a worker run that began under the earlier link
+		// stamps its marks with a time before this one, which makes them
+		// stale, and its status update no longer matches. Had linked_at
+		// been kept, such a mark would count as this link's first strike.
+		state.LinkedAt = at
 	}
 	state.LastAttemptAt = &at
 

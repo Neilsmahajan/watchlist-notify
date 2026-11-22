@@ -872,24 +872,76 @@ func TestRelinkIMDbIsNotStoredWhenOldStrikesCannotBeCleared(t *testing.T) {
 	}
 }
 
-func TestLinkIMDbAgainToTheSameListKeepsLinkedAt(t *testing.T) {
+// Linking the list that is linked already is a link of its own, with a
+// linked_at of its own. A worker run that began before it stamps its marks
+// with a time before it, so a mark of that run that lands after the re-link
+// is stale: the next sync clears it instead of counting it as a first strike.
+func TestLinkIMDbAgainToTheSameListStartsAFreshLink(t *testing.T) {
 	h := newSyncHarness(t)
-	h.lists.put(testList, ttID(1))
+	h.lists.put(testList, ttID(1), ttID(2))
 	h.link(testList, http.StatusOK)
+	// That was two days ago.
 	user := h.store.User(h.user.ID)
-	first := user.IMDbSync.LinkedAt.Add(-time.Hour)
+	first := user.IMDbSync.LinkedAt.Add(-48 * time.Hour)
 	user.IMDbSync.LinkedAt = first
 	h.store.AddUser(user)
-	h.rewind(time.Hour)
-	h.lists.put(testList, ttID(1), ttID(2))
+	h.rewind(48 * time.Hour)
 
+	// Yesterday's sync found the second title gone, and marked it.
+	h.lists.put(testList, ttID(1))
+	yesterday := time.Now().Add(-24 * time.Hour)
+	h.dailySync(yesterday)
+	gone := h.items()[ttID(2)]
+	if gone == nil || gone.IMDbMissingSince == nil {
+		t.Fatalf("item taken off the list = %+v, want it marked by the sync", gone)
+	}
+
+	beforeRelink := time.Now()
 	body := h.link(testList, http.StatusOK)
 
-	if got := h.store.User(h.user.ID).IMDbSync.LinkedAt; !got.Equal(first) {
-		t.Errorf("linked_at moved from %v to %v", first, got)
+	linkedAt := h.store.User(h.user.ID).IMDbSync.LinkedAt
+	if linkedAt.Before(beforeRelink.Truncate(time.Millisecond)) {
+		t.Fatalf("linked_at = %v after linking the same list again, want the time of that request (not before %v; it was %v)",
+			linkedAt, beforeRelink, first)
 	}
-	if result := body["result"].(map[string]any); result["added"] != 1.0 || result["existing"] != 1.0 {
+	if result := body["result"].(map[string]any); result["added"] != 0.0 || result["existing"] != 1.0 {
 		t.Errorf("result = %v", result)
+	}
+	if item := h.items()[ttID(2)]; item == nil || item.IMDbMissingSince != nil {
+		t.Fatalf("after the re-link the item is %+v, want it kept and its mark cleared", item)
+	}
+
+	// A worker run that was under way since before the re-link gets to its
+	// mark only now. The mark carries the time that run began.
+	stamp := beforeRelink.Add(-2 * time.Minute)
+	if done, err := h.store.MarkWatchlistItemIMDbMissing(context.Background(), h.user.ID, gone.ID, stamp); err != nil || !done {
+		t.Fatalf("the late mark: done = %v, err = %v", done, err)
+	}
+
+	// The next day's sync: the title is still not on the list, and the mark
+	// is more than MinMissingAge old.
+	h.dailySync(time.Now().Add(24 * time.Hour))
+
+	item := h.items()[ttID(2)]
+	if item == nil {
+		t.Fatal("the item was removed on a strike made before the re-link")
+	}
+	if item.IMDbMissingSince != nil {
+		t.Errorf("the stale mark is still on the item: %v", item.IMDbMissingSince)
+	}
+	if state := h.store.User(h.user.ID).IMDbSync; state == nil || state.Removed != 0 || !state.LinkedAt.Equal(linkedAt) {
+		t.Errorf("link after the sync = %+v; want nothing removed and linked_at left at %v by the worker", state, linkedAt)
+	}
+
+	// A day later it is a first strike of this link, and the day after that
+	// the item goes: two strikes, both of them this link's.
+	h.dailySync(time.Now().Add(48 * time.Hour))
+	if item := h.items()[ttID(2)]; item == nil || item.IMDbMissingSince == nil {
+		t.Fatalf("after the second sync of the new link the item is %+v, want it marked", item)
+	}
+	h.dailySync(time.Now().Add(72 * time.Hour))
+	if item := h.items()[ttID(2)]; item != nil {
+		t.Errorf("after two strikes of the new link the item is still there: %+v", item)
 	}
 }
 
