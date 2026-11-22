@@ -413,7 +413,7 @@ func TestIMDbTaskDoesNotResurrectALinkRemovedMidSync(t *testing.T) {
 	w := newIMDbWorld(t)
 	alice := w.link("alice@example.com", "ur0000001", 30*time.Hour, tt1)
 	w.lists.onFetch = func(string) {
-		if err := w.store.UnlinkIMDb(context.Background(), alice); err != nil {
+		if _, err := w.store.UnlinkIMDb(context.Background(), alice, w.now, 0); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -432,7 +432,7 @@ func TestIMDbTaskDoesNotResurrectALinkRemovedMidSync(t *testing.T) {
 func TestIMDbTaskDoesNotPruneWhenTheLinkChangesMidSync(t *testing.T) {
 	changes := map[string]func(w *imdbWorld, user primitive.ObjectID) *models.IMDbSync{
 		"unlinked": func(w *imdbWorld, user primitive.ObjectID) *models.IMDbSync {
-			if err := w.store.UnlinkIMDb(context.Background(), user); err != nil {
+			if _, err := w.store.UnlinkIMDb(context.Background(), user, w.now, 0); err != nil {
 				w.t.Fatal(err)
 			}
 			return nil
@@ -512,6 +512,73 @@ func TestIMDbTaskStampsMarksWithTheClaim(t *testing.T) {
 	}
 	if got := w.store.User(alice).IMDbSync.LastAttemptAt; got == nil || !got.Equal(claimed) {
 		t.Errorf("last attempt at %v, want the time of the claim %v", got, claimed)
+	}
+}
+
+// A run may adopt, mark and remove for 45 seconds from its claim. When the
+// fetch alone takes longer, what is new on the list is still added; the rest
+// is left for the next sync, and the status and the logs say so.
+func TestIMDbTaskOutOfTimeAddsAndLeavesTheRestForTheNextSync(t *testing.T) {
+	w := newIMDbWorld(t)
+	alice := w.link("alice@example.com", "ur0000001", 30*time.Hour, tt1, tt2)
+	if err := w.run(); err != nil {
+		t.Fatal(err)
+	}
+	w.lists.lists["ur0000001"] = []string{tt1, tt3} // tt2 is gone, tt3 is new
+	w.nextDay()
+	w.lists.onFetch = func(string) { w.now = w.now.Add(imdbsync.OwnershipLease) } // a very slow fetch
+
+	if err := w.run(); err != nil {
+		t.Fatal(err)
+	}
+
+	w.wantSummary(`"partial":1`, `"synced":0`, `"out_of_time":1`, `"added":1`, `"marked_missing":0`)
+	if !strings.Contains(w.logs.String(), `"lease_expired":true`) {
+		t.Errorf("the user's log line does not say the lease was over:\n%s", w.logs.String())
+	}
+	if got := w.itemIDs(alice); !reflect.DeepEqual(got, []string{tt1, tt2, tt3}) {
+		t.Errorf("watchlist = %v; want the new title added", got)
+	}
+	for _, item := range w.store.Items(alice) {
+		if item.IMDbMissingSince != nil {
+			t.Errorf("%s was marked after the lease was over", item.IMDbID)
+		}
+	}
+	state := w.store.User(alice).IMDbSync
+	if state.LastStatus != models.IMDbStatusPartial || state.LastError != "the sync ran out of time; it continues at the next sync" {
+		t.Errorf("status = %q, last error = %q", state.LastStatus, state.LastError)
+	}
+
+	// The next day's fetch is quick, and the run does what was left.
+	w.lists.onFetch = nil
+	w.nextDay()
+	if err := w.run(); err != nil {
+		t.Fatal(err)
+	}
+	w.wantSummary(`"synced":1`, `"out_of_time":0`, `"marked_missing":1`)
+	if state := w.store.User(alice).IMDbSync; state.LastStatus != models.IMDbStatusOK || state.LastError != "" {
+		t.Errorf("next day: status = %q, last error = %q", state.LastStatus, state.LastError)
+	}
+}
+
+// The pause between two users comes before the second user's claim. The
+// claim starts that user's 45 seconds; a pause after it would spend them.
+func TestIMDbTaskPausesBeforeItClaims(t *testing.T) {
+	w := newIMDbWorld(t)
+	alice := w.link("alice@example.com", "ur0000001", 30*time.Hour, tt1)
+	bob := w.link("bob@example.com", "ur0000002", 25*time.Hour, tt2)
+	started := w.now
+	w.task.Sleep = func(_ context.Context, d time.Duration) { w.now = w.now.Add(d) }
+
+	if err := w.run(); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := w.store.User(alice).IMDbAttemptAt; got == nil || !got.Equal(started) {
+		t.Errorf("the first user was claimed at %v, want %v: nothing to wait for", got, started)
+	}
+	if got, want := w.store.User(bob).IMDbAttemptAt, started.Add(imdbPause); got == nil || !got.Equal(want) {
+		t.Errorf("the second user was claimed at %v, want %v, after the pause", got, want)
 	}
 }
 

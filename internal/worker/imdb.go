@@ -144,6 +144,7 @@ type imdbSummary struct {
 	notFound      int // list gone or made private
 	skipped       int // another run got there first, or this one was cancelled
 	deferred      int // left for the next run because this one ran out of time
+	outOfTime     int // of the partial ones: lease over before every item was adopted, marked or removed
 	added         int
 	adopted       int // imported items the sync took over
 	removed       int
@@ -200,8 +201,15 @@ func (t *IMDbTask) Run(ctx context.Context) error {
 			sum.deferred++
 			continue
 		}
+		// Before the claim, not after it: the claim starts the 45 seconds
+		// in which this user's items may be adopted, marked and removed
+		// (imdbsync.OwnershipLease), and waiting must not use them up.
+		if fetched {
+			sleep(ctx, imdbPause)
+		}
 		// The time of the claim is the time of this user's run: it goes on
-		// the status and on every mark the run makes (imdbsync.SyncRequest.At).
+		// the status and on every mark the run makes, and the run's lease on
+		// the user's items is counted from it (imdbsync.SyncRequest.At).
 		claimedAt := now()
 		if !t.DryRun {
 			// The claim is what enforces one fetch a day: it succeeds only
@@ -218,9 +226,6 @@ func (t *IMDbTask) Run(ctx context.Context) error {
 				continue
 			}
 		}
-		if fetched {
-			sleep(ctx, imdbPause)
-		}
 		fetched = true
 
 		out := t.syncUser(ctx, user, claimedAt)
@@ -233,6 +238,9 @@ func (t *IMDbTask) Run(ctx context.Context) error {
 			sum.notFound++
 		default:
 			sum.failed++
+		}
+		if out.Result.LeaseExpired {
+			sum.outOfTime++
 		}
 		sum.added += out.Result.Added
 		sum.adopted += out.Result.Adopted
@@ -259,6 +267,7 @@ func (t *IMDbTask) Run(ctx context.Context) error {
 			"removed", out.Result.Removed,
 			"prune", string(out.Result.Plan.Prune),
 			"link_changed", out.Result.LinkChanged,
+			"lease_expired", out.Result.LeaseExpired,
 			"tmdb_lookups", out.Result.Lookups,
 		)
 	}
@@ -274,6 +283,7 @@ func (t *IMDbTask) Run(ctx context.Context) error {
 		"not_found", sum.notFound,
 		"skipped", sum.skipped,
 		"deferred", sum.deferred,
+		"out_of_time", sum.outOfTime,
 		"added", sum.added,
 		"adopted", sum.adopted,
 		"removed", sum.removed,
@@ -290,11 +300,14 @@ func (t *IMDbTask) Run(ctx context.Context) error {
 // syncUser fetches one user's list, reconciles it and stores the outcome on
 // the user. It never returns an error: what went wrong is in the state.
 //
-// The user may unlink, or link afresh, at any moment while this runs (the
-// fetch alone can take most of a minute). The run is for the link in user,
-// as it was when the users were listed. The reconcile reads the link again
-// just before it marks or removes anything and does neither if it is not
-// that link any more, and the outcome is stored only on that link.
+// The run is for the link in user, as it was when the users were listed. The
+// user may have unlinked, or linked afresh, between that and the claim; from
+// the claim on they cannot for a minute (imdbsync.LinkLockout), and the run
+// adopts, marks and removes only in the first 45 seconds of that minute
+// (imdbsync.OwnershipLease), after reading the link again. A fetch and
+// lookups that together take longer than that leave those three for the
+// next run; what is new on the list is added all the same. The outcome is
+// stored only on the link the run was for.
 func (t *IMDbTask) syncUser(ctx context.Context, user *models.User, claimedAt time.Time) imdbsync.SyncResult {
 	logger := t.Logger
 	if logger == nil {
@@ -327,6 +340,9 @@ func (t *IMDbTask) syncUser(ctx context.Context, user *models.User, claimedAt ti
 	}
 	if out.Result.LinkChanged {
 		logger.Info("imdb: link changed during sync; nothing adopted, marked or removed", "user_id", user.ID.Hex())
+	}
+	if out.Result.LeaseExpired {
+		logger.Info("imdb: out of time; adopting, marking and removing continue at the next sync", "user_id", user.ID.Hex())
 	}
 	if t.DryRun {
 		return out

@@ -13,6 +13,7 @@ import (
 	"net/http/httptest"
 	"reflect"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -27,6 +28,7 @@ import (
 	"github.com/neilsmahajan/watchlist-notify/internal/storetest"
 	"github.com/neilsmahajan/watchlist-notify/internal/watchlist"
 	"github.com/neilsmahajan/watchlist-notify/internal/worker"
+	"go.mongodb.org/mongo-driver/bson/primitive"
 )
 
 // --- fakes for the IMDb link and the CSV import ---
@@ -965,6 +967,7 @@ func TestUnlinkIMDbClearsEveryStrike(t *testing.T) {
 	h := newSyncHarness(t)
 	h.lists.put(testList, ttID(1))
 	h.link(testList, http.StatusOK)
+	h.rewind(time.Hour)
 	h.markedLeftover()
 
 	rec := h.request(http.MethodDelete, "/api/me/imdb", "")
@@ -992,6 +995,7 @@ func TestUnlinkIMDbKeepsTheLinkWhenStrikesCannotBeCleared(t *testing.T) {
 	h := newSyncHarness(t)
 	h.lists.put(testList, ttID(1))
 	h.link(testList, http.StatusOK)
+	h.rewind(time.Hour)
 	h.markedLeftover()
 	h.store.Fail["ClearIMDbMissingMarks"] = errors.New("mongo: connection reset")
 
@@ -1017,10 +1021,120 @@ func TestUnlinkIMDbKeepsTheLinkWhenStrikesCannotBeCleared(t *testing.T) {
 	}
 }
 
+// A worker run that claimed its fetch of the user's list may adopt, mark and
+// remove for 45 seconds, on the strength of the link it read. For 60 seconds
+// from that claim the API refuses to unlink, and to link, so the link cannot
+// change under the run. The refusal changes nothing; afterwards unlinking
+// works as ever.
+func TestUnlinkIMDbWaitsOutAWorkerRun(t *testing.T) {
+	h := newSyncHarness(t)
+	h.lists.put(testList, ttID(1), ttID(2))
+	h.link(testList, http.StatusOK)
+	// That was two days ago.
+	user := h.store.User(h.user.ID)
+	user.IMDbSync.LinkedAt = user.IMDbSync.LinkedAt.Add(-48 * time.Hour)
+	h.store.AddUser(user)
+	h.rewind(48 * time.Hour)
+	// Half a minute ago the daily sync claimed its fetch. It found the
+	// second title gone and marked it.
+	h.lists.put(testList, ttID(1))
+	h.dailySync(time.Now().Add(-30 * time.Second))
+	linked := h.store.User(h.user.ID).IMDbSync
+	marked := h.items()[ttID(2)]
+	if linked == nil || marked == nil || marked.IMDbMissingSince == nil {
+		t.Fatalf("after the sync: link %+v, item %+v; want a link and a marked item", linked, marked)
+	}
+	fetches, writes := h.lists.fetches(), h.store.Writes
+
+	rec := h.request(http.MethodDelete, "/api/me/imdb", "")
+
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("unlinking 30 s after a worker's claim: status = %d, want 429; body: %s", rec.Code, rec.Body)
+	}
+	if wait, err := strconv.Atoi(rec.Header().Get("Retry-After")); err != nil || wait < 28 || wait > 30 {
+		t.Errorf("Retry-After = %q, want the 30 seconds or so that are left of the minute", rec.Header().Get("Retry-After"))
+	}
+	if got := h.store.User(h.user.ID).IMDbSync; got == nil || !reflect.DeepEqual(*got, *linked) {
+		t.Errorf("link after the refused unlink = %+v, want it untouched: %+v", got, linked)
+	}
+	if got := h.items()[ttID(2)]; got == nil || got.IMDbMissingSince == nil || !got.IMDbMissingSince.Equal(*marked.IMDbMissingSince) {
+		t.Errorf("item after the refused unlink = %+v, want its mark intact", got)
+	}
+	if h.store.Writes != writes {
+		t.Errorf("the refused unlink wrote %d times; want nothing changed", h.store.Writes-writes)
+	}
+	// Linking is refused for the same minute, without a fetch.
+	h.link(testWatchlist, http.StatusTooManyRequests)
+	if got := h.store.User(h.user.ID).IMDbSync; got == nil || got.SourceID != testList || h.lists.fetches() != fetches {
+		t.Errorf("after the refused link: link %+v, %d fetches; want the first list and no fetch", got, h.lists.fetches()-fetches)
+	}
+
+	// A minute after the claim.
+	h.rewind(31 * time.Second)
+	rec = h.request(http.MethodDelete, "/api/me/imdb", "")
+
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("unlinking 61 s after a worker's claim: status = %d, want 204; body: %s", rec.Code, rec.Body)
+	}
+	if h.store.User(h.user.ID).IMDbSync != nil {
+		t.Error("the link is still stored")
+	}
+	items := h.items()
+	if len(items) != 2 || items[ttID(2)] == nil || items[ttID(2)].IMDbMissingSince != nil {
+		t.Errorf("watchlist after unlinking = %v; want both items kept and the mark cleared", items)
+	}
+}
+
+// claimingStore lets a claim land between a handler's read of the user and
+// its write.
+type claimingStore struct {
+	*storetest.Store
+	beforeUnlink func()
+}
+
+func (s *claimingStore) UnlinkIMDb(ctx context.Context, userID primitive.ObjectID, now time.Time, lockout time.Duration) (bool, error) {
+	s.beforeUnlink()
+	return s.Store.UnlinkIMDb(ctx, userID, now, lockout)
+}
+
+// Reading that nothing was claimed lately and then unlinking is not enough:
+// the worker can claim in between. The unlink itself must refuse.
+func TestUnlinkIMDbIsRefusedByAClaimMadeWhileItRuns(t *testing.T) {
+	h := newSyncHarness(t)
+	h.lists.put(testList, ttID(1))
+	h.link(testList, http.StatusOK)
+	h.rewind(48 * time.Hour)
+	h.server.db = &claimingStore{Store: h.store, beforeUnlink: func() {
+		// The daily sync gets to this user.
+		claimed, err := h.store.ClaimIMDbAttempt(context.Background(), h.user.ID, time.Now(), worker.IMDbSyncMinGap)
+		if err != nil || !claimed {
+			t.Fatalf("the worker's claim: %v, %v", claimed, err)
+		}
+	}}
+
+	rec := h.request(http.MethodDelete, "/api/me/imdb", "")
+
+	if rec.Code != http.StatusTooManyRequests || rec.Header().Get("Retry-After") != "60" {
+		t.Fatalf("status = %d, Retry-After = %q; want 429 and 60; body: %s", rec.Code, rec.Header().Get("Retry-After"), rec.Body)
+	}
+	if link := h.store.User(h.user.ID).IMDbSync; link == nil || link.SourceID != testList {
+		t.Errorf("link = %+v; want it left in place for the run that claimed", link)
+	}
+}
+
+// The API's lockout is the one the worker's lease is measured against.
+func TestTheAPILocksTheLinkForLongerThanAWorkerRunMayAct(t *testing.T) {
+	if imdbLinkMinGap != imdbsync.LinkLockout || imdbLinkMinGap < imdbsync.OwnershipLease+15*time.Second {
+		t.Errorf("the API refuses to link and unlink for %v after a claim; want imdbsync.LinkLockout (%v), 15 s more than the lease of %v",
+			imdbLinkMinGap, imdbsync.LinkLockout, imdbsync.OwnershipLease)
+	}
+}
+
 func TestUnlinkIMDbKeepsTheItems(t *testing.T) {
 	h := newSyncHarness(t)
 	h.lists.put(testList, ttID(1), ttID(2))
 	h.link(testList, http.StatusOK)
+	h.rewind(time.Hour)
 
 	rec := h.request(http.MethodDelete, "/api/me/imdb", "")
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log"
+	"math"
 	"net/http"
 	"strconv"
 	"time"
@@ -46,10 +47,14 @@ const (
 	imdbLinkStoreTimeout = 5 * time.Second
 	// imdbLinkEnsureBudget bounds fetching availability for the new titles.
 	imdbLinkEnsureBudget = 3 * time.Second
-	// imdbLinkMinGap is the least time between two link attempts by one
-	// user. Every attempt is a fetch from IMDb, and IMDb's terms are the
-	// reason this service fetches as little as it can (see package imdb).
-	imdbLinkMinGap = 60 * time.Second
+	// imdbLinkMinGap is the least time between a fetch of a user's list,
+	// by a link request or by the worker, and that user's next link request
+	// or unlink. It does two jobs. Every link attempt is a fetch from IMDb,
+	// and IMDb's terms are the reason this service fetches as little as it
+	// can (see package imdb). And it is the lockout that lets a worker run
+	// act on the link it read: for this long after the worker's claim the
+	// link cannot change (see imdbsync.OwnershipLease).
+	imdbLinkMinGap = imdbsync.LinkLockout
 )
 
 // imdbListFetcher reads a public IMDb list; *imdb.Client does.
@@ -226,32 +231,56 @@ func (s *Server) linkIMDbHandler(c *gin.Context) {
 
 // unlinkIMDbHandler godoc
 // @Summary Unlink the IMDb list
-// @Description Stops syncing with the linked IMDb list. Nothing is removed from the watchlist: items the sync added or adopted stay, and are never removed automatically afterwards. Every "missing from the list" mark (imdb_missing_since) on the user's items is cleared. Unlinking when nothing is linked also succeeds. On a 500 the list is still linked; send the request again.
+// @Description Stops syncing with the linked IMDb list. Nothing is removed from the watchlist: items the sync added or adopted stay, and are never removed automatically afterwards. Every "missing from the list" mark (imdb_missing_since) on the user's items is cleared. Unlinking when nothing is linked also succeeds. Within 60 seconds of a fetch of the user's list, by a link request or by the daily sync, the answer is 429 with Retry-After and nothing is changed: the list is still linked; send the request again after that many seconds. On a 500 the list is still linked too.
 // @Tags Users
 // @Security BearerAuth
 // @Success 204 "Unlinked"
 // @Failure 401 {object} ErrorResponse "Unauthorized"
+// @Failure 429 {object} ErrorResponse "The list was fetched less than a minute ago; still linked"
+// @Header 429 {integer} Retry-After "Seconds to wait before trying again"
 // @Failure 500 {object} ErrorResponse "The link could not be removed"
 // @Router /api/me/imdb [delete]
 func (s *Server) unlinkIMDbHandler(c *gin.Context) {
+	start := time.Now()
 	user, ok := s.getUser(c)
 	if !ok {
 		return
 	}
-	// The strikes go first. A sync that is running right now may have planned
-	// removals on them; with the marks gone its conditional deletes no longer
-	// match, and an account without a link carries no strike that a later
-	// link could inherit. If they cannot be cleared the list stays linked and
-	// the user tries again, rather than being told "unlinked" while a removal
-	// can still go through.
-	if _, err := s.db.ClearIMDbMissingMarks(c.Request.Context(), user.ID); err != nil {
+	ctx := c.Request.Context()
+	// A sync run that claimed its fetch less than a minute ago may be
+	// adopting, marking and removing items for this link right now, and for
+	// that long it relies on the link staying as it is (see
+	// imdbsync.OwnershipLease). So does a link request that is still under
+	// way. Unlinking waits for them.
+	locked := func(wait time.Duration) {
+		c.Header("Retry-After", strconv.Itoa(max(1, int(math.Ceil(wait.Seconds())))))
+		jsonError(c, http.StatusTooManyRequests, "The IMDb list was read a moment ago. Try again in a minute.")
+	}
+	if at := user.IMDbAttemptAt; at != nil && start.Sub(*at) < imdbLinkMinGap {
+		locked(imdbLinkMinGap - max(0, start.Sub(*at)))
+		return
+	}
+	// The strikes go before the link: an account without a link carries no
+	// strike that a later link could inherit. If they cannot be cleared the
+	// list stays linked and the user tries again.
+	if _, err := s.db.ClearIMDbMissingMarks(ctx, user.ID); err != nil {
 		log.Printf("imdb unlink: clearing missing marks failed: %v", err)
 		jsonError(c, http.StatusInternalServerError, "failed to unlink IMDb list")
 		return
 	}
-	if err := s.db.UnlinkIMDb(c.Request.Context(), user.ID); err != nil {
+	// The check above was a read; a run can have claimed its fetch since.
+	// The write makes the same check itself, atomically, and that is the one
+	// the lease rests on. When it refuses, the strikes cleared a moment ago
+	// are the only thing this request changed, and losing a strike only
+	// ever delays a removal.
+	unlinked, err := s.db.UnlinkIMDb(ctx, user.ID, start, imdbLinkMinGap)
+	if err != nil {
 		log.Printf("imdb unlink failed: %v", err)
 		jsonError(c, http.StatusInternalServerError, "failed to unlink IMDb list")
+		return
+	}
+	if !unlinked {
+		locked(imdbLinkMinGap)
 		return
 	}
 	c.Status(http.StatusNoContent)

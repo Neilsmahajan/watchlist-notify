@@ -22,6 +22,42 @@ const (
 	DefaultLookupTimeout = 8 * time.Second
 )
 
+// The lease and the lockout. Together they are what keeps a worker run from
+// changing whose an item is, or removing one, on behalf of a link the user
+// has since changed.
+//
+// A run that fetches a user's list first claims the fetch: one atomic update
+// that stamps imdb_attempt_at with the run's time (Request.At). From that
+// moment the run holds a lease of OwnershipLease on the user's items: only
+// while it lasts may it adopt, mark or remove. And for LinkLockout from that
+// same moment the API refuses to link or unlink (429), with the refusal
+// decided inside the write that would change the link. So no change of the
+// link can land while a run still has the right to act on it: the run reads
+// the link after its claim (linkUnchanged), and what it read holds until the
+// lease is over.
+//
+// The lease is measured on the worker's clock and the lockout on the API
+// instance's, against a time the worker wrote. ClockMargin, the difference
+// between the two, is how far those clocks may disagree before the two
+// windows could overlap. Reading the link again before each phase, and
+// stamping marks so that they are stale for any later link, remain as a
+// second line behind it.
+const (
+	// OwnershipLease is how long after its claim a run may adopt, mark and
+	// remove. Adding is not bound by it: an added title was on the list.
+	OwnershipLease = 45 * time.Second
+	// LinkLockout is how long after a claim the API refuses to link or
+	// unlink.
+	LinkLockout = 60 * time.Second
+	// ClockMargin assumes the clocks of the worker and of every API instance
+	// are within 15 seconds of each other.
+	ClockMargin = LinkLockout - OwnershipLease
+	// ownershipWriteTimeout bounds one adopt, mark or remove, and the read
+	// of the link before them. A write is also never given longer than the
+	// rest of the lease, so none is still being sent when the lease is over.
+	ownershipWriteTimeout = 3 * time.Second
+)
+
 // ErrMarksNotCleared is returned by Run in ModeLink when the user's missing
 // marks could not be cleared. Nothing else was written, and the caller must
 // not store the link: strikes made for the list linked before would still be
@@ -53,6 +89,7 @@ type Reconciler struct {
 	now           func() time.Time
 	concurrency   int
 	lookupTimeout time.Duration
+	writeTimeout  time.Duration // ownershipWriteTimeout, shorter in tests
 }
 
 // Option configures a Reconciler.
@@ -82,6 +119,7 @@ func New(store Store, finder Finder, opts ...Option) *Reconciler {
 		now:           time.Now,
 		concurrency:   DefaultConcurrency,
 		lookupTimeout: DefaultLookupTimeout,
+		writeTimeout:  ownershipWriteTimeout,
 	}
 	for _, opt := range opts {
 		opt(r)
@@ -103,18 +141,19 @@ type Request struct {
 	// Complete says IDs is the whole of the linked list (see Input.Complete).
 	Complete bool
 	// SourceID and LinkedAt name the link this run is for: the list, and
-	// when it was linked (see Input.LinkedAt). ModeSync does not mark or
-	// remove without them, and reads the user's link again just before it
-	// does: if the user unlinked or linked afresh while the run was fetching
-	// and resolving, what the run found says nothing about their watchlist
-	// any more, and nothing is marked or removed (Result.LinkChanged).
+	// when it was linked (see Input.LinkedAt). ModeSync does not adopt, mark
+	// or remove without them, and reads the user's link again just before
+	// it does: if the user unlinked or linked afresh before the run claimed
+	// its fetch, what the run found says nothing about their watchlist, and
+	// nothing is adopted, marked or removed (Result.LinkChanged).
 	SourceID string
 	LinkedAt time.Time
 	// At is the time of the run; zero means now. A run that fetched a list
 	// passes the moment it claimed that fetch, which is before it read
-	// anything. Marks are stamped with it, so a mark is never newer than the
-	// evidence it rests on, and a link made while the run was under way is
-	// always newer than the run's marks (see Input.LinkedAt).
+	// anything. The run's lease on the user's items starts then (see
+	// OwnershipLease). Marks are stamped with it, so a mark is never newer
+	// than the evidence it rests on, and a link made after the run is always
+	// newer than the run's marks (see Input.LinkedAt).
 	At time.Time
 	// LookupBudget, when positive, bounds the time spent asking TMDb. IDs
 	// not resolved in time stay pending; what was resolved is still applied.
@@ -150,9 +189,13 @@ type Result struct {
 
 	// LinkChanged says the run had adoptions, marks or removals planned and
 	// left them undone, because the user's link was no longer the one the run
-	// was for
-	// (see Request.SourceID). Additions made before that stay.
+	// was for (see Request.SourceID). Additions made before that stay.
 	LinkChanged bool
+	// LeaseExpired says the run had adoptions, marks or removals planned and
+	// left some or all of them undone, because OwnershipLease had passed
+	// since Request.At. What it did before that stays, and so do its
+	// additions; the next run plans the rest again.
+	LeaseExpired bool
 
 	// Lookups counts TMDb requests made.
 	Lookups int
@@ -168,7 +211,8 @@ type Result struct {
 // writes. The Result is valid either way and counts what was actually done.
 // Writes run in the order additions, unmarks, adoptions, marks, removals,
 // and stop at the first failure, so nothing is ever removed after a write
-// went wrong.
+// went wrong. Adoptions, marks and removals also stop, without an error,
+// when the run's lease is over (Result.LeaseExpired).
 //
 // In ModeLink every missing mark of the user is cleared before anything is
 // read or written. If that fails the error is ErrMarksNotCleared and nothing
@@ -347,9 +391,19 @@ func itemType(mediaType string) string {
 //
 // Additions and unmarks are safe whatever the user did meanwhile. A worker
 // run's adoptions, marks and removals are not: they rest on the list the run
-// fetched being the list that is linked. So the link is read again
-// immediately before the adoptions and marks, and again before the removals,
-// and they are skipped unless it is exactly the link the run started with.
+// fetched being the list that is linked. What makes them safe is the lease
+// (see OwnershipLease): each of them starts only while less than
+// OwnershipLease has passed since at, the run's claim, and for longer than
+// that after the claim the link cannot be changed. The check is made before
+// every single write, not once per phase, because a phase can be long.
+//
+// The link is read before the adoptions and marks, and again before the
+// removals. The first read is part of the argument: the run was started for
+// the link as it was when the users were listed, and only a read made after
+// the claim says what the link is for as long as the lease lasts. The second
+// is a cheap second line. It matters only if the lease failed to hold, which
+// takes clocks that disagree by more than ClockMargin (15 seconds).
+//
 // The link request and the CSV import plan none of the three.
 func (r *Reconciler) apply(ctx context.Context, req Request, plan Plan, at time.Time, res *Result) error {
 	userID := req.UserID
@@ -365,14 +419,45 @@ func (r *Reconciler) apply(ctx context.Context, req Request, plan Plan, at time.
 			res.Unmarked++
 		}
 	}
+
+	// leased runs one write that changes whose an item is, or removes it.
+	// held is false, and the write not made, when the lease is over.
+	leaseEnd := at.Add(OwnershipLease)
+	leased := func(write func(ctx context.Context) (bool, error)) (done, held bool, err error) {
+		left := leaseEnd.Sub(r.now())
+		if left <= 0 {
+			return false, false, nil
+		}
+		writeCtx, cancel := context.WithTimeout(ctx, min(left, r.writeTimeout))
+		defer cancel()
+		done, err = write(writeCtx)
+		return done, true, err
+	}
+	// linkHeld reads the link under the lease, before a phase.
+	linkHeld := func() (proceed bool, err error) {
+		same, held, err := leased(func(ctx context.Context) (bool, error) { return r.linkUnchanged(ctx, req) })
+		switch {
+		case !held:
+			res.LeaseExpired = true
+		case err == nil && !same:
+			res.LinkChanged = true
+		}
+		return held && same && err == nil, err
+	}
+
 	if len(plan.Adopt)+len(plan.MarkMissing) > 0 {
-		if same, err := r.linkUnchanged(ctx, req); err != nil || !same {
-			res.LinkChanged = err == nil
+		if proceed, err := linkHeld(); !proceed {
 			return err
 		}
 	}
 	for _, adoption := range plan.Adopt {
-		done, err := r.store.AdoptWatchlistItem(ctx, userID, adoption.ItemID, adoption.IMDbID)
+		done, held, err := leased(func(ctx context.Context) (bool, error) {
+			return r.store.AdoptWatchlistItem(ctx, userID, adoption.ItemID, adoption.IMDbID)
+		})
+		if !held {
+			res.LeaseExpired = true
+			return nil
+		}
 		if err != nil {
 			return fmt.Errorf("adopt item: %w", err)
 		}
@@ -381,7 +466,13 @@ func (r *Reconciler) apply(ctx context.Context, req Request, plan Plan, at time.
 		}
 	}
 	for _, itemID := range plan.MarkMissing {
-		done, err := r.store.MarkWatchlistItemIMDbMissing(ctx, userID, itemID, at)
+		done, held, err := leased(func(ctx context.Context) (bool, error) {
+			return r.store.MarkWatchlistItemIMDbMissing(ctx, userID, itemID, at)
+		})
+		if !held {
+			res.LeaseExpired = true
+			return nil
+		}
 		if err != nil {
 			return fmt.Errorf("mark missing: %w", err)
 		}
@@ -390,13 +481,18 @@ func (r *Reconciler) apply(ctx context.Context, req Request, plan Plan, at time.
 		}
 	}
 	if len(plan.Remove) > 0 {
-		if same, err := r.linkUnchanged(ctx, req); err != nil || !same {
-			res.LinkChanged = err == nil
+		if proceed, err := linkHeld(); !proceed {
 			return err
 		}
 	}
 	for _, removal := range plan.Remove {
-		done, err := r.store.DeleteSyncedWatchlistItem(ctx, userID, removal.ItemID, removal.MissingSince, removal.UpdatedAt)
+		done, held, err := leased(func(ctx context.Context) (bool, error) {
+			return r.store.DeleteSyncedWatchlistItem(ctx, userID, removal.ItemID, removal.MissingSince, removal.UpdatedAt)
+		})
+		if !held {
+			res.LeaseExpired = true
+			return nil
+		}
 		if err != nil {
 			return fmt.Errorf("remove item: %w", err)
 		}
@@ -409,8 +505,7 @@ func (r *Reconciler) apply(ctx context.Context, req Request, plan Plan, at time.
 
 // linkUnchanged reads the user's link and reports whether it is still the
 // one this run is for: the same list, linked at the same moment. Unlinking,
-// linking another list, and unlinking and linking the same list again all
-// make it false.
+// linking another list, and linking the same list again all make it false.
 func (r *Reconciler) linkUnchanged(ctx context.Context, req Request) (bool, error) {
 	link, err := r.store.GetIMDbLink(ctx, req.UserID)
 	if err != nil {

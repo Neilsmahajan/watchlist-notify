@@ -1110,10 +1110,23 @@ func TestIMDbLink(t *testing.T) {
 		t.Errorf("after signing in again: %+v", got)
 	}
 
-	// Unlinking removes the link and keeps the throttle.
+	// Unlinking is refused within the lockout of the last claim, by the
+	// update itself, and then changes nothing.
+	beforeRefusal := load()
+	if ok, err := srv.UnlinkIMDb(ctx, user.ID, attempt.Add(59*time.Second), time.Minute); err != nil || ok {
+		t.Errorf("unlinking 59 s after a claim: unlinked = %v, err = %v; want refused", ok, err)
+	}
+	if got := load(); got.IMDbSync == nil || !reflect.DeepEqual(got.IMDbSync, beforeRefusal.IMDbSync) || !got.UpdatedAt.Equal(beforeRefusal.UpdatedAt) {
+		t.Fatalf("a refused unlink changed the user: %+v, was %+v", got, beforeRefusal)
+	}
+	if ok, err := srv.UnlinkIMDb(ctx, primitive.NewObjectID(), far, time.Minute); err != nil || ok {
+		t.Errorf("unlinking an unknown user: unlinked = %v, err = %v; want false", ok, err)
+	}
+	// From the end of the lockout on it removes the link and keeps the
+	// throttle. A second time is as good as the first.
 	for i := 0; i < 2; i++ {
-		if err := srv.UnlinkIMDb(ctx, user.ID); err != nil {
-			t.Fatalf("UnlinkIMDb, call %d: %v", i+1, err)
+		if ok, err := srv.UnlinkIMDb(ctx, user.ID, attempt.Add(time.Minute), time.Minute); err != nil || !ok {
+			t.Fatalf("UnlinkIMDb, call %d: unlinked = %v, err = %v", i+1, ok, err)
 		}
 	}
 	unlinked := load()

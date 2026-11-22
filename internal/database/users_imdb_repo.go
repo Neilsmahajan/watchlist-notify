@@ -98,15 +98,32 @@ func (s *service) UpdateIMDbSync(ctx context.Context, userID primitive.ObjectID,
 	return res.MatchedCount == 1, nil
 }
 
-// UnlinkIMDb removes the user's link. Their watchlist items are not touched,
-// and the fetch throttle (imdb_attempt_at) deliberately stays.
-func (s *service) UnlinkIMDb(ctx context.Context, userID primitive.ObjectID) error {
+// UnlinkIMDb removes the user's link, unless a fetch of their list was
+// claimed less than lockout ago. It reports whether it did; false means the
+// lockout refused it (or there is no such user) and nothing was changed.
+//
+// The refusal is part of the one atomic update, not a read before it: a sync
+// run that claimed its fetch a moment ago may be adopting, marking and
+// removing items for this link right now, and it relies on the link not
+// changing under it for as long as it does (see imdbsync.OwnershipLease).
+// A check made before the write could pass just before such a claim.
+//
+// The user's watchlist items are not touched, and the fetch throttle
+// (imdb_attempt_at) deliberately stays. Unlinking a user who has no link
+// succeeds, outside the lockout, like any other.
+func (s *service) UnlinkIMDb(ctx context.Context, userID primitive.ObjectID, now time.Time, lockout time.Duration) (bool, error) {
 	collection := s.db.Database(databaseName).Collection(collUsers)
-	_, err := collection.UpdateOne(ctx, bson.M{"_id": userID}, bson.M{
+	res, err := collection.UpdateOne(ctx, bson.M{
+		"_id": userID,
+		"$or": notAttemptedSince(now.Add(-lockout)),
+	}, bson.M{
 		"$unset": bson.M{"imdb_sync": ""},
 		"$set":   bson.M{"updated_at": time.Now()},
 	})
-	return err
+	if err != nil {
+		return false, err
+	}
+	return res.MatchedCount == 1, nil
 }
 
 // ListIMDbLinkedUsers returns the users with a linked IMDb list whose last

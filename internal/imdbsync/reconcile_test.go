@@ -721,7 +721,7 @@ func (w *world) imported(imdbID string, tmdbID int, title, source string) *model
 func unlinkedWorld(t *testing.T) *world {
 	t.Helper()
 	w := newWorld(t)
-	if err := w.store.UnlinkIMDb(context.Background(), w.user); err != nil {
+	if _, err := w.store.UnlinkIMDb(context.Background(), w.user, w.now, 0); err != nil {
 		t.Fatal(err)
 	}
 	return w
@@ -1029,7 +1029,7 @@ func TestAdoptionOfAnItemDeletedMeanwhileDoesNothing(t *testing.T) {
 func TestSyncDoesNotAdoptForALinkThatIsNoLongerInForce(t *testing.T) {
 	changes := map[string]func(w *world){
 		"unlinked": func(w *world) {
-			if err := w.store.UnlinkIMDb(context.Background(), w.user); err != nil {
+			if _, err := w.store.UnlinkIMDb(context.Background(), w.user, w.now, 0); err != nil {
 				w.t.Fatal(err)
 			}
 		},
@@ -1323,7 +1323,7 @@ func TestMarksCarryTheTimeOfTheRun(t *testing.T) {
 	standardTMDb(w.tmdb)
 	w.sync(matrix, inceptn)
 	w.now = w.now.Add(24 * time.Hour)
-	claimed := w.now.Add(-90 * time.Second)
+	claimed := w.now.Add(-30 * time.Second) // the fetch took a while
 
 	res, err := w.rec.Run(context.Background(), Request{
 		UserID: w.user, Mode: ModeSync, IDs: []string{matrix}, Complete: true, SourceID: worldList, LinkedAt: w.linked, At: claimed,
@@ -1347,6 +1347,217 @@ func TestMarksCarryTheTimeOfTheRun(t *testing.T) {
 	}
 }
 
+// --- the lease ---
+
+// The IMDb IDs of a leaseWorld.
+const (
+	leaseNew     = "tt7000001"
+	leaseImport1 = "tt7000002"
+	leaseImport2 = "tt7000003"
+	leaseLeft1   = "tt7000004"
+	leaseLeft2   = "tt7000005"
+	leaseGone1   = "tt7000006"
+	leaseGone2   = "tt7000007"
+)
+
+// leaseWorld is a world on the day a sync of list has one of everything to
+// do: a title to add, two imports to adopt, two items to mark and two items,
+// marked the day before, to remove.
+func leaseWorld(t *testing.T) (w *world, list []string) {
+	t.Helper()
+	w = newWorld(t)
+	for i, id := range []string{leaseNew, leaseImport1, leaseImport2, leaseLeft1, leaseLeft2, leaseGone1, leaseGone2} {
+		w.tmdb.movie(id, 7001+i, "Title "+id)
+	}
+	w.sync(leaseLeft1, leaseLeft2, leaseGone1, leaseGone2)
+	w.now = w.now.Add(24 * time.Hour)
+	w.sync(leaseLeft1, leaseLeft2) // strike one for the two that are gone
+	w.now = w.now.Add(24 * time.Hour)
+	w.imported(leaseImport1, 7002, "Title "+leaseImport1, models.SourceCSV)
+	w.imported(leaseImport2, 7003, "Title "+leaseImport2, "")
+	return w, []string{leaseImport1, leaseImport2, leaseNew}
+}
+
+// A run may adopt, mark and remove only while its lease lasts: OwnershipLease
+// from the moment it claimed the fetch. The check is made before every one
+// of those writes, so a run that is slow anywhere stops exactly there. What
+// it did before stays, nothing after it happens, and it is not an error.
+func TestSyncStopsChangingOwnershipWhenItsLeaseIsOver(t *testing.T) {
+	type hooks struct{ create, adopt, mark, remove int }
+	cases := []struct {
+		name string
+		// The lease runs out during the nth call of one of these writes
+		// (the call itself had begun in time and goes through).
+		during  hooks
+		short   time.Duration // how much of the lease is left then; 0 = none
+		adopted int
+		marked  int
+		removed int
+		expired bool
+	}{
+		{name: "before the first adoption", during: hooks{create: 1}, expired: true},
+		{name: "between two adoptions", during: hooks{adopt: 1}, adopted: 1, expired: true},
+		{name: "before the first mark", during: hooks{adopt: 2}, adopted: 2, expired: true},
+		{name: "between two marks", during: hooks{mark: 1}, adopted: 2, marked: 1, expired: true},
+		{name: "before the first removal", during: hooks{mark: 2}, adopted: 2, marked: 2, expired: true},
+		{name: "between two removals", during: hooks{remove: 1}, adopted: 2, marked: 2, removed: 1, expired: true},
+		{name: "a millisecond before it is over", during: hooks{create: 1}, short: time.Millisecond, adopted: 2, marked: 2, removed: 2},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			w, list := leaseWorld(t)
+			claimed := w.now
+			var seen hooks
+			slow := func(calls *int, at int) func() {
+				return func() {
+					if *calls++; *calls == at {
+						w.now = claimed.Add(OwnershipLease - tc.short)
+					}
+				}
+			}
+			w.store.beforeCreate = slow(&seen.create, tc.during.create)
+			w.store.beforeAdopt = slow(&seen.adopt, tc.during.adopt)
+			w.store.beforeMark = slow(&seen.mark, tc.during.mark)
+			w.store.beforeDelete = slow(&seen.remove, tc.during.remove)
+
+			res, err := w.rec.Run(context.Background(), Request{
+				UserID: w.user, Mode: ModeSync, IDs: list, Complete: true, SourceID: worldList, LinkedAt: w.linked, At: claimed,
+			})
+
+			if err != nil {
+				t.Fatalf("Run: %v; a lease that ran out is not an error", err)
+			}
+			if got := [3]int{len(res.Plan.Adopt), len(res.Plan.MarkMissing), len(res.Plan.Remove)}; got != [3]int{2, 2, 2} {
+				t.Fatalf("plan = %v adoptions, marks, removals; want two of each", got)
+			}
+			if res.Added != 1 {
+				t.Errorf("added = %d, want 1: adding is not bound by the lease", res.Added)
+			}
+			if got, want := [3]int{res.Adopted, res.MarkedMissing, res.Removed}, [3]int{tc.adopted, tc.marked, tc.removed}; got != want {
+				t.Errorf("adopted, marked, removed = %v, want %v", got, want)
+			}
+			// Not merely refused by the store: never sent.
+			if got, want := [3]int{seen.adopt, seen.mark, seen.remove}, [3]int{tc.adopted, tc.marked, tc.removed}; got != want {
+				t.Errorf("adopt, mark, remove writes sent = %v, want %v", got, want)
+			}
+			if res.LeaseExpired != tc.expired || res.LinkChanged {
+				t.Errorf("lease expired = %v, link changed = %v; want %v, false", res.LeaseExpired, res.LinkChanged, tc.expired)
+			}
+		})
+	}
+}
+
+// The lease is counted from the claim, which the caller hands over, not from
+// the start of the reconcile: a run whose fetch took the whole lease adds
+// what is new and leaves every item of the user as it is.
+func TestSyncListWhoseLeaseIsOverAddsAndReportsPartial(t *testing.T) {
+	w, list := leaseWorld(t)
+	previous := *w.store.User(w.user).IMDbSync
+	synced := w.now.Add(-24 * time.Hour)
+	previous.LastSyncedAt = &synced
+	claimed := w.now
+	w.now = w.now.Add(OwnershipLease) // reading the list took that long
+	before := w.titles()
+	ownershipCalls := []string{"GetIMDbLink", "AdoptWatchlistItem", "MarkWatchlistItemIMDbMissing", "DeleteSyncedWatchlistItem"}
+	calls := map[string]int{}
+	for _, method := range ownershipCalls {
+		calls[method] = w.store.Queries[method]
+	}
+
+	out := w.rec.SyncList(context.Background(), SyncRequest{
+		UserID: w.user, Previous: &previous, SourceID: worldList, Mode: ModeSync, List: completeList(list...), At: claimed,
+	})
+
+	res := out.Result
+	if out.Err != nil || !res.LeaseExpired || res.Added != 1 || res.Adopted+res.MarkedMissing+res.Removed != 0 {
+		t.Fatalf("err = %v, lease expired = %v, added = %d, adopted = %d, marked = %d, removed = %d; want nil, true, 1, 0, 0, 0",
+			out.Err, res.LeaseExpired, res.Added, res.Adopted, res.MarkedMissing, res.Removed)
+	}
+	for _, method := range ownershipCalls {
+		if n := w.store.Queries[method] - calls[method]; n != 0 {
+			t.Errorf("%s was called %d times after the lease was over", method, n)
+		}
+	}
+	before[leaseNew] = syncedAs
+	w.expect(before)
+	state := out.State
+	if state.LastStatus != models.IMDbStatusPartial || state.LastError != "the sync ran out of time; it continues at the next sync" {
+		t.Errorf("status = %q, last error = %q", state.LastStatus, state.LastError)
+	}
+	if state.LastSyncedAt == nil || !state.LastSyncedAt.Equal(synced) {
+		t.Errorf("last synced at = %v, want it left at the last complete sync, %v", state.LastSyncedAt, synced)
+	}
+
+	// The next day's run, in time, does all of it.
+	w.now = w.now.Add(24 * time.Hour)
+	next := w.rec.SyncList(context.Background(), SyncRequest{
+		UserID: w.user, Previous: &state, SourceID: worldList, Mode: ModeSync, List: completeList(list...), At: w.now,
+	})
+	res = next.Result
+	if next.Err != nil || res.LeaseExpired || res.Adopted != 2 || res.MarkedMissing != 2 || res.Removed != 2 {
+		t.Errorf("next run: err = %v, lease expired = %v, adopted = %d, marked = %d, removed = %d; want nil, false, 2, 2, 2",
+			next.Err, res.LeaseExpired, res.Adopted, res.MarkedMissing, res.Removed)
+	}
+	if next.State.LastStatus != models.IMDbStatusOK || next.State.LastError != "" {
+		t.Errorf("next run: status = %q, last error = %q", next.State.LastStatus, next.State.LastError)
+	}
+}
+
+// One write that hangs must not carry the run past its lease. Each adopt,
+// mark and remove has a deadline of its own: a few seconds, and never more
+// than what is left of the lease.
+func TestOwnershipWritesHaveTheirOwnShortDeadline(t *testing.T) {
+	for _, method := range []string{"GetIMDbLink", "AdoptWatchlistItem", "MarkWatchlistItemIMDbMissing", "DeleteSyncedWatchlistItem"} {
+		for _, bound := range []string{"the write timeout", "the rest of the lease"} {
+			t.Run(method+" within "+bound, func(t *testing.T) {
+				w, list := leaseWorld(t)
+				claimed := w.now
+				if bound == "the write timeout" {
+					w.rec.writeTimeout = 30 * time.Millisecond
+				} else {
+					// The default timeout, with 30 ms of the lease left.
+					w.now = claimed.Add(OwnershipLease - 30*time.Millisecond)
+				}
+				w.store.Stall[method] = true
+				started := time.Now()
+
+				// No deadline at all from the caller.
+				res, err := w.rec.Run(context.Background(), Request{
+					UserID: w.user, Mode: ModeSync, IDs: list, Complete: true, SourceID: worldList, LinkedAt: w.linked, At: claimed,
+				})
+
+				if took := time.Since(started); took > time.Second {
+					t.Errorf("Run took %v with %s hanging", took, method)
+				}
+				if !errors.Is(err, context.DeadlineExceeded) {
+					t.Errorf("err = %v, want the write's deadline", err)
+				}
+				if res.Removed != 0 {
+					t.Errorf("removed %d after a write that hung", res.Removed)
+				}
+			})
+		}
+	}
+}
+
+// The numbers that make the lease work, tied together: the worker stops
+// before the API lets a link change, with room for clocks that disagree, and
+// no single write is long enough to use that room up.
+func TestTheLeaseEndsWellBeforeTheLockout(t *testing.T) {
+	if OwnershipLease >= LinkLockout {
+		t.Fatalf("lease %v, lockout %v: a link could change while a run may still remove", OwnershipLease, LinkLockout)
+	}
+	if ClockMargin != LinkLockout-OwnershipLease || ClockMargin < 15*time.Second {
+		t.Errorf("clock margin = %v with lease %v and lockout %v; want their difference, and at least 15 s", ClockMargin, OwnershipLease, LinkLockout)
+	}
+	if ownershipWriteTimeout <= 0 || ownershipWriteTimeout > ClockMargin/3 {
+		t.Errorf("write timeout = %v, want a few seconds, well inside the margin of %v", ownershipWriteTimeout, ClockMargin)
+	}
+	if rec := New(storetest.New(), nil); rec.writeTimeout != ownershipWriteTimeout {
+		t.Errorf("a new reconciler bounds its writes by %v, want %v", rec.writeTimeout, ownershipWriteTimeout)
+	}
+}
+
 // --- the link changes while a run is under way ---
 
 // A run fetches and resolves for a while, and the user can unlink or link
@@ -1355,7 +1566,7 @@ func TestMarksCarryTheTimeOfTheRun(t *testing.T) {
 func TestSyncDoesNotPruneForALinkThatIsNoLongerInForce(t *testing.T) {
 	changes := map[string]func(w *world){
 		"unlinked": func(w *world) {
-			if err := w.store.UnlinkIMDb(context.Background(), w.user); err != nil {
+			if _, err := w.store.UnlinkIMDb(context.Background(), w.user, w.now, 0); err != nil {
 				w.t.Fatal(err)
 			}
 		},
@@ -1402,7 +1613,7 @@ func TestSyncReadsTheLinkAgainBeforeRemoving(t *testing.T) {
 	// Today Game of Thrones is gone too: one mark and one removal are planned,
 	// and the user unlinks between the two.
 	w.store.beforeMark = func() {
-		if err := w.store.UnlinkIMDb(context.Background(), w.user); err != nil {
+		if _, err := w.store.UnlinkIMDb(context.Background(), w.user, w.now, 0); err != nil {
 			t.Fatal(err)
 		}
 	}

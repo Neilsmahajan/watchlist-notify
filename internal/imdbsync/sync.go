@@ -20,6 +20,7 @@ const (
 	msgPartList   = "only part of the IMDb list could be read"
 	msgRepeated   = "a title is on the IMDb list twice, so titles taken off it are not removed here; remove the duplicate on IMDb"
 	msgNotApplied = "the list was read but the watchlist could not be fully updated"
+	msgOutOfTime  = "the sync ran out of time; it continues at the next sync"
 )
 
 // SyncRequest is one fetched list to bring a user's watchlist in step with.
@@ -136,13 +137,18 @@ func (r *Reconciler) SyncList(ctx context.Context, req SyncRequest) SyncResult {
 		// the removals were left undone. The caller stores a status only on
 		// the link the run was for, so this one is normally never seen.
 		state.LastStatus, state.LastError = models.IMDbStatusPartial, msgNotApplied
+	case res.LeaseExpired:
+		// The run's lease ended before it had adopted, marked and removed
+		// everything it planned (see OwnershipLease). Nothing is lost: the
+		// next run plans what is left.
+		state.LastStatus, state.LastError = models.IMDbStatusPartial, msgOutOfTime
 	case res.Pending > 0:
 		state.LastStatus = models.IMDbStatusPartial
 		state.LastError = fmt.Sprintf("%d titles could not be looked up yet; the next sync tries again", res.Pending)
 	default:
 		state.LastStatus, state.LastError = models.IMDbStatusOK, ""
 	}
-	if complete && err == nil && !res.LinkChanged {
+	if complete && err == nil && !res.LinkChanged && !res.LeaseExpired {
 		state.LastSyncedAt = &at
 	}
 	return SyncResult{Result: res, State: state, Err: err}

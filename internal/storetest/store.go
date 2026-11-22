@@ -457,17 +457,19 @@ func (s *Store) UpdateIMDbSync(ctx context.Context, userID primitive.ObjectID, s
 	return true, nil
 }
 
-func (s *Store) UnlinkIMDb(ctx context.Context, userID primitive.ObjectID) error {
+func (s *Store) UnlinkIMDb(ctx context.Context, userID primitive.ObjectID, now time.Time, lockout time.Duration) (bool, error) {
 	unlock, err := s.begin(ctx, "UnlinkIMDb")
 	defer unlock()
 	if err != nil {
-		return err
+		return false, err
 	}
-	if u, ok := s.users[userID]; ok {
-		u.IMDbSync = nil
-		s.Writes++
+	u, ok := s.users[userID]
+	if !ok || (u.IMDbAttemptAt != nil && u.IMDbAttemptAt.After(ms(now.Add(-lockout)))) {
+		return false, nil
 	}
-	return nil
+	u.IMDbSync = nil
+	s.Writes++
+	return true, nil
 }
 
 func (s *Store) ListIMDbLinkedUsers(ctx context.Context, attemptedBefore time.Time) ([]*models.User, error) {

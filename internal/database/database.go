@@ -35,7 +35,7 @@ type Service interface {
 	LinkIMDb(ctx context.Context, userID primitive.ObjectID, sync models.IMDbSync) error
 	GetIMDbLink(ctx context.Context, userID primitive.ObjectID) (*models.IMDbSync, error)
 	UpdateIMDbSync(ctx context.Context, userID primitive.ObjectID, sync models.IMDbSync) (bool, error)
-	UnlinkIMDb(ctx context.Context, userID primitive.ObjectID) error
+	UnlinkIMDb(ctx context.Context, userID primitive.ObjectID, now time.Time, lockout time.Duration) (bool, error)
 	ListIMDbLinkedUsers(ctx context.Context, attemptedBefore time.Time) ([]*models.User, error)
 
 	CreateWatchlistItem(ctx context.Context, item *models.WatchlistItem) error
