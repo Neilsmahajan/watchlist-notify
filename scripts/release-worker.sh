@@ -127,12 +127,9 @@ log "Cloud Build  : $([[ ${USE_CLOUD_BUILD} -eq 1 ]] && echo yes || echo no)"
 if [[ ${USE_CLOUD_BUILD} -eq 1 ]]; then
   log "Building worker via Cloud Build..."
   if [[ ${DRY_RUN} -eq 0 ]]; then
-    gcloud builds submit \
-      --project "${PROJECT_ID}" \
-      --region "${REGION}" \
-      --config - \
-      --substitutions "_IMAGE_PATH=${IMAGE_PATH},_TAG=${TAG}" \
-      . <<'EOF'
+    BUILD_CONFIG="$(mktemp)"
+    trap 'rm -f "${BUILD_CONFIG}"' EXIT
+    cat > "${BUILD_CONFIG}" <<'EOF'
 steps:
   - name: 'gcr.io/cloud-builders/docker'
     env: ['DOCKER_BUILDKIT=1'] # the Dockerfile uses RUN --mount cache mounts
@@ -146,9 +143,14 @@ steps:
 images:
   - '${_IMAGE_PATH}:${_TAG}'
 options:
-  machineType: 'E2_HIGHCPU_8'
   logging: CLOUD_LOGGING_ONLY
 EOF
+    gcloud builds submit \
+      --project "${PROJECT_ID}" \
+      --region "${REGION}" \
+      --config "${BUILD_CONFIG}" \
+      --substitutions "_IMAGE_PATH=${IMAGE_PATH},_TAG=${TAG}" \
+      .
   else
     log "[DRY RUN] Would submit Cloud Build for ${FULL_IMAGE}"
   fi
