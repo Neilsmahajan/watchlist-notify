@@ -1,10 +1,11 @@
 import Link from "next/link";
 import type { ReactNode } from "react";
 import TitleShelf from "@/components/home/TitleShelf";
+import TonightPanel from "@/components/home/TonightPanel";
 import ServiceLogo from "@/components/ServiceLogo";
 import { Button, EmptyState, Notice, PageShell } from "@/components/ui";
 import { IconArrowRight, IconPlus } from "@/components/icons";
-import { getServices, getWatchlist } from "@/lib/api/backend";
+import { getMe, getServices, getWatchlist } from "@/lib/api/backend";
 import type { SessionUser } from "@/lib/auth/types";
 import { serviceName, type ServiceNames } from "@/lib/services";
 import { STATUS_LABELS, totalOf, type WatchlistStatus } from "@/lib/watchlist/types";
@@ -48,15 +49,17 @@ function Section({
   );
 }
 
-// The signed-in home page. It is rendered on the server from three small
-// requests: counts for the whole list, and a dozen titles for each row. The
-// list itself is never downloaded here.
+// The signed-in home page. It is rendered on the server from a few small
+// requests made together: counts for the whole list, a dozen titles for each
+// row, the services, and the profile, which says whether this API offers
+// tonight's picks. The list itself is never downloaded here.
 export default async function Dashboard({ user, token }: { user: SessionUser; token: string }) {
-  const [overall, ready, watching, services] = await Promise.all([
+  const [overall, ready, watching, services, me] = await Promise.all([
     getWatchlist(token, "limit=1"),
     getWatchlist(token, `available=true&status=planned&sort=-added_at&limit=${SHELF}`),
     getWatchlist(token, `status=watching&sort=-added_at&limit=${SHELF}`),
     getServices(token),
+    getMe(token),
   ]);
 
   const name = firstName(user);
@@ -93,6 +96,13 @@ export default async function Dashboard({ user, token }: { user: SessionUser; to
   const watchingItems = watching.ok ? (watching.data.items ?? []) : [];
   const watchingCount = watching.ok ? watching.data.meta.total : 0;
   const onServices = facets.available ?? 0;
+
+  // "What should I watch tonight?" is drawn only when the API says it has the
+  // feature: an API without an Anthropic key, an older API and a profile that
+  // could not be read all leave it out. With no services chosen the notice
+  // below already says what to do, so the panel would only repeat it.
+  const noServices = services.ok && mine.length === 0;
+  const showTonight = me.ok && me.data.features?.recommendations === true && !noServices;
 
   const perService = mine
     .map((service) => ({ ...service, count: facets.services?.[service.code] ?? 0 }))
@@ -134,7 +144,7 @@ export default async function Dashboard({ user, token }: { user: SessionUser; to
   }
 
   let headline: ReactNode;
-  if (services.ok && mine.length === 0) {
+  if (noServices) {
     headline = <>Tell us what you subscribe to, and we will tell you what is on.</>;
   } else if (readyCount > 0) {
     headline = (
@@ -168,7 +178,7 @@ export default async function Dashboard({ user, token }: { user: SessionUser; to
         </div>
       </header>
 
-      {services.ok && mine.length === 0 && (
+      {noServices && (
         <Notice
           tone="accent"
           className="mt-8"
@@ -188,6 +198,8 @@ export default async function Dashboard({ user, token }: { user: SessionUser; to
           {ready.error}
         </Notice>
       )}
+
+      {showTonight && <TonightPanel names={names} />}
 
       {readyItems.length > 0 && (
         <Section
