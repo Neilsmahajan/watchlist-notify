@@ -382,9 +382,9 @@ func TestAllowOrigins(t *testing.T) {
 func TestRESTMiddlewareRefusesTokensForTheMCPResource(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	iss := authtest.NewIssuer(t)
-	guard, err := ensureValidToken(iss.URL(), testRESTAud)
+	guard, err := EnsureValidTokenFrom(iss.URL(), testRESTAud)
 	if err != nil {
-		t.Fatalf("ensureValidToken: %v", err)
+		t.Fatalf("EnsureValidTokenFrom: %v", err)
 	}
 	r := gin.New()
 	r.GET("/api/me", guard, func(c *gin.Context) {

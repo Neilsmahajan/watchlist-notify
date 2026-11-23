@@ -18,21 +18,64 @@ import (
 	"github.com/neilsmahajan/watchlist-notify/internal/middleware"
 )
 
+// RegisterRoutes builds the API's handler from the environment.
 func (s *Server) RegisterRoutes() http.Handler {
+	mcpCfg, err := loadMCPConfig(os.Getenv("MCP_RESOURCE_URL"), os.Getenv("AUTH0_DOMAIN"))
+	if err != nil {
+		log.Fatalf("mcp: %v", err)
+	}
+	handler, err := s.routes(routeConfig{
+		origins:  allowedOrigins(os.Getenv("FRONTEND_URL"), os.Getenv("APP_ENV")),
+		restAuth: middleware.EnsureValidToken(),
+		mcp:      mcpCfg,
+	})
+	if err != nil {
+		log.Fatalf("routes: %v", err)
+	}
+	return handler
+}
+
+// routeConfig is what the routes depend on outside the Server.
+type routeConfig struct {
+	// origins are the browser origins that may call the REST API.
+	origins []string
+	// restAuth guards the REST API under /api.
+	restAuth gin.HandlerFunc
+	// mcp configures the MCP endpoint. Nil leaves it, and its metadata
+	// routes, unregistered.
+	mcp *mcpConfig
+}
+
+// routes builds the API's handler.
+func (s *Server) routes(cfg routeConfig) (http.Handler, error) {
 	r := gin.Default()
+
+	// The MCP endpoint and its metadata take neither of the two global
+	// middlewares below; see exceptMCP.
+	global := func(mw gin.HandlerFunc) gin.HandlerFunc { return mw }
+	if cfg.mcp != nil {
+		global = exceptMCP
+	}
 
 	// Compress responses for clients that accept it: a page of the watchlist
 	// is mostly repeated JSON keys and prose. Swagger UI serves its own
 	// pre-built assets and is left alone.
-	r.Use(gzip.Gzip(gzip.DefaultCompression, gzip.WithExcludedPaths([]string{"/swagger"})))
+	r.Use(global(gzip.Gzip(gzip.DefaultCompression, gzip.WithExcludedPaths([]string{"/swagger"}))))
 
 	// With no allowed origin there is nothing for the middleware to do, and
 	// browsers already refuse cross-origin reads of responses without CORS
 	// headers.
-	if origins := allowedOrigins(os.Getenv("FRONTEND_URL"), os.Getenv("APP_ENV")); len(origins) > 0 {
-		r.Use(newCORS(origins))
+	if len(cfg.origins) > 0 {
+		r.Use(global(newCORS(cfg.origins)))
 	} else {
 		log.Println("cors: FRONTEND_URL is not set to a valid origin; cross-origin requests are not allowed")
+	}
+
+	if cfg.mcp != nil {
+		if err := s.registerMCP(r, cfg.mcp, cfg.origins); err != nil {
+			return nil, err
+		}
+		log.Printf("mcp: serving %s for tokens issued by %s", cfg.mcp.resourceURL, cfg.mcp.issuer)
 	}
 
 	r.GET("/health", s.healthHandler)
@@ -46,7 +89,7 @@ func (s *Server) RegisterRoutes() http.Handler {
 	protected := r.Group("/api")
 
 	// Use Auth0 JWT validation middleware for protected routes (native Gin middleware)
-	protected.Use(middleware.EnsureValidToken())
+	protected.Use(cfg.restAuth)
 
 	protected.GET("/me", s.meHandler)
 	protected.PATCH("/me/preferences", s.updateUserPreferencesHandler)
@@ -66,7 +109,11 @@ func (s *Server) RegisterRoutes() http.Handler {
 
 	protected.GET("/availability/:id", s.availabilityHandler)
 	protected.POST("/availability/batch", s.batchAvailabilityHandler)
-	return r
+
+	if cfg.mcp != nil {
+		return withoutMCPQuery(r), nil
+	}
+	return r, nil
 }
 
 // newCORS allows browser calls, with credentials, from exactly origins.

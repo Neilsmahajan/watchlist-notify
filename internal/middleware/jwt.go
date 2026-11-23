@@ -113,15 +113,16 @@ func EnsureValidToken() gin.HandlerFunc {
 	if err != nil {
 		log.Fatalf("Failed to parse the issuer url: %v", err)
 	}
-	handler, err := ensureValidToken(issuerURL, os.Getenv("AUTH0_AUDIENCE"))
+	handler, err := EnsureValidTokenFrom(issuerURL, os.Getenv("AUTH0_AUDIENCE"))
 	if err != nil {
 		log.Fatalf("Failed to set up the jwt validator: %v", err)
 	}
 	return handler
 }
 
-// ensureValidToken is EnsureValidToken for a given issuer and audience.
-func ensureValidToken(issuerURL *url.URL, audience string, jwksOptions ...any) (gin.HandlerFunc, error) {
+// EnsureValidTokenFrom is EnsureValidToken for a given issuer and audience.
+// jwksOptions are passed to the JWKS provider; see newValidator.
+func EnsureValidTokenFrom(issuerURL *url.URL, audience string, jwksOptions ...any) (gin.HandlerFunc, error) {
 	jwtValidator, err := newValidator(issuerURL, audience, func() validator.CustomClaims {
 		return &CustomClaims{}
 	}, jwksOptions...)
