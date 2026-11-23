@@ -64,6 +64,12 @@ type Service interface {
 	InsertDigestDeliveries(ctx context.Context, deliveries []models.DigestDelivery) (int, error)
 	ListDeliveredEventIDs(ctx context.Context, userID primitive.ObjectID, eventIDs []string) (map[string]bool, error)
 	DeleteDigestDeliveries(ctx context.Context, userID primitive.ObjectID, eventIDs []string) (int, error)
+
+	// Usage counters (usage_repo.go): the spend limits of features that cost
+	// money per call. ReserveUsage is an atomic check-and-increment.
+	ReserveUsage(ctx context.Context, key string, limit int, expiresAt time.Time) (count int, ok bool, err error)
+	ReleaseUsage(ctx context.Context, key string) error
+	UsageCounts(ctx context.Context, keys []string) (map[string]int, error)
 }
 
 type service struct {
@@ -104,6 +110,7 @@ const (
 	collTitles    = "titles"
 	collEvents    = "availability_events"
 	collDelivered = "digest_deliveries"
+	collUsage     = "usage_counters"
 )
 
 func New() Service {
@@ -242,6 +249,16 @@ func ensureIndexes(ctx context.Context, db *mongo.Database) error {
 			Keys:    bson.D{{Key: "expires_at", Value: 1}},
 			Options: options.Index().SetExpireAfterSeconds(0).SetName("expires_at_ttl"),
 		},
+	})
+	if err != nil {
+		return err
+	}
+
+	// Usage counters are read and written by _id alone. The TTL index removes
+	// each period's counter once the period is well over.
+	_, err = db.Collection(collUsage).Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys:    bson.D{{Key: "expires_at", Value: 1}},
+		Options: options.Index().SetExpireAfterSeconds(0).SetName("expires_at_ttl"),
 	})
 	return err
 }

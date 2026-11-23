@@ -3,7 +3,8 @@
 // reproduces the semantics the application relies on: compare-and-set on
 // snapshots and digest schedules, event de-duplication by ID, per-region
 // projection, the two unique indexes on watchlist items, the conditions on
-// the IMDb sync's writes, and millisecond time precision.
+// the IMDb sync's writes, the limit on a usage counter, and millisecond time
+// precision.
 package storetest
 
 import (
@@ -32,6 +33,8 @@ type Store struct {
 	events map[string]models.AvailabilityEvent
 	// deliveries is keyed by user and event, like the unique index.
 	deliveries map[deliveryKey]models.DigestDelivery
+	// usage holds the usage counters by key.
+	usage map[string]int
 
 	// Err, when set, is returned by every method. It simulates an outage.
 	Err error
@@ -65,6 +68,7 @@ func New() *Store {
 		titles:     make(map[string]*models.Title),
 		events:     make(map[string]models.AvailabilityEvent),
 		deliveries: make(map[deliveryKey]models.DigestDelivery),
+		usage:      make(map[string]int),
 		Queries:    make(map[string]int),
 		Fail:       make(map[string]error),
 		Stall:      make(map[string]bool),
@@ -262,6 +266,32 @@ func (s *Store) Deliveries(userID primitive.ObjectID) []string {
 	}
 	sort.Strings(ids)
 	return ids
+}
+
+// Usage returns the value of a usage counter; zero when it does not exist.
+func (s *Store) Usage(key string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.usage[key]
+}
+
+// UsageKeys returns the keys of the usage counters that exist, sorted.
+func (s *Store) UsageKeys() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	keys := make([]string, 0, len(s.usage))
+	for key := range s.usage {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+// SetUsage sets a usage counter, as if that many reservations had been made.
+func (s *Store) SetUsage(key string, count int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.usage[key] = count
 }
 
 func cloneTitle(t *models.Title, regions []string) *models.Title {
@@ -996,4 +1026,51 @@ func (s *Store) DeleteDigestDeliveries(ctx context.Context, userID primitive.Obj
 		}
 	}
 	return deleted, nil
+}
+
+// --- usage counters ---
+
+// ReserveUsage is a check-and-increment under the store's lock: like the
+// real conditional write, concurrent callers never take a counter past its
+// limit, and a limit of zero or less creates nothing.
+func (s *Store) ReserveUsage(ctx context.Context, key string, limit int, expiresAt time.Time) (int, bool, error) {
+	unlock, err := s.begin(ctx, "ReserveUsage")
+	defer unlock()
+	if err != nil {
+		return 0, false, err
+	}
+	if limit <= 0 || s.usage[key] >= limit {
+		return 0, false, nil
+	}
+	s.usage[key]++
+	s.Writes++
+	return s.usage[key], true, nil
+}
+
+func (s *Store) ReleaseUsage(ctx context.Context, key string) error {
+	unlock, err := s.begin(ctx, "ReleaseUsage")
+	defer unlock()
+	if err != nil {
+		return err
+	}
+	if s.usage[key] > 0 {
+		s.usage[key]--
+		s.Writes++
+	}
+	return nil
+}
+
+func (s *Store) UsageCounts(ctx context.Context, keys []string) (map[string]int, error) {
+	unlock, err := s.begin(ctx, "UsageCounts")
+	defer unlock()
+	if err != nil {
+		return nil, err
+	}
+	counts := make(map[string]int, len(keys))
+	for _, key := range keys {
+		if count, ok := s.usage[key]; ok {
+			counts[key] = count
+		}
+	}
+	return counts, nil
 }
