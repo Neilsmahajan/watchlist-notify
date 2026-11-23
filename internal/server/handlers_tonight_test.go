@@ -62,13 +62,15 @@ func (m *pickerModel) called() int {
 // store, a fake model and a stand-in for the JWT middleware that signs every
 // request in as email.
 type tonightHarness struct {
-	t      *testing.T
-	store  *storetest.Store
-	model  *pickerModel
-	user   *models.User
-	email  string // who the requests are signed in as
-	router http.Handler
-	nextID int
+	t     *testing.T
+	store *storetest.Store
+	model *pickerModel
+	user  *models.User
+	email string // who the requests are signed in as
+	// authTook is how long the stand-in sign-in check appears to take.
+	authTook time.Duration
+	router   http.Handler
+	nextID   int
 }
 
 // newTonightHarness builds the API. A nil limits leaves the feature off, as
@@ -95,8 +97,14 @@ func newTonightHarness(t *testing.T, limits *tonight.Limits) *tonightHarness {
 		s.recommender = tonight.New(lister, h.model, store, *limits)
 	}
 	router, err := s.routes(routeConfig{
-		origins:  []string{"http://localhost:3000"},
-		restAuth: func(c *gin.Context) { c.Set("user_email", h.email) },
+		origins: []string{"http://localhost:3000"},
+		restAuth: func(c *gin.Context) {
+			if h.authTook > 0 {
+				// As if the check had started this long before it finished.
+				c.Set(arrivalKey, requestArrival(c).Add(-h.authTook))
+			}
+			c.Set("user_email", h.email)
+		},
 	})
 	if err != nil {
 		t.Fatalf("routes: %v", err)
@@ -531,6 +539,33 @@ func TestTonightFailures(t *testing.T) {
 				t.Errorf("the model was called %d times, want %d", h.model.called(), tc.calls)
 			}
 		})
+	}
+}
+
+// The deadline runs from the request's arrival, not from the end of the
+// sign-in check: after a slow check there is no time for a model call, and
+// none is made or counted.
+func TestTonightCountsTheSignInCheckAgainstItsDeadline(t *testing.T) {
+	h := newTonightHarness(t, defaultLimits)
+	h.addTitles(6)
+
+	h.authTook = tonightDeadline - tonight.MinCallTime + time.Second
+	body := h.ask(`{}`, http.StatusGatewayTimeout)
+	if msg, _ := body["error"].(string); msg == "" || len(body) != 1 {
+		t.Errorf("body = %v, want only an error message", body)
+	}
+	if h.model.called() != 0 {
+		t.Errorf("the model was called %d times with no time to answer", h.model.called())
+	}
+
+	// Nothing was counted: the next request has the whole day's budget.
+	h.authTook = time.Second
+	body = h.ask(`{}`, http.StatusOK)
+	if got, want := body["remaining_today"], float64(tonight.DefaultPerUser-1); got != want {
+		t.Errorf("remaining_today = %v after a refused request and one answered, want %v", got, want)
+	}
+	if h.model.called() != 1 {
+		t.Errorf("the model was called %d times, want 1", h.model.called())
 	}
 }
 

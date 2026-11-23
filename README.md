@@ -119,7 +119,7 @@ The API image is built and deployed to Cloud Run with [scripts/release.sh](scrip
 ## Notes and limits
 
 - Availability is for the user's region and is as fresh as the daily refresh.
-- IMDb has no public API. The sync reads a public list that the user links, and IMDb's terms restrict automated use. For that reason it is opt-in, reads each linked list at most once a day and stores only title IDs.
+- IMDb has no public API. The sync reads a public list that the user links, and IMDb's terms restrict automated use. For that reason it is opt-in, reads a list when it is linked and then once a day, and stores only title IDs.
 - The "What should I watch tonight?" picker needs an Anthropic API key and is subject to the daily caps described above.
 
 ## Credits and licence

@@ -822,7 +822,7 @@
                         }
                     },
                     "504": {
-                        "description": "The model did not answer in time",
+                        "description": "The model did not answer in time, or too little time was left to ask it",
                         "schema": {
                             "$ref": "#/definitions/internal_server.ErrorResponse"
                         }

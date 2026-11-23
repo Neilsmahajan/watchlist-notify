@@ -1211,7 +1211,9 @@ ones for every call (and nothing else about it).
 - `502` - Claude returned an error, declined, or gave an answer with no usable
   pick. The call counted
 - `503` - recommendations are not enabled on this server
-- `504` - Claude did not answer within 20 seconds. The call counted
+- `504` - Claude did not answer within 20 seconds, and the call counted. Or
+  the request had under 5 seconds left of the 27 it may take, counted from
+  its arrival, so Claude was not asked and nothing counted
 
 ## Request Examples
 

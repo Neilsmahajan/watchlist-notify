@@ -19,9 +19,10 @@ import (
 )
 
 const (
-	// tonightDeadline is how long the whole request may take: the model call
-	// (tonight.ModelTimeout, 20 s) with the database reads around it, inside
-	// the server's 30 s write timeout.
+	// tonightDeadline is how long the whole request may take, counted from
+	// its arrival: the sign-in check, the model call (tonight.ModelTimeout,
+	// 20 s) and the database reads around it, inside the server's 30 s write
+	// timeout.
 	tonightDeadline = 27 * time.Second
 	// tonightMaxBody is far more than the largest valid request body.
 	tonightMaxBody = 8 << 10
@@ -65,14 +66,16 @@ type TonightLimitResponse struct {
 // @Failure 500 {object} ErrorResponse "Database error"
 // @Failure 502 {object} ErrorResponse "The model failed or its answer could not be used"
 // @Failure 503 {object} ErrorResponse "Recommendations are not enabled on this server"
-// @Failure 504 {object} ErrorResponse "The model did not answer in time"
+// @Failure 504 {object} ErrorResponse "The model did not answer in time, or too little time was left to ask it"
 // @Router /api/recommendations/tonight [post]
 func (s *Server) tonightHandler(c *gin.Context) {
 	if s.recommender == nil {
 		jsonError(c, http.StatusServiceUnavailable, "recommendations are not enabled on this server")
 		return
 	}
-	ctx, cancel := context.WithTimeout(c.Request.Context(), tonightDeadline)
+	// The time the sign-in check took is already spent: the write timeout
+	// has been running since the request arrived, so the deadline does too.
+	ctx, cancel := context.WithDeadline(c.Request.Context(), requestArrival(c).Add(tonightDeadline))
 	defer cancel()
 
 	// The demo account is refused here, like on every authenticated route.
