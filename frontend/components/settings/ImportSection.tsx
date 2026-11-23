@@ -224,15 +224,6 @@ function ImdbLink({ initial }: { initial: ImdbSync | null }) {
                 <p className="mt-2 text-sm text-danger">{sync.last_error}</p>
               )}
               <div className="mt-4 flex flex-wrap items-center gap-2.5">
-                <Button
-                  size="sm"
-                  variant="secondary"
-                  onClick={() => void link(sync.source_id)}
-                  loading={busy === "link"}
-                  disabled={busy !== null || waiting}
-                >
-                  {waiting ? `Sync again in ${cooldown}s` : "Sync now"}
-                </Button>
                 {confirmUnlink ? (
                   <>
                     <Button
