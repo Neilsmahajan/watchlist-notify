@@ -126,6 +126,8 @@ type Result struct {
 	Type      string `json:"type"` // movie | tv
 	PosterURL string `json:"poster_url,omitempty"`
 	Poster    string `json:"poster_path,omitempty"`
+	// Overview is TMDb's synopsis. It tells apart titles that share a name.
+	Overview string `json:"overview,omitempty"`
 }
 
 type SearchResp struct {
@@ -145,6 +147,7 @@ type SearchEntry struct {
 	MediaType     string `json:"media_type"`
 	OriginalTitle string `json:"original_title"`
 	OriginalName  string `json:"original_name"`
+	Overview      string `json:"overview"`
 }
 
 type findResp struct {
@@ -449,6 +452,7 @@ func entryToResult(r SearchEntry, typ string) Result {
 		Type:      mediaType,
 		PosterURL: posterURL,
 		Poster:    r.PosterPath,
+		Overview:  strings.TrimSpace(r.Overview),
 	}
 }
 

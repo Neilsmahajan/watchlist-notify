@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -11,7 +12,6 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/neilsmahajan/watchlist-notify/internal/cache"
-	"github.com/neilsmahajan/watchlist-notify/internal/providers/tmdb"
 )
 
 // healthHandler godoc
@@ -54,7 +54,7 @@ func (s *Server) healthHandler(c *gin.Context) {
 // @Router /api/search [get]
 func (s *Server) searchHandler(c *gin.Context) {
 	if s.tmdb == nil {
-		jsonError(c, http.StatusServiceUnavailable, "search unavailable")
+		jsonError(c, http.StatusServiceUnavailable, errSearchUnavailable.Error())
 		return
 	}
 	q := strings.TrimSpace(c.Query("query"))
@@ -83,69 +83,91 @@ func (s *Server) searchHandler(c *gin.Context) {
 	if v := c.Query("include_adult"); v != "" {
 		includeAdult = v == "1" || strings.EqualFold(v, "true")
 	}
-	language := c.Query("language")
-	region := c.Query("region")
-	if region == "" {
-		if def := os.Getenv("TMDB_REGION"); def != "" {
-			region = def
-		}
-	}
-	var (
-		results    []tmdb.Result
-		pageNow    int
-		totalPages int
-	)
-
 	key := cache.SearchKey{
 		Query:        q,
 		Page:         page,
 		IncludeAdult: includeAdult,
-		Language:     language,
-		Region:       region,
+		Language:     c.Query("language"),
+		Region:       searchRegion(c.Query("region")),
 		Type:         typ,
 	}
 
-	cacheEntry, err := s.cache.GetSearchResults(c.Request.Context(), key)
+	found, err := s.searchTitles(c.Request.Context(), key)
 	switch {
-	case err == nil && cacheEntry != nil:
-		results = cacheEntry.Results
-		pageNow = cacheEntry.Page
-		totalPages = cacheEntry.TotalPages
-	case errors.Is(err, cache.ErrMiss):
-		fallthrough
-	default:
-		if err != nil && !errors.Is(err, cache.ErrMiss) {
-			log.Printf("cache: search lookup failed: %v", err)
-		}
-		searchCtx, cancel := s.lookupContext(c.Request.Context())
-		results, pageNow, totalPages, err = s.tmdb.SearchTMDb(searchCtx, q, page, includeAdult, language, region, typ)
-		timedOut := errors.Is(searchCtx.Err(), context.DeadlineExceeded)
-		cancel()
-		if err != nil {
-			if timedOut {
-				jsonError(c, http.StatusGatewayTimeout, "upstream search timed out")
-				return
-			}
-			jsonError(c, http.StatusBadGateway, "upstream search failed")
-			return
-		}
-		if cacheErr := s.cache.SetSearchResults(c.Request.Context(), key, cache.SearchValue{
-			Results:    results,
-			Page:       pageNow,
-			TotalPages: totalPages,
-		}); cacheErr != nil {
-			log.Printf("cache: search store failed: %v", cacheErr)
-		}
+	case errors.Is(err, errSearchUnavailable):
+		jsonError(c, http.StatusServiceUnavailable, err.Error())
+		return
+	case errors.Is(err, errSearchTimedOut):
+		jsonError(c, http.StatusGatewayTimeout, errSearchTimedOut.Error())
+		return
+	case err != nil:
+		jsonError(c, http.StatusBadGateway, errSearchFailed.Error())
+		return
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"results":       results,
-		"page":          pageNow,
-		"total_pages":   totalPages,
+		"results":       found.Results,
+		"page":          found.Page,
+		"total_pages":   found.TotalPages,
 		"query":         q,
 		"type":          typ,
 		"include_adult": includeAdult,
-		"language":      language,
-		"region":        region,
+		"language":      key.Language,
+		"region":        key.Region,
 	})
+}
+
+// What searchTitles can fail with. The text is what a client is shown.
+var (
+	// errSearchUnavailable: the API runs without a TMDb key.
+	errSearchUnavailable = errors.New("search unavailable")
+	// errSearchTimedOut: TMDb did not answer within the lookup budget.
+	errSearchTimedOut = errors.New("upstream search timed out")
+	errSearchFailed   = errors.New("upstream search failed")
+)
+
+// searchRegion returns the region a search is made for: the one asked for,
+// or the deployment's default.
+func searchRegion(region string) string {
+	if region == "" {
+		return os.Getenv("TMDB_REGION")
+	}
+	return region
+}
+
+// searchTitles returns one page of TMDb search results, from the cache when
+// it holds them and from TMDb, within the lookup budget, when it does not.
+// It is what GET /api/search and the search_titles tool both do, so a search
+// made by one is a cache hit for the other.
+//
+// A cache that cannot be read or written is logged and otherwise ignored.
+// The error wraps errSearchUnavailable, errSearchTimedOut or errSearchFailed.
+func (s *Server) searchTitles(ctx context.Context, key cache.SearchKey) (*cache.SearchValue, error) {
+	if s.tmdb == nil {
+		return nil, errSearchUnavailable
+	}
+	cached, err := s.cache.GetSearchResults(ctx, key)
+	if err == nil && cached != nil {
+		return cached, nil
+	}
+	if err != nil && !errors.Is(err, cache.ErrMiss) {
+		log.Printf("cache: search lookup failed: %v", err)
+	}
+
+	searchCtx, cancel := s.lookupContext(ctx)
+	results, page, totalPages, err := s.tmdb.SearchTMDb(searchCtx, key.Query, key.Page, key.IncludeAdult, key.Language, key.Region, key.Type)
+	timedOut := errors.Is(searchCtx.Err(), context.DeadlineExceeded)
+	cancel()
+	if err != nil {
+		if timedOut {
+			return nil, fmt.Errorf("%w: %w", errSearchTimedOut, err)
+		}
+		return nil, fmt.Errorf("%w: %w", errSearchFailed, err)
+	}
+
+	found := &cache.SearchValue{Results: results, Page: page, TotalPages: totalPages}
+	if cacheErr := s.cache.SetSearchResults(ctx, key, *found); cacheErr != nil {
+		log.Printf("cache: search store failed: %v", cacheErr)
+	}
+	return found, nil
 }

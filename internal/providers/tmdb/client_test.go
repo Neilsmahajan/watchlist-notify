@@ -288,3 +288,31 @@ func TestParseRetryAfter(t *testing.T) {
 		t.Errorf("parseRetryAfter(HTTP date 90s ahead) = %v", got)
 	}
 }
+
+func TestSearchReturnsWhatTellsTitlesApart(t *testing.T) {
+	var gotPath, gotQuery string
+	c, _ := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		gotPath, gotQuery = r.URL.Path, r.URL.Query().Get("query")
+		_, _ = w.Write([]byte(`{"page": 1, "total_pages": 3, "results": [
+			{"id": 1399, "name": "Game of Thrones", "first_air_date": "2011-04-17", "poster_path": "/got.jpg",
+			 "overview": "  Seven noble families fight for control of Westeros.\n"},
+			{"id": 2, "original_name": "Untitled"}
+		]}`))
+	})
+
+	results, page, totalPages, err := c.SearchTMDb(context.Background(), "thrones", 1, false, "", "", "tv")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotPath != "/search/tv" || gotQuery != "thrones" || page != 1 || totalPages != 3 {
+		t.Errorf("path = %q, query = %q, page = %d of %d", gotPath, gotQuery, page, totalPages)
+	}
+	want := []Result{
+		{TMDBID: 1399, Title: "Game of Thrones", Year: 2011, Type: "tv", PosterURL: defaultImageBase + "/got.jpg",
+			Poster: "/got.jpg", Overview: "Seven noble families fight for control of Westeros."},
+		{TMDBID: 2, Title: "Untitled", Type: "tv"},
+	}
+	if !reflect.DeepEqual(results, want) {
+		t.Errorf("results = %+v\nwant      %+v", results, want)
+	}
+}

@@ -308,6 +308,47 @@ func (s *Store) GetUserByEmail(ctx context.Context, email string) (*models.User,
 	return nil, nil
 }
 
+// UpsertUser creates the user with that email, with the defaults the real
+// upsert sets on insert, or updates the name and picture of the one that
+// exists.
+func (s *Store) UpsertUser(ctx context.Context, u *models.User) error {
+	unlock, err := s.begin(ctx, "UpsertUser")
+	defer unlock()
+	if err != nil {
+		return err
+	}
+	now := ms(time.Now())
+	for _, existing := range s.users {
+		if existing.Email == u.Email {
+			existing.Name, existing.Picture, existing.UpdatedAt = u.Name, u.Picture, now
+			if u.Region != "" {
+				existing.Region = u.Region
+			}
+			s.Writes++
+			return nil
+		}
+	}
+	created := &models.User{
+		ID:        primitive.NewObjectID(),
+		Email:     u.Email,
+		Name:      u.Name,
+		Picture:   u.Picture,
+		Region:    u.Region,
+		Services:  []models.ServiceSubscription{},
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	if created.Region == "" {
+		created.Region = database.DefaultRegion()
+	}
+	created.Preferences.UseAccountEmail = true
+	created.Preferences.Digest.Interval = 1
+	created.Preferences.Digest.IntervalUnit = "days"
+	s.users[created.ID] = created
+	s.Writes++
+	return nil
+}
+
 func (s *Store) GetUsersForDigest(ctx context.Context, now time.Time) ([]*models.User, error) {
 	unlock, err := s.begin(ctx, "GetUsersForDigest")
 	defer unlock()
@@ -559,6 +600,71 @@ func (s *Store) findItem(userID, itemID primitive.ObjectID) *models.WatchlistIte
 		}
 	}
 	return nil
+}
+
+// UpdateWatchlistItem sets fields, keyed by their stored names, on the user's
+// item. Like the real update it matches on the item and the user together,
+// so another user's item is not found, and it refuses a change that would
+// make the item a duplicate of another one.
+func (s *Store) UpdateWatchlistItem(ctx context.Context, userID, itemID primitive.ObjectID, fields map[string]any) (*models.WatchlistItem, error) {
+	unlock, err := s.begin(ctx, "UpdateWatchlistItem")
+	defer unlock()
+	if err != nil {
+		return nil, err
+	}
+	if len(fields) == 0 {
+		return nil, errors.New("no fields to update")
+	}
+	item := s.findItem(userID, itemID)
+	if item == nil {
+		return nil, database.ErrWatchlistItemNotFound
+	}
+	updated := cloneItem(item)
+	for field, value := range fields {
+		switch field {
+		case "title":
+			updated.Title, _ = value.(string)
+		case "status":
+			updated.Status, _ = value.(string)
+		case "tags":
+			tags, _ := value.([]string)
+			updated.Tags = append([]string(nil), tags...)
+		case "year":
+			updated.Year, _ = value.(int)
+		case "tmdb_id":
+			updated.TMDbID, _ = value.(int)
+		default:
+			return nil, errors.New("storetest: update of " + field + " is not implemented")
+		}
+	}
+	for _, other := range s.items {
+		if other != item && other.UserID == userID && updated.TMDbID > 0 &&
+			other.TMDbID == updated.TMDbID && other.Type == updated.Type {
+			return nil, database.ErrDuplicateWatchlistItem
+		}
+	}
+	updated.UpdatedAt = ms(time.Now())
+	*item = *updated
+	s.Writes++
+	return cloneItem(item), nil
+}
+
+// DeleteWatchlistItem removes the user's item. Like the real delete it
+// matches on the item and the user together.
+func (s *Store) DeleteWatchlistItem(ctx context.Context, userID, itemID primitive.ObjectID) error {
+	unlock, err := s.begin(ctx, "DeleteWatchlistItem")
+	defer unlock()
+	if err != nil {
+		return err
+	}
+	for i, item := range s.items {
+		if item.ID == itemID && item.UserID == userID {
+			s.items = append(s.items[:i], s.items[i+1:]...)
+			s.Writes++
+			return nil
+		}
+	}
+	return database.ErrWatchlistItemNotFound
 }
 
 // AdoptWatchlistItem applies the same conditions as the real filter: the
