@@ -42,6 +42,12 @@ func (s *Server) getUserWithin(ctx context.Context, c *gin.Context) (*models.Use
 		return nil, false
 	}
 	email, _ := emailVal.(string)
+	if isReservedEmail(email) {
+		// The demo account is served read-only by the public demo endpoints.
+		// It must never be usable as a login, whoever registers its address.
+		jsonError(c, http.StatusForbidden, "this account is reserved")
+		return nil, false
+	}
 	user, err := s.db.GetUserByEmail(ctx, email)
 	if err != nil {
 		jsonError(c, http.StatusInternalServerError, "failed to fetch user")

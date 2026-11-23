@@ -1,20 +1,26 @@
+import type { Metadata } from "next";
+import { Suspense } from "react";
 import SearchClient from "@/components/pages/SearchClient";
-import { auth0 } from "@/lib/auth0";
-import type { SessionUser } from "@/lib/auth/types";
+import { PageHeading, PageShell } from "@/components/ui";
+import { getSessionUser } from "@/lib/auth/session";
 import { redirect } from "next/navigation";
 
-export default async function Search() {
-  try {
-    const session = await auth0.getSession();
-    const user = session?.user ? (session.user as SessionUser) : null;
+export const metadata: Metadata = {
+  title: "Search",
+  robots: { index: false },
+};
 
-    if (!user) {
-      redirect("/auth/login");
-    }
+export default async function SearchPage() {
+  if (!(await getSessionUser())) redirect("/auth/login?returnTo=%2Fsearch");
 
-    return <SearchClient user={user} />;
-  } catch (err) {
-    console.error("Search session lookup failed", err);
-    redirect("/auth/login");
-  }
+  return (
+    <PageShell>
+      <PageHeading title="Find something to watch">
+        Search films and series, and add them to your watchlist.
+      </PageHeading>
+      <Suspense>
+        <SearchClient />
+      </Suspense>
+    </PageShell>
+  );
 }

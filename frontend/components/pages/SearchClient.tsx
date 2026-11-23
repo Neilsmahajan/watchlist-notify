@@ -1,404 +1,295 @@
 "use client";
 
-import Image from "next/image";
-import { FormEvent, useCallback, useState } from "react";
-import { Button, LoadingSpinner } from "@/components/ui";
-import type { SessionUser } from "@/lib/auth/types";
+import Link from "next/link";
+import { useSearchParams } from "next/navigation";
+import { useCallback, useEffect, useRef, useState } from "react";
+import Poster from "@/components/Poster";
+import { GRID_SIZES } from "@/components/watchlist/TitleTile";
+import { Button, EmptyState, FIELD, Notice, PosterGridSkeleton, cx } from "@/components/ui";
+import { IconCheck, IconPlus, IconSearch } from "@/components/icons";
 import { redirectToLogin } from "@/lib/auth/client";
+import { posterPathFromUrl } from "@/lib/tmdb";
+import { readError } from "@/lib/watchlist/client";
 
-type SearchResult = {
-  tmdb_id: number;
+type Kind = "movie" | "tv";
+
+type Result = {
+  tmdb_id?: number;
   title: string;
   year?: number;
-  type: "movie" | "tv";
+  type?: Kind;
   poster_url?: string;
+  poster_path?: string;
 };
 
-type SearchResponse = {
-  results?: SearchResult[];
-  error?: string;
-};
+// What happened to a result the user tried to add.
+type Added = "adding" | "added" | "exists";
 
-interface SearchClientProps {
-  user: SessionUser | null;
-}
+const KINDS: { value: Kind; label: string }[] = [
+  { value: "movie", label: "Films" },
+  { value: "tv", label: "Series" },
+];
 
-export default function SearchClient({ user }: SearchClientProps) {
-  const [searchQuery, setSearchQuery] = useState("");
-  const [searchType, setSearchType] = useState<"movie" | "tv">("movie");
-  const [results, setResults] = useState<SearchResult[]>([]);
-  const [isSearching, setIsSearching] = useState(false);
+const keyOf = (kind: Kind, result: Result) => `${kind}:${result.tmdb_id ?? result.title}`;
+
+// Search TMDB and add what you find. The query and the kind live in the
+// address bar, so a search can be reloaded, shared, or gone back to.
+export default function SearchClient() {
+  const params = useSearchParams();
+  const query = (params.get("q") ?? "").trim().slice(0, 100);
+  const kind: Kind = params.get("type") === "tv" ? "tv" : "movie";
+
+  const [text, setText] = useState(query);
+  const [results, setResults] = useState<Result[] | null>(null);
+  const [shownFor, setShownFor] = useState("");
+  const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [hasSearched, setHasSearched] = useState(false);
-  const [addingId, setAddingId] = useState<string | null>(null);
-  const [watchlistStatus, setWatchlistStatus] = useState<
-    Record<string, "added" | "error">
-  >({});
-  const [watchlistError, setWatchlistError] = useState<string | null>(null);
-  const [watchlistMessage, setWatchlistMessage] = useState<string | null>(null);
+  const [added, setAdded] = useState<Record<string, Added>>({});
+  const [addError, setAddError] = useState<string | null>(null);
+  const [retry, setRetry] = useState(0);
+  const input = useRef<HTMLInputElement>(null);
 
-  const getResultKey = (item: SearchResult) =>
-    item.tmdb_id
-      ? `${item.type}-${item.tmdb_id}`
-      : `${item.type}-${item.title}`;
-
-  const handleUnauthorized = useCallback((response: Response) => {
-    if (response.status !== 401) {
-      return false;
-    }
-    redirectToLogin();
-    return true;
+  const navigate = useCallback((nextQuery: string, nextKind: Kind, replace: boolean) => {
+    const search = new URLSearchParams();
+    if (nextQuery) search.set("q", nextQuery);
+    if (nextKind === "tv") search.set("type", "tv");
+    const url = search.size ? `/search?${search}` : "/search";
+    if (replace) window.history.replaceState(null, "", url);
+    else window.history.pushState(null, "", url);
   }, []);
 
-  if (!user) {
-    return (
-      <div className="flex min-h-[50vh] flex-col items-center justify-center gap-3 text-center">
-        <h1 className="text-2xl font-semibold text-gray-900">
-          Sign in to search the catalog
-        </h1>
-        <p className="text-gray-600">
-          Create an account or log in to find titles and save them to your
-          watchlist.
-        </p>
-        <Button href="/auth/login">Sign in</Button>
-      </div>
-    );
-  }
+  // Typing searches after a pause, without a history entry per keystroke.
+  useEffect(() => {
+    const wanted = text.trim();
+    if (wanted === query) return;
+    const timer = window.setTimeout(() => navigate(wanted, kind, true), 350);
+    return () => window.clearTimeout(timer);
+  }, [text, query, kind, navigate]);
 
-  const handleSearch = async (queryValue: string) => {
-    const trimmed = queryValue.trim();
-    if (!trimmed) {
+  // The back button changes the address; the field follows.
+  useEffect(() => {
+    setText((current) => (current.trim() === query ? current : query));
+  }, [query]);
+
+  const requestKey = `${kind}:${query}`;
+  useEffect(() => {
+    if (!query) {
+      setResults(null);
+      setShownFor("");
+      setError(null);
+      setLoading(false);
       return;
     }
-
-    setSearchQuery(trimmed);
-    setHasSearched(true);
-    setIsSearching(true);
+    const controller = new AbortController();
+    setLoading(true);
     setError(null);
-    setResults([]);
-    setWatchlistError(null);
-    setWatchlistMessage(null);
-    setWatchlistStatus({});
-    setAddingId(null);
-
-    try {
-      const params = new URLSearchParams({
-        query: trimmed,
-        type: searchType,
-      });
-
-      const response = await fetch(`/api/search?${params.toString()}`);
-
-      if (handleUnauthorized(response)) {
-        return;
-      }
-      const data = (await response
-        .json()
-        .catch(() => null)) as SearchResponse | null;
-
-      if (!response.ok) {
-        const message = data?.error || "Search failed. Please try again.";
-        setError(message);
-        setResults([]);
-        return;
-      }
-
-      const items = data?.results;
-      if (Array.isArray(items)) {
-        setResults(items);
-      } else {
-        setResults([]);
-      }
-    } catch (err) {
-      console.error("Search error", err);
-      setError("Unable to reach search service. Please retry in a moment.");
-    } finally {
-      setIsSearching(false);
-    }
-  };
-
-  const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    void handleSearch(searchQuery);
-  };
-
-  const handleSuggestionClick = (title: string) => {
-    setSearchQuery(title);
-    void handleSearch(title);
-  };
-
-  const handleAddToWatchlist = async (item: SearchResult) => {
-    const key = getResultKey(item);
-    if (watchlistStatus[key] === "added" || addingId === key) {
-      return;
-    }
-
-    setAddingId(key);
-    setWatchlistError(null);
-    setWatchlistMessage(null);
-
-    try {
-      const typeForWatchlist = item.type === "tv" ? "show" : "movie";
-      const payload: Record<string, unknown> = {
-        title: item.title,
-        type: typeForWatchlist,
-      };
-
-      if (typeof item.year === "number") {
-        payload.year = item.year;
-      }
-
-      if (typeof item.tmdb_id === "number") {
-        payload.tmdb_id = item.tmdb_id;
-      }
-
-      const response = await fetch("/api/watchlist", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify(payload),
-      });
-
-      if (handleUnauthorized(response)) {
-        return;
-      }
-
-      const data = (await response.json().catch(() => null)) as {
-        error?: string;
-      } | null;
-
-      if (!response.ok) {
-        if (response.status === 409) {
-          setWatchlistStatus((prev) => ({ ...prev, [key]: "added" }));
-          setWatchlistMessage(`${item.title} is already in your watchlist.`);
+    fetch(`/api/search?${new URLSearchParams({ query, type: kind })}`, {
+      headers: { Accept: "application/json" },
+      signal: controller.signal,
+    })
+      .then(async (response) => {
+        if (response.status === 401) {
+          redirectToLogin();
           return;
         }
+        if (!response.ok) throw new Error(await readError(response, "The search did not work."));
+        const data = (await response.json()) as { results?: Result[] };
+        setResults(data.results ?? []);
+        setShownFor(requestKey);
+        setLoading(false);
+      })
+      .catch((cause: unknown) => {
+        if (controller.signal.aborted) return;
+        setError(cause instanceof Error ? cause.message : "The search did not work.");
+        setLoading(false);
+      });
+    return () => controller.abort();
+    // `requestKey` stands for query and kind.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [requestKey, retry]);
 
-        const message = data?.error || "Failed to add to watchlist.";
-        setWatchlistError(message);
-        setWatchlistStatus((prev) => ({ ...prev, [key]: "error" }));
+  const add = async (result: Result) => {
+    const key = keyOf(kind, result);
+    if (added[key]) return;
+    setAdded((all) => ({ ...all, [key]: "adding" }));
+    setAddError(null);
+    try {
+      const response = await fetch("/api/watchlist", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          title: result.title,
+          type: kind === "tv" ? "show" : "movie",
+          ...(typeof result.year === "number" && result.year > 0 ? { year: result.year } : {}),
+          ...(typeof result.tmdb_id === "number" ? { tmdb_id: result.tmdb_id } : {}),
+        }),
+      });
+      if (response.status === 401) return redirectToLogin();
+      if (response.status === 409) {
+        setAdded((all) => ({ ...all, [key]: "exists" }));
         return;
       }
-
-      setWatchlistStatus((prev) => ({ ...prev, [key]: "added" }));
-      setWatchlistMessage(`${item.title} added to your watchlist.`);
-    } catch (err) {
-      console.error("Add to watchlist error", err);
-      setWatchlistError("Unable to update watchlist. Please retry.");
-      setWatchlistStatus((prev) => ({ ...prev, [key]: "error" }));
-    } finally {
-      setAddingId(null);
+      if (!response.ok) {
+        throw new Error(await readError(response, `“${result.title}” could not be added.`));
+      }
+      setAdded((all) => ({ ...all, [key]: "added" }));
+    } catch (cause) {
+      setAdded((all) => {
+        const next = { ...all };
+        delete next[key];
+        return next;
+      });
+      setAddError(cause instanceof Error ? cause.message : `“${result.title}” could not be added.`);
     }
   };
 
+  const addedCount = Object.values(added).filter((state) => state === "added").length;
+  const stale = loading || shownFor !== requestKey;
+
   return (
-    <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
-      <div className="mb-8">
-        <h1 className="text-3xl font-bold text-gray-900 mb-2">
-          Search Content
-        </h1>
-        <p className="text-gray-600">
-          Find movies and TV shows to add to your watchlist
-        </p>
-      </div>
-
-      <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6 mb-8">
-        <form onSubmit={handleSubmit} className="flex gap-4">
-          <div className="flex-1">
-            <input
-              type="text"
-              placeholder="Search for movies, TV shows, actors, or directors..."
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-            />
-          </div>
-          <Button
-            disabled={!searchQuery.trim()}
-            loading={isSearching}
-            type="submit"
-          >
-            Search
-          </Button>
-        </form>
-
-        <div className="flex flex-wrap gap-2 mt-4 items-center">
-          <span className="text-sm font-medium text-gray-700">
-            Search type:
-          </span>
-          {["movie", "tv"].map((type) => {
-            const isActive = searchType === type;
-            return (
-              <button
-                key={type}
-                type="button"
-                onClick={() => setSearchType(type as "movie" | "tv")}
-                className={`px-3 py-1 text-sm rounded-full transition-colors border ${
-                  isActive
-                    ? "bg-blue-100 border-blue-300 text-blue-800"
-                    : "bg-white border-gray-200 text-gray-700 hover:bg-gray-100"
-                }`}
-                aria-pressed={isActive}
-              >
-                {type === "movie" ? "Movies" : "TV"}
-              </button>
-            );
-          })}
+    <div>
+      <form
+        role="search"
+        className="flex flex-col gap-3 sm:flex-row sm:items-center"
+        onSubmit={(event) => {
+          event.preventDefault();
+          navigate(text.trim(), kind, false);
+          input.current?.blur();
+        }}
+      >
+        <div className="relative min-w-0 flex-1">
+          <IconSearch className="pointer-events-none absolute left-4 top-1/2 size-5 -translate-y-1/2 text-faint" />
+          <input
+            ref={input}
+            type="search"
+            value={text}
+            onChange={(event) => setText(event.target.value)}
+            placeholder="Search for a film or series"
+            aria-label="Search for a film or series"
+            autoFocus
+            autoComplete="off"
+            enterKeyHint="search"
+            maxLength={100}
+            className={cx(FIELD, "h-14! rounded-2xl! pl-12 text-lg! sm:text-lg!")}
+          />
         </div>
-      </div>
+        <div role="radiogroup" aria-label="Kind" className="flex shrink-0 rounded-full border border-line-strong bg-surface p-1">
+          {KINDS.map((option) => (
+            <button
+              key={option.value}
+              type="button"
+              role="radio"
+              aria-checked={kind === option.value}
+              onClick={() => navigate(text.trim(), option.value, false)}
+              className={cx(
+                "h-10 flex-1 rounded-full px-5 text-sm font-medium transition-colors sm:flex-none",
+                kind === option.value ? "bg-fg text-bg" : "text-muted hover:text-fg",
+              )}
+            >
+              {option.label}
+            </button>
+          ))}
+        </div>
+      </form>
 
-      <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-8">
-        {watchlistMessage && (
-          <div className="mb-4 rounded-md bg-green-50 px-4 py-3 text-sm text-green-700">
-            {watchlistMessage}
-          </div>
-        )}
-        {watchlistError && (
-          <div className="mb-4 rounded-md bg-red-50 px-4 py-3 text-sm text-red-700">
-            {watchlistError}
-          </div>
-        )}
-        {(() => {
-          if (isSearching) {
-            return (
-              <div className="flex flex-col items-center gap-4 text-gray-500">
-                <LoadingSpinner size="lg" />
-                <p>
-                  Searching {searchType === "movie" ? "movies" : "TV shows"}...
-                </p>
-              </div>
-            );
+      {addedCount > 0 && (
+        <Notice
+          tone="ok"
+          className="mt-6"
+          action={
+            <Link href="/watchlist" className="font-medium underline underline-offset-4">
+              Open watchlist
+            </Link>
           }
+        >
+          {addedCount === 1 ? "1 title added" : `${addedCount} titles added`} to your watchlist.
+        </Notice>
+      )}
+      {addError && (
+        <Notice tone="error" className="mt-6">
+          {addError}
+        </Notice>
+      )}
 
-          if (error) {
-            return (
-              <div className="text-center text-red-600" role="alert">
-                {error}
-              </div>
-            );
-          }
-
-          if (!hasSearched) {
-            return (
-              <div className="text-center text-gray-500">
-                <svg
-                  className="w-16 h-16 mx-auto mb-4 text-gray-400"
-                  fill="none"
-                  stroke="currentColor"
-                  viewBox="0 0 24 24"
-                >
-                  <path
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    strokeWidth={2}
-                    d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"
-                  />
-                </svg>
-                <h3 className="text-lg font-medium text-gray-900 mb-2">
-                  Start your search
-                </h3>
-                <p className="text-gray-500 mb-6">
-                  Enter a movie or TV show title above to begin searching
-                </p>
-                <div className="max-w-md mx-auto">
-                  <h4 className="text-sm font-medium text-gray-700 mb-3">
-                    Popular searches:
-                  </h4>
-                  <div className="flex flex-wrap gap-2 justify-center">
-                    {[
-                      "The Bear",
-                      "Dune",
-                      "Stranger Things",
-                      "The Office",
-                      "Breaking Bad",
-                      "Avatar",
-                    ].map((title) => (
-                      <button
-                        key={title}
-                        onClick={() => handleSuggestionClick(title)}
-                        className="px-3 py-1 text-sm text-blue-600 bg-blue-50 rounded-full hover:bg-blue-100 transition-colors"
-                        type="button"
-                      >
-                        {title}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              </div>
-            );
-          }
-
-          if (results.length === 0) {
-            return (
-              <div className="text-center text-gray-500">
-                No results found for &ldquo;{searchQuery}&rdquo;. Try checking
-                the spelling or using a different title.
-              </div>
-            );
-          }
-
-          return (
-            <ul className="grid gap-6 sm:grid-cols-2 lg:grid-cols-3">
-              {results.map((item) => {
-                const key = getResultKey(item);
-                const status = watchlistStatus[key];
-                const isAdding = addingId === key;
-
+      <div className="mt-8" aria-live="polite" aria-busy={loading}>
+        {!query ? (
+          <EmptyState title="What do you want to watch?">
+            Type a title above. Each result can go onto your watchlist with one tap, and we
+            start checking where it streams straight away.
+          </EmptyState>
+        ) : error ? (
+          <Notice
+            tone="error"
+            action={
+              <Button size="sm" variant="secondary" onClick={() => setRetry((n) => n + 1)}>
+                Try again
+              </Button>
+            }
+          >
+            {error}
+          </Notice>
+        ) : results === null || (stale && results.length === 0) ? (
+          <PosterGridSkeleton count={12} />
+        ) : results.length === 0 ? (
+          <EmptyState title={`Nothing found for “${query}”`}>
+            Check the spelling, try fewer words, or switch between films and series.
+          </EmptyState>
+        ) : (
+          <>
+            <p className="slate mb-4 text-muted">
+              {results.length} {results.length === 1 ? "result" : "results"} from TMDB
+            </p>
+            <ul className={cx("poster-grid transition-opacity duration-200", stale && "opacity-45")}>
+              {results.map((result, index) => {
+                const key = keyOf(kind, result);
+                const state = added[key];
+                const done = state === "added" || state === "exists";
                 return (
-                  <li
-                    key={key}
-                    className="flex gap-4 rounded-lg border border-gray-200 p-4 shadow-sm"
-                  >
-                    <div className="w-24 flex-shrink-0">
-                      {item.poster_url ? (
-                        <Image
-                          src={item.poster_url}
-                          alt={`${item.title} poster`}
-                          width={96}
-                          height={144}
-                          className="h-36 w-24 rounded-md object-cover"
-                        />
-                      ) : (
-                        <div className="flex h-36 w-24 items-center justify-center rounded-md bg-gray-100 text-xs font-medium text-gray-500">
-                          No poster
-                        </div>
+                  <li key={`${key}:${index}`} className="flex min-w-0 flex-col">
+                    <Poster
+                      path={result.poster_path || posterPathFromUrl(result.poster_url)}
+                      title={result.title}
+                      year={result.year || undefined}
+                      sizes={GRID_SIZES}
+                      eager={index < 6}
+                      decorative
+                      className="ring-1 ring-line"
+                    />
+                    <p className="mt-2.5 text-[13px] font-medium leading-snug [overflow-wrap:anywhere] line-clamp-2 sm:text-sm">
+                      {result.title}
+                    </p>
+                    <p className="slate mb-2.5 mt-1 text-faint">{result.year || "Year unknown"}</p>
+                    <button
+                      type="button"
+                      onClick={() => void add(result)}
+                      disabled={Boolean(state)}
+                      aria-label={
+                        done
+                          ? `${result.title} is on your watchlist`
+                          : `Add ${result.title} to your watchlist`
+                      }
+                      className={cx(
+                        "mt-auto inline-flex h-9 w-full items-center justify-center gap-1.5 rounded-full text-[13px] font-medium transition-colors",
+                        done
+                          ? "bg-ok-soft text-ok"
+                          : "bg-accent text-accent-ink hover:bg-accent-hover disabled:opacity-60",
                       )}
-                    </div>
-                    <div className="flex flex-1 flex-col">
-                      <h3 className="text-lg font-semibold text-gray-900">
-                        {item.title}
-                      </h3>
-                      <p className="text-sm text-gray-600">
-                        {item.year ? item.year : "Year unknown"}
-                      </p>
-                      <span className="mt-2 inline-flex w-fit items-center rounded-full bg-blue-50 px-2 py-0.5 text-xs font-medium text-blue-700">
-                        {item.type === "movie" ? "Movie" : "TV"}
-                      </span>
-                      <div className="mt-auto pt-4">
-                        <Button
-                          variant="outline"
-                          className="w-full"
-                          type="button"
-                          onClick={() => handleAddToWatchlist(item)}
-                          disabled={status === "added" || isAdding}
-                          loading={isAdding}
-                        >
-                          {status === "added" ? "Added" : "Add to Watchlist"}
-                        </Button>
-                        {status === "error" && (
-                          <p className="mt-2 text-xs text-red-600">
-                            Something went wrong. Try again.
-                          </p>
-                        )}
-                      </div>
-                    </div>
+                    >
+                      {done ? <IconCheck className="size-4" /> : <IconPlus className="size-4" />}
+                      {state === "adding"
+                        ? "Adding"
+                        : state === "added"
+                          ? "Added"
+                          : state === "exists"
+                            ? "On your list"
+                            : "Add"}
+                    </button>
                   </li>
                 );
               })}
             </ul>
-          );
-        })()}
+          </>
+        )}
       </div>
     </div>
   );

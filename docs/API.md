@@ -60,6 +60,8 @@ Tokens expire after 24 hours. When you receive a `401 Unauthorized` response, ob
 The following endpoints do **not** require authentication:
 
 - `GET /health` - Service health check
+- `GET /api/demo/watchlist` and `GET /api/demo/services` - the read-only
+  public demo (see [Demo Endpoints](#demo-endpoints))
 
 ## Base URL & Endpoints
 
@@ -80,6 +82,7 @@ http://localhost:8080
 | Group         | Base Path               | Description                     |
 | ------------- | ----------------------- | ------------------------------- |
 | System        | `/`                     | Health and status               |
+| Demo          | `/api/demo`             | Public read-only demo watchlist |
 | Users         | `/api/me`               | User profile and preferences    |
 | IMDb sync     | `/api/me/imdb`          | Link a public IMDb list         |
 | Services      | `/api/me/services`      | Streaming service subscriptions |
@@ -247,6 +250,64 @@ Pings the database.
 {
   "status": "unavailable",
   "message": "database unreachable"
+}
+```
+
+---
+
+### Demo Endpoints
+
+The public demo on the website reads one seeded account
+(`demo@watchlistnotify.com`, created by `cmd/seed-demo`). These endpoints need
+no token and are read-only. Nobody can sign in as the demo account: an
+authenticated request carrying its address is answered with `403`.
+
+Limits, because anyone can call them:
+
+- `GET` only. There is no route that writes.
+- `limit` is capped at 60 (`0` or anything larger means 60; the default is 20).
+- `search` may be at most 64 characters (`400` otherwise).
+- They never call TMDb. A title without a stored snapshot is returned with
+  `"availability": null`.
+- The demo account, its items and its titles are read from the database at
+  most once every five minutes and kept in memory, whatever the query mix.
+  Responses carry `Cache-Control: public, max-age=300`.
+
+#### Demo Watchlist
+
+```http
+GET /api/demo/watchlist
+```
+
+Takes the same query parameters as [`GET /api/watchlist`](#list-watchlist-items)
+(`status`, `type`, `service`, `available`, `search`, `sort`, `limit`,
+`offset`) and returns the same body: `items` and `meta` with `total`,
+`region` and `facets`.
+
+**Response when the demo account has not been seeded:** `404 Not Found`
+
+```json
+{
+  "error": "demo not available"
+}
+```
+
+#### Demo Services
+
+```http
+GET /api/demo/services
+```
+
+The service catalogue with the demo account's services marked active.
+
+**Response:** `200 OK`
+
+```json
+{
+  "services": [
+    { "code": "netflix", "name": "Netflix", "access": "subscription", "active": true },
+    { "code": "tubi", "name": "Tubi", "access": "free", "active": false }
+  ]
 }
 ```
 
@@ -1108,6 +1169,10 @@ await api.patch("/api/me/preferences", {
   reports rows it ran out of time for
 - `GET /health` returns `503` when the database is unreachable
 - CORS is limited to the frontend's origin
+- Public read-only demo: `GET /api/demo/watchlist` and `GET /api/demo/services`
+- Responses are gzip-compressed when the client accepts it
+- The address `demo@watchlistnotify.com` is reserved: signing in with it is
+  refused with `403`
 
 ### Upcoming
 

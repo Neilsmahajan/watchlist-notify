@@ -1,85 +1,208 @@
-"use client";
+import Link from "next/link";
+import type { ReactNode } from "react";
 
-import { ReactNode } from "react";
-import { useTheme } from "@/components/ThemeProvider";
-
-function classNames(
-  ...classes: Array<string | false | null | undefined>
-): string {
-  return classes.filter(Boolean).join(" ");
+export function cx(...parts: (string | false | null | undefined)[]): string {
+  return parts.filter(Boolean).join(" ");
 }
 
-interface LoadingSpinnerProps {
-  size?: "sm" | "md" | "lg";
+// Text inputs and selects. 16px on phones, so iOS does not zoom on focus.
+// The shared look of a text field. A caller that needs another size overrides
+// it with an important utility (w-20!), since class order does not decide.
+export const FIELD =
+  "h-11 w-full rounded-xl border border-line-strong bg-surface px-3.5 text-base text-fg placeholder:text-faint transition-colors focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/30 disabled:opacity-60 sm:text-[15px]";
+
+const BUTTON_BASE =
+  "inline-flex items-center justify-center gap-2 rounded-full font-medium whitespace-nowrap transition-[background-color,border-color,color,transform] duration-150 active:scale-[0.98] disabled:opacity-50 disabled:active:scale-100";
+
+const BUTTON_VARIANTS = {
+  primary: "bg-accent text-accent-ink hover:bg-accent-hover",
+  secondary:
+    "border border-line-strong bg-surface text-fg hover:border-fg/40 hover:bg-surface-2",
+  ghost: "text-muted hover:bg-surface-2 hover:text-fg",
+  danger: "border border-danger/40 text-danger hover:bg-danger-soft",
+  ink: "bg-fg text-bg hover:bg-fg/85",
+} as const;
+
+const BUTTON_SIZES = {
+  sm: "h-8 px-3.5 text-[13px]",
+  md: "h-10 px-5 text-sm",
+  lg: "h-12 px-7 text-[15px]",
+} as const;
+
+type ButtonProps = {
+  children: ReactNode;
+  variant?: keyof typeof BUTTON_VARIANTS;
+  size?: keyof typeof BUTTON_SIZES;
+  href?: string;
   className?: string;
-}
+  loading?: boolean;
+  disabled?: boolean;
+  type?: "button" | "submit";
+  onClick?: () => void;
+  "aria-label"?: string;
+  title?: string;
+};
 
-export function LoadingSpinner({
+export function Button({
+  children,
+  variant = "primary",
   size = "md",
-  className = "",
-}: LoadingSpinnerProps) {
-  const sizeClasses = {
-    sm: "w-4 h-4",
-    md: "w-8 h-8",
-    lg: "w-12 h-12",
-  };
+  href,
+  className,
+  loading = false,
+  disabled = false,
+  type = "button",
+  ...rest
+}: ButtonProps) {
+  const classes = cx(
+    BUTTON_BASE,
+    BUTTON_VARIANTS[variant],
+    BUTTON_SIZES[size],
+    className,
+  );
+
+  if (href) {
+    // Auth routes are served by middleware and external links leave the app:
+    // both need a real navigation, not the client router.
+    const plain = href.startsWith("/auth/") || /^[a-z]+:/i.test(href);
+    if (plain) {
+      const external = !href.startsWith("/");
+      return (
+        <a
+          href={href}
+          className={classes}
+          {...(external ? { target: "_blank", rel: "noopener noreferrer" } : {})}
+          aria-label={rest["aria-label"]}
+          title={rest.title}
+        >
+          {children}
+        </a>
+      );
+    }
+    return (
+      <Link
+        href={href}
+        className={classes}
+        aria-label={rest["aria-label"]}
+        title={rest.title}
+      >
+        {children}
+      </Link>
+    );
+  }
 
   return (
-    <span
-      role="status"
-      aria-live="polite"
-      aria-busy="true"
-      className={`inline-block animate-spin rounded-full border-2 border-gray-300 border-t-blue-600 ${sizeClasses[size]} ${className} dark:border-slate-600 dark:border-t-blue-400`}
-    />
+    <button
+      type={type}
+      className={classes}
+      disabled={disabled || loading}
+      aria-busy={loading || undefined}
+      {...rest}
+    >
+      {loading && <Spinner className="size-4" />}
+      {children}
+    </button>
   );
 }
 
-interface EmptyStateProps {
-  title: string;
-  description: string;
-  action?: ReactNode;
-  icon?: ReactNode;
+export function Spinner({ className = "size-5" }: { className?: string }) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      className={cx("animate-spin", className)}
+      fill="none"
+      role="status"
+      aria-label="Loading"
+    >
+      <circle cx="12" cy="12" r="9" stroke="currentColor" strokeWidth="3" opacity="0.2" />
+      <path d="M21 12a9 9 0 0 0-9-9" stroke="currentColor" strokeWidth="3" strokeLinecap="round" />
+    </svg>
+  );
 }
 
-export function EmptyState({
-  title,
-  description,
+const NOTICE_TONES = {
+  error: "border-danger/30 bg-danger-soft text-danger",
+  ok: "border-ok/30 bg-ok-soft text-ok",
+  info: "border-line bg-surface-2 text-muted",
+  accent: "border-accent/40 bg-accent-soft text-fg",
+} as const;
+
+export function Notice({
+  tone = "info",
+  children,
+  className,
   action,
-  icon,
-}: EmptyStateProps) {
+}: {
+  tone?: keyof typeof NOTICE_TONES;
+  children: ReactNode;
+  className?: string;
+  action?: ReactNode;
+}) {
   return (
-    <div className="text-center py-12">
-      {icon && (
-        <div className="mx-auto w-12 h-12 text-gray-400 mb-4 dark:text-slate-500">
-          {icon}
-        </div>
+    <div
+      role={tone === "error" ? "alert" : "status"}
+      className={cx(
+        "flex flex-wrap items-center justify-between gap-x-4 gap-y-2 rounded-xl border px-4 py-3 text-sm",
+        NOTICE_TONES[tone],
+        className,
       )}
-      <h3 className="text-lg font-medium text-gray-900 mb-2 dark:text-slate-100">
-        {title}
-      </h3>
-      <p className="text-gray-500 mb-6 dark:text-slate-400">{description}</p>
+    >
+      <div className="min-w-0">{children}</div>
       {action}
     </div>
   );
 }
 
-interface ThemedCardProps {
-  children: ReactNode;
+export function EmptyState({
+  title,
+  children,
+  action,
+  className,
+}: {
+  title: string;
+  children?: ReactNode;
+  action?: ReactNode;
   className?: string;
-}
-
-export function ThemedCard({ children, className = "" }: ThemedCardProps) {
-  const { theme } = useTheme();
-  const themeClasses =
-    theme === "dark"
-      ? "border-slate-700 bg-slate-900 hover:bg-slate-800"
-      : "border-gray-200 bg-white hover:bg-gray-50";
-
+}) {
   return (
     <div
-      className={classNames(
-        "rounded-lg border p-4 transition-colors",
-        themeClasses,
+      className={cx(
+        "flex flex-col items-center rounded-2xl border border-dashed border-line-strong px-6 py-14 text-center",
+        className,
+      )}
+    >
+      {/* Three blank posters: the shelf waiting to be filled. */}
+      <div className="mb-6 flex items-end gap-1.5" aria-hidden="true">
+        <span className="h-12 w-8 -rotate-6 rounded-[5px] border border-line-strong bg-surface-2" />
+        <span className="h-14 w-[38px] rounded-[5px] border border-line-strong bg-surface" />
+        <span className="h-12 w-8 rotate-6 rounded-[5px] border border-line-strong bg-surface-2" />
+      </div>
+      <h2 className="display text-2xl">{title}</h2>
+      {children && (
+        <p className="mt-2 max-w-md text-sm leading-relaxed text-muted">
+          {children}
+        </p>
+      )}
+      {action && <div className="mt-6 flex flex-wrap justify-center gap-3">{action}</div>}
+    </div>
+  );
+}
+
+// The frame every signed-in page sits in.
+export function PageShell({
+  children,
+  className,
+  width = "wide",
+}: {
+  children: ReactNode;
+  className?: string;
+  width?: "wide" | "medium" | "narrow";
+}) {
+  return (
+    <div
+      className={cx(
+        "mx-auto w-full px-4 pb-16 pt-8 sm:px-6 sm:pt-12 lg:px-8",
+        width === "wide" ? "max-w-[1400px]" : width === "medium" ? "max-w-[1100px]" : "max-w-3xl",
         className,
       )}
     >
@@ -88,69 +211,53 @@ export function ThemedCard({ children, className = "" }: ThemedCardProps) {
   );
 }
 
-interface ButtonProps {
-  children: ReactNode;
-  variant?: "primary" | "secondary" | "outline";
-  size?: "sm" | "md" | "lg";
-  disabled?: boolean;
-  loading?: boolean;
-  onClick?: () => void;
-  href?: string;
-  className?: string;
-  type?: "button" | "submit" | "reset";
+export function PageHeading({
+  eyebrow,
+  title,
+  children,
+  action,
+}: {
+  eyebrow?: string;
+  title: ReactNode;
+  children?: ReactNode;
+  action?: ReactNode;
+}) {
+  return (
+    <header className="mb-8 flex flex-wrap items-end justify-between gap-x-8 gap-y-4 sm:mb-10">
+      <div className="min-w-0 max-w-3xl">
+        {eyebrow && <p className="eyebrow mb-3">{eyebrow}</p>}
+        <h1 className="display text-[2.1rem] sm:text-5xl">{title}</h1>
+        {children && (
+          <p className="mt-3 max-w-2xl text-[15px] leading-relaxed text-muted">
+            {children}
+          </p>
+        )}
+      </div>
+      {action && <div className="flex flex-wrap gap-2">{action}</div>}
+    </header>
+  );
 }
 
-export function Button({
-  children,
-  variant = "primary",
-  size = "md",
-  disabled = false,
-  loading = false,
-  onClick,
-  href,
-  className = "",
-  type,
-}: ButtonProps) {
-  const baseClasses =
-    "inline-flex items-center justify-center font-medium rounded-lg transition-colors focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-offset-white dark:focus:ring-offset-slate-950";
-
-  const variantClasses = {
-    primary:
-      "bg-blue-600 text-white hover:bg-blue-700 focus:ring-blue-500 dark:bg-blue-500 dark:hover:bg-blue-400 dark:focus:ring-blue-400",
-    secondary:
-      "bg-gray-200 text-gray-900 hover:bg-gray-300 focus:ring-gray-500 dark:bg-slate-700 dark:text-slate-100 dark:hover:bg-slate-600 dark:focus:ring-slate-500",
-    outline:
-      "border border-gray-300 bg-white text-gray-900 hover:bg-gray-100 focus:ring-blue-500 dark:border-slate-600 dark:bg-slate-900 dark:text-slate-100 dark:hover:bg-slate-800",
-  };
-
-  const sizeClasses = {
-    sm: "px-3 py-1.5 text-sm",
-    md: "px-4 py-2 text-sm",
-    lg: "px-6 py-3 text-base",
-  };
-
-  const classes = `${baseClasses} ${variantClasses[variant]} ${
-    sizeClasses[size]
-  } ${className} ${disabled || loading ? "opacity-50 cursor-not-allowed" : ""}`;
-
-  if (href) {
-    return (
-      <a href={href} className={classes}>
-        {loading && <LoadingSpinner size="sm" className="mr-2" />}
-        {children}
-      </a>
-    );
-  }
-
+export function Skeleton({ className }: { className?: string }) {
   return (
-    <button
-      onClick={onClick}
-      disabled={disabled || loading}
-      type={type}
-      className={classes}
-    >
-      {loading && <LoadingSpinner size="sm" className="mr-2" />}
-      {children}
-    </button>
+    <div
+      aria-hidden="true"
+      className={cx("animate-shimmer rounded-lg bg-surface-2", className)}
+    />
+  );
+}
+
+// A grid of blank posters, shown while a list loads.
+export function PosterGridSkeleton({ count = 12 }: { count?: number }) {
+  return (
+    <div className="poster-grid" aria-hidden="true">
+      {Array.from({ length: count }, (_, i) => (
+        <div key={i}>
+          <Skeleton className="aspect-[2/3] w-full rounded-lg" />
+          <Skeleton className="mt-2.5 h-3 w-4/5" />
+          <Skeleton className="mt-1.5 h-2.5 w-2/5" />
+        </div>
+      ))}
+    </div>
   );
 }

@@ -1,169 +1,101 @@
-import { Metadata } from "next";
+import type { Metadata } from "next";
+import Link from "next/link";
+import { PageShell } from "@/components/ui";
+import { IconMail } from "@/components/icons";
 
 export const metadata: Metadata = {
-  title: "Contact Us | Watchlist Notify",
-  description: "Get in touch with the Watchlist Notify team",
+  title: "Contact",
+  description: "Questions, feedback, support and security reports for Watchlist Notify.",
+  alternates: { canonical: "/contact" },
 };
+
+const ADDRESS = "contact@watchlistnotify.com";
+
+const REASONS = [
+  {
+    title: "Questions and feedback",
+    text: "Anything about how it works, something you would like it to do, or something that annoyed you.",
+  },
+  {
+    title: "Help with your account",
+    text: "Trouble signing in, a digest that did not arrive, a title matched to the wrong film, or a request to delete your account and data.",
+  },
+  {
+    title: "Security reports",
+    text: (
+      <>
+        Found a vulnerability? Put{" "}
+        <code className="rounded bg-surface-2 px-1.5 py-0.5 font-mono text-[13px] text-fg">
+          [SECURITY] short summary
+        </code>{" "}
+        in the subject line, and please allow time for a fix before disclosing it publicly.
+      </>
+    ),
+  },
+];
 
 export default function ContactPage() {
   return (
-    <div className="min-h-screen bg-gray-50 dark:bg-slate-950">
-      <div className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 py-12">
-        {/* Header */}
-        <div className="text-center mb-12">
-          <h1 className="text-4xl font-bold text-gray-900 dark:text-slate-100 mb-4">
-            Contact Us
-          </h1>
-          <p className="text-lg text-gray-600 dark:text-slate-400">
-            Have a question or feedback? We&apos;d love to hear from you.
-          </p>
-        </div>
+    <PageShell width="narrow">
+      <header className="mb-10">
+        <p className="eyebrow">Contact</p>
+        <h1 className="display mt-4 text-4xl sm:text-6xl">One address for everything.</h1>
+        <p className="mt-5 text-lg leading-relaxed text-muted">
+          Have a question or feedback? We would love to hear from you. We typically reply
+          within 24 to 48 hours on business days.
+        </p>
+        <a
+          href={`mailto:${ADDRESS}`}
+          className="mt-7 inline-flex max-w-full items-center gap-3 rounded-full bg-accent px-6 py-3.5 font-medium text-accent-ink transition-colors hover:bg-accent-hover"
+        >
+          <IconMail className="size-5 shrink-0" />
+          <span className="truncate">{ADDRESS}</span>
+        </a>
+      </header>
 
-        {/* Contact Information */}
-        <div className="bg-white dark:bg-slate-900 rounded-lg shadow-md p-8 mb-8">
-          <h2 className="text-2xl font-semibold text-gray-900 dark:text-slate-100 mb-6">
-            Get in Touch
-          </h2>
-
-          <div className="space-y-6">
-            {/* Email */}
-            <div>
-              <h3 className="text-lg font-medium text-gray-900 dark:text-slate-100 mb-2">
-                General Inquiries
-              </h3>
-              <p className="text-gray-600 dark:text-slate-400 mb-2">
-                For general questions, feedback, or support requests:
-              </p>
-              <a
-                href="mailto:contact@watchlistnotify.com"
-                className="text-blue-600 hover:text-blue-700 dark:text-blue-400 dark:hover:text-blue-300 font-medium"
-              >
-                contact@watchlistnotify.com
-              </a>
-            </div>
-
-            {/* Support */}
-            <div>
-              <h3 className="text-lg font-medium text-gray-900 dark:text-slate-100 mb-2">
-                Technical Support
-              </h3>
-              <p className="text-gray-600 dark:text-slate-400 mb-2">
-                Experiencing issues or need help with your account? Reach out to
-                our support team:
-              </p>
-              <a
-                href="mailto:contact@watchlistnotify.com"
-                className="text-blue-600 hover:text-blue-700 dark:text-blue-400 dark:hover:text-blue-300 font-medium"
-              >
-                contact@watchlistnotify.com
-              </a>
-            </div>
-
-            {/* Security */}
-            <div>
-              <h3 className="text-lg font-medium text-gray-900 dark:text-slate-100 mb-2">
-                Security Issues
-              </h3>
-              <p className="text-gray-600 dark:text-slate-400 mb-2">
-                If you&apos;ve discovered a security vulnerability, please email
-                us with subject line{" "}
-                <code className="bg-gray-100 dark:bg-slate-800 px-2 py-1 rounded text-sm">
-                  [SECURITY] &lt;short summary&gt;
-                </code>
-              </p>
-              <a
-                href="mailto:contact@watchlistnotify.com"
-                className="text-blue-600 hover:text-blue-700 dark:text-blue-400 dark:hover:text-blue-300 font-medium"
-              >
-                contact@watchlistnotify.com
-              </a>
-              <p className="text-sm text-gray-500 dark:text-slate-500 mt-2">
-                Please allow time for remediation before public disclosure.
-              </p>
-            </div>
+      <dl className="divide-y divide-line border-y border-line">
+        {REASONS.map((reason) => (
+          <div key={reason.title} className="grid gap-1.5 py-6 sm:grid-cols-[14rem_1fr] sm:gap-8">
+            <dt className="font-medium">{reason.title}</dt>
+            <dd className="leading-relaxed text-muted">{reason.text}</dd>
           </div>
-        </div>
+        ))}
+      </dl>
 
-        {/* FAQ Section */}
-        <div className="bg-white dark:bg-slate-900 rounded-lg shadow-md p-8">
-          <h2 className="text-2xl font-semibold text-gray-900 dark:text-slate-100 mb-6">
-            Frequently Asked Questions
-          </h2>
+      <section className="prose-page mt-14" aria-labelledby="faq">
+        <h2 id="faq">Frequently asked questions</h2>
 
-          <div className="space-y-6">
-            <div>
-              <h3 className="text-lg font-medium text-gray-900 dark:text-slate-100 mb-2">
-                How do I change my notification settings?
-              </h3>
-              <p className="text-gray-600 dark:text-slate-400">
-                Visit your{" "}
-                <a
-                  href="/settings"
-                  className="text-blue-600 hover:text-blue-700 dark:text-blue-400 dark:hover:text-blue-300"
-                >
-                  Settings
-                </a>{" "}
-                page to customize your digest email frequency and notification
-                preferences.
-              </p>
-            </div>
+        <h3>How do I change my notification settings?</h3>
+        <p>
+          Open <Link href="/settings#notifications">Settings</Link> to choose how often the
+          digest email arrives, where it goes, or to turn it off.
+        </p>
 
-            <div>
-              <h3 className="text-lg font-medium text-gray-900 dark:text-slate-100 mb-2">
-                Which streaming services are supported?
-              </h3>
-              <p className="text-gray-600 dark:text-slate-400">
-                We support all major streaming platforms including Netflix,
-                Hulu, Prime Video, Disney+, Max, Apple TV+, and many more. You
-                can select your subscriptions in your{" "}
-                <a
-                  href="/settings"
-                  className="text-blue-600 hover:text-blue-700 dark:text-blue-400 dark:hover:text-blue-300"
-                >
-                  Settings
-                </a>
-                .
-              </p>
-            </div>
+        <h3>Which streaming services are supported?</h3>
+        <p>
+          Eighteen services in the United States, including Netflix, Hulu, Prime Video,
+          Disney+, HBO Max and Apple TV, and free ones such as Tubi and Pluto TV. Choose
+          yours in <Link href="/settings#services">Settings</Link>.
+        </p>
 
-            <div>
-              <h3 className="text-lg font-medium text-gray-900 dark:text-slate-100 mb-2">
-                Is Watchlist Notify free to use?
-              </h3>
-              <p className="text-gray-600 dark:text-slate-400">
-                Yes! Watchlist Notify is currently free to use during beta. We
-                help you track your watchlist and notify you when content
-                becomes available on your subscribed services.
-              </p>
-            </div>
+        <h3>Is Watchlist Notify free to use?</h3>
+        <p>
+          Yes. Watchlist Notify is free to use during the beta. It keeps your watchlist and
+          tells you when something on it becomes available on a service you subscribe to.
+        </p>
 
-            <div>
-              <h3 className="text-lg font-medium text-gray-900 dark:text-slate-100 mb-2">
-                How is my data used?
-              </h3>
-              <p className="text-gray-600 dark:text-slate-400">
-                We only use your data to provide the service and send you
-                notifications about your watchlist. See our{" "}
-                <a
-                  href="/privacy"
-                  className="text-blue-600 hover:text-blue-700 dark:text-blue-400 dark:hover:text-blue-300"
-                >
-                  Privacy Policy
-                </a>{" "}
-                for more details.
-              </p>
-            </div>
-          </div>
-        </div>
+        <h3>How is my data used?</h3>
+        <p>
+          Only to provide the service and send you the notifications you asked for. The{" "}
+          <Link href="/privacy">Privacy Policy</Link> has the details.
+        </p>
 
-        {/* Response Time Notice */}
-        <div className="mt-8 text-center">
-          <p className="text-sm text-gray-500 dark:text-slate-500">
-            We typically respond to inquiries within 24-48 hours during business
-            days.
-          </p>
-        </div>
-      </div>
-    </div>
+        <h3>Can I look before I sign up?</h3>
+        <p>
+          Yes. The <Link href="/demo">live demo</Link> is a sample watchlist you can filter
+          and open without an account.
+        </p>
+      </section>
+    </PageShell>
   );
 }

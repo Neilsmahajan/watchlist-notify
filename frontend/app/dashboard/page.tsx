@@ -1,16 +1,7 @@
-import { auth0 } from "@/lib/auth0";
 import { redirect } from "next/navigation";
 
-export default async function Dashboard() {
-  try {
-    const session = await auth0.getSession();
-    if (!session?.user) {
-      redirect("/auth/login");
-    }
-  } catch (err) {
-    console.error("Dashboard session lookup failed", err);
-    redirect("/auth/login");
-  }
-
+// The dashboard is the home page for a signed-in user. This address is kept
+// for old links.
+export default function DashboardRedirect() {
   redirect("/");
 }

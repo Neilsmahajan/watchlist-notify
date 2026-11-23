@@ -1,0 +1,77 @@
+type,tmdb_id,imdb_id,year,title,status
+movie,278,tt0111161,1994,The Shawshank Redemption,planned
+movie,238,tt0068646,1972,The Godfather,planned
+movie,155,tt0468569,2008,The Dark Knight,finished
+movie,680,tt0110912,1994,Pulp Fiction,planned
+movie,27205,tt1375666,2010,Inception,finished
+movie,550,tt0137523,1999,Fight Club,planned
+movie,13,tt0109830,1994,Forrest Gump,planned
+movie,603,tt0133093,1999,The Matrix,planned
+movie,769,tt0099685,1990,GoodFellas,planned
+movie,157336,tt0816692,2014,Interstellar,planned
+movie,496243,tt6751668,2019,Parasite,finished
+movie,129,tt0245429,2001,Spirited Away,finished
+movie,244786,tt2582802,2014,Whiplash,planned
+movie,1124,tt0482571,2006,The Prestige,planned
+movie,98,tt0172495,2000,Gladiator,planned
+movie,1422,tt0407887,2006,The Departed,planned
+movie,348,tt0078748,1979,Alien,planned
+movie,105,tt0088763,1985,Back to the Future,planned
+movie,8587,tt0110357,1994,The Lion King,planned
+movie,76341,tt1392190,2015,Mad Max: Fury Road,planned
+movie,438631,tt1160419,2021,Dune,finished
+movie,693134,tt15239678,2024,Dune: Part Two,planned
+movie,872585,tt15398776,2023,Oppenheimer,finished
+movie,545611,tt6710474,2022,Everything Everywhere All at Once,planned
+movie,324857,tt4633694,2018,Spider-Man: Into the Spider-Verse,planned
+movie,419430,tt5052448,2017,Get Out,finished
+movie,313369,tt3783958,2016,La La Land,planned
+movie,120467,tt2278388,2014,The Grand Budapest Hotel,planned
+movie,546554,tt8946378,2019,Knives Out,finished
+movie,335984,tt1856101,2017,Blade Runner 2049,planned
+movie,329865,tt2543164,2016,Arrival,planned
+movie,37799,tt1285016,2010,The Social Network,planned
+movie,6977,tt0477348,2007,No Country for Old Men,planned
+movie,7345,tt0469494,2007,There Will Be Blood,planned
+movie,152601,tt1798709,2013,Her,planned
+movie,329,tt0107290,1993,Jurassic Park,planned
+movie,862,tt0114709,1995,Toy Story,planned
+movie,10681,tt0910970,2008,WALL·E,planned
+movie,354912,tt2380307,2017,Coco,planned
+movie,361743,tt1745960,2022,Top Gun: Maverick,planned
+movie,414906,tt1877830,2022,The Batman,planned
+movie,346698,tt1517268,2023,Barbie,planned
+movie,792307,tt14230458,2023,Poor Things,planned
+movie,666277,tt13238346,2023,Past Lives,planned
+movie,840430,tt14849194,2023,The Holdovers,planned
+movie,915935,tt17009710,2023,Anatomy of a Fall,planned
+movie,466420,tt5537002,2023,Killers of the Flower Moon,planned
+movie,475557,tt7286456,2019,Joker,planned
+movie,530915,tt8579674,2019,1917,planned
+movie,359724,tt1950186,2019,Ford v Ferrari,planned
+show,1396,tt0903747,2008,Breaking Bad,finished
+show,1399,tt0944947,2011,Game of Thrones,planned
+show,66732,tt4574334,2016,Stranger Things,planned
+show,2316,tt0386676,2005,The Office,finished
+show,95396,tt11280740,2022,Severance,watching
+show,136315,tt14452776,2022,The Bear,watching
+show,76331,tt7660850,2018,Succession,planned
+show,87108,tt7366338,2019,Chernobyl,finished
+show,1438,tt0306414,2002,The Wire,planned
+show,60059,tt3032476,2015,Better Call Saul,planned
+show,97546,tt10986410,2020,Ted Lasso,planned
+show,100088,tt3581920,2023,The Last of Us,watching
+show,83867,tt9253284,2022,Andor,watching
+show,126308,tt2788316,2024,Shōgun,watching
+show,1398,tt0141842,1999,The Sopranos,planned
+show,46648,tt2356777,2014,True Detective,planned
+show,67070,tt5687612,2016,Fleabag,finished
+show,94605,tt11126994,2021,Arcane,planned
+show,82856,tt8111088,2019,The Mandalorian,planned
+show,76479,tt1190634,2019,The Boys,planned
+show,1668,tt0108778,1994,Friends,planned
+show,1400,tt0098904,1989,Seinfeld,planned
+show,60625,tt2861424,2013,Rick and Morty,planned
+show,68595,tt5491994,2016,Planet Earth II,planned
+show,119051,tt13443470,2022,Wednesday,planned
+show,85552,tt8772296,2019,Euphoria,planned

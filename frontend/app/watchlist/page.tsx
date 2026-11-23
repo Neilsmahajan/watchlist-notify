@@ -1,79 +1,90 @@
-import { redirect } from "next/navigation";
-import WatchlistClient from "./WatchlistClient";
-import { auth0 } from "@/lib/auth0";
-import {
-  type WatchlistItem,
-  type WatchlistResponse,
-} from "@/lib/watchlist/types";
+import type { Metadata } from "next";
+import WatchlistBrowser from "@/components/watchlist/WatchlistBrowser";
+import { Button, EmptyState, Notice, PageHeading, PageShell } from "@/components/ui";
+import { IconPlus } from "@/components/icons";
+import { getServices, getWatchlist } from "@/lib/api/backend";
+import { requireSession } from "@/lib/auth/session";
+import { filtersToApiQuery, filtersToSearch, parseFilters } from "@/lib/watchlist/query";
 
-export const dynamic = "force-dynamic";
-
-type BootstrapResult = {
-  items: WatchlistItem[];
-  listError: string | null;
+export const metadata: Metadata = {
+  title: "Watchlist",
+  robots: { index: false },
 };
 
-// One backend call renders the page: every item comes back with its
-// streaming availability attached.
-async function bootstrapWatchlist(token: string): Promise<BootstrapResult> {
-  const backend = process.env.BACKEND_URL || "http://localhost:8080";
-  let listError: string | null = null;
-  let items: WatchlistItem[] = [];
+type PageProps = {
+  searchParams: Promise<Record<string, string | string[] | undefined>>;
+};
 
-  const watchlistUrl = new URL("/api/watchlist", backend);
-  watchlistUrl.searchParams.set("sort", "-added_at");
-  watchlistUrl.searchParams.set("limit", "0"); // Fetch all items
+export default async function WatchlistPage({ searchParams }: PageProps) {
+  const filters = parseFilters(await searchParams);
+  const query = filtersToSearch(filters);
+  const { token } = await requireSession(query ? `/watchlist?${query}` : "/watchlist");
 
-  try {
-    const response = await fetch(watchlistUrl, {
-      headers: {
-        Authorization: `Bearer ${token}`,
-        Accept: "application/json",
-      },
-      cache: "no-store",
-    });
+  // One page of the list, for the filters in the address, plus the service
+  // names. The browser asks for more pages as they are scrolled to.
+  const [list, services] = await Promise.all([
+    getWatchlist(token, filtersToApiQuery(filters)),
+    getServices(token),
+  ]);
 
-    const data = (await response.json().catch(() => null)) as
-      WatchlistResponse | { error?: string } | null;
+  const catalogue = services.ok ? (services.data.services ?? []) : [];
+  const hasServices = catalogue.some((service) => service.active);
 
-    if (!response.ok) {
-      listError =
-        (data &&
-        typeof data === "object" &&
-        "error" in data &&
-        typeof data.error === "string"
-          ? data.error
-          : null) || "Failed to load watchlist.";
-      return { items, listError };
-    }
+  return (
+    <PageShell>
+      <PageHeading
+        title="Your watchlist"
+        action={
+          <>
+            <Button href="/settings#import" variant="secondary">
+              Import
+            </Button>
+            <Button href="/search">
+              <IconPlus className="size-4" />
+              Add titles
+            </Button>
+          </>
+        }
+      />
 
-    const payload = data as WatchlistResponse | null;
-    items = Array.isArray(payload?.items) ? payload.items : [];
-  } catch (err) {
-    console.error("Watchlist bootstrap error", err);
-    listError = "Unable to load your watchlist. Please try again.";
-    return { items, listError };
-  }
+      {services.ok && !hasServices && (
+        <Notice
+          tone="accent"
+          className="mb-6"
+          action={
+            <Button href="/settings#services" size="sm" variant="ink">
+              Choose services
+            </Button>
+          }
+        >
+          Tell us which streaming services you have, and each title will show
+          where you can watch it.
+        </Notice>
+      )}
 
-  return { items, listError };
-}
-
-export default async function WatchlistPage() {
-  const session = await auth0.getSession();
-  if (!session?.user) {
-    redirect("/auth/login");
-  }
-
-  const access = await auth0.getAccessToken().catch((err: unknown) => {
-    console.error("Access token fetch error", err);
-    return null;
-  });
-
-  if (!access?.token) {
-    redirect("/auth/login");
-  }
-
-  const { items, listError } = await bootstrapWatchlist(access.token);
-
-  return <WatchlistClient initialItems={items} initialListError={listError} />;
+      <WatchlistBrowser
+        endpoint="/api/watchlist"
+        basePath="/watchlist"
+        initialPage={list.ok ? list.data : null}
+        initialError={list.ok ? null : list.error}
+        services={catalogue}
+        emptyState={
+          <EmptyState
+            title="Nothing on your list yet"
+            action={
+              <>
+                <Button href="/search">Find something to watch</Button>
+                <Button href="/settings#import" variant="secondary">
+                  Import from IMDb
+                </Button>
+              </>
+            }
+          >
+            Search for a film or series and add it, or bring a list over from
+            IMDb. Each title then shows which of your services has it.
+          </EmptyState>
+        }
+      />
+    </PageShell>
+  );
 }

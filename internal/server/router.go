@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/gin-contrib/cors"
+	"github.com/gin-contrib/gzip"
 	"github.com/gin-gonic/gin"
 	_ "github.com/joho/godotenv/autoload"
 	swaggerFiles "github.com/swaggo/files"
@@ -20,6 +21,11 @@ import (
 func (s *Server) RegisterRoutes() http.Handler {
 	r := gin.Default()
 
+	// Compress responses for clients that accept it: a page of the watchlist
+	// is mostly repeated JSON keys and prose. Swagger UI serves its own
+	// pre-built assets and is left alone.
+	r.Use(gzip.Gzip(gzip.DefaultCompression, gzip.WithExcludedPaths([]string{"/swagger"})))
+
 	// With no allowed origin there is nothing for the middleware to do, and
 	// browsers already refuse cross-origin reads of responses without CORS
 	// headers.
@@ -30,6 +36,9 @@ func (s *Server) RegisterRoutes() http.Handler {
 	}
 
 	r.GET("/health", s.healthHandler)
+	// The public demo: read-only, no token, one seeded account.
+	r.GET("/api/demo/watchlist", s.demoWatchlistHandler)
+	r.GET("/api/demo/services", s.demoServicesHandler)
 
 	// Swagger documentation endpoint
 	r.GET("/swagger/*any", ginSwagger.WrapHandler(swaggerFiles.Handler))
