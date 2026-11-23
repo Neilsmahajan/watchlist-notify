@@ -17,6 +17,17 @@
 //   MOCK_NO_DEMO=1   the demo endpoints answer 404, as before the seeder has run
 //   MOCK_NO_IMDB=1   the IMDb routes answer 404, as on an API without them
 //   MOCK_DELAY=300   milliseconds added to every response
+//   MOCK_TONIGHT=…   "What should I watch tonight?" in one of its other states:
+//                    off          the API has no Anthropic key: /api/me says so
+//                                 and the endpoint answers 503
+//                    limit        the daily limit is used up (429)
+//                    fail         the model fails (502)
+//                    slow         the model takes eight seconds
+//                    two          the model returns two picks
+//                    empty        nothing on the list is streaming
+//                    no_services  no services are chosen
+//                    Without it, picks are made (by a shuffle, with canned
+//                    reasons) until the limit of 10 is used up.
 
 import { createServer } from "node:http";
 import { readFileSync } from "node:fs";
@@ -322,6 +333,125 @@ function searchResults(query, type) {
 
 let imdbSync = null;
 
+// --- "What should I watch tonight?" ----------------------------------------
+// Follows internal/tonight: the same candidates, the same answers without a
+// model call, the same limit. The model is a shuffle and a list of sentences.
+const tonightMode = process.env.MOCK_TONIGHT || "";
+const TONIGHT_LIMIT = 10;
+let tonightUsed = 0;
+
+const TONIGHT_REASONS = [
+  "Warm, quick and funny, and it will not ask much of you tonight.",
+  "Tense from the first scene, and you have been putting it off long enough.",
+  "Short enough to finish before bed and hard to stop thinking about after.",
+  "Easy company: you can start it late and still feel you got somewhere.",
+  "The one on your list that people keep telling you about, and it earns it: sharp, strange and over before it wears out its welcome.",
+  "A slow start that pays off, for a night with nowhere else to be.",
+  "Bright, silly and well made.",
+];
+
+const TONIGHT_EMPTY = {
+  no_services: "Choose the streaming services you have, and tonight's picks will come from what they are showing.",
+  nothing_streaming: "Nothing you still want to watch is streaming on your services right now.",
+  no_match: "Nothing streaming on your services fits that. Try a longer running time, or films and shows together.",
+  exhausted: "That was every title that fits. Start over to see them again.",
+};
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+function nextUtcMidnight() {
+  const now = new Date();
+  return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1));
+}
+
+function plainReason(row) {
+  const names = row.availability.providers.map((p) => p.name);
+  if (names.length === 0) return "On your list and streaming now.";
+  if (names.length === 1) return `Streaming now on ${names[0]}.`;
+  return `Streaming now on ${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}.`;
+}
+
+async function tonight(account, json) {
+  const badRequest = (error) => ({ status: 400, body: { error } });
+  if (!json || typeof json !== "object" || Array.isArray(json)) return badRequest("invalid body");
+  const { mood = "", max_minutes: maxMinutes, type = "", exclude = [] } = json;
+  if (typeof mood !== "string" || !Array.isArray(exclude)) return badRequest("invalid body");
+  if ([...mood.trim()].length > 200) return badRequest("mood is too long: at most 200 characters");
+  if (type !== "" && type !== "movie" && type !== "show") return badRequest('type must be "movie" or "show"');
+  if (maxMinutes !== undefined && (!Number.isInteger(maxMinutes) || maxMinutes < 1 || maxMinutes > 600)) {
+    return badRequest("max_minutes must be between 1 and 600");
+  }
+  if (exclude.length > 30) return badRequest("exclude holds at most 30 IDs");
+  if (exclude.some((id) => typeof id !== "string" || !/^[0-9a-f]{24}$/.test(id))) {
+    return badRequest("exclude must hold watchlist item IDs");
+  }
+
+  const left = () => Math.max(0, TONIGHT_LIMIT - tonightUsed);
+  const none = (reason) => ({
+    status: 200,
+    body: { picks: [], remaining_today: left(), model: "", message: TONIGHT_EMPTY[reason], empty_reason: reason },
+  });
+
+  const active = activeCodes(account.user);
+  if (active.size === 0 || tonightMode === "no_services") return none("no_services");
+  const streaming = account.items
+    .filter((item) => item.status === "planned" || item.status === "watching")
+    .map((item) => view(item, active))
+    .filter(isAvailable);
+  if (streaming.length === 0 || tonightMode === "empty") return none("nothing_streaming");
+  const fitting = streaming.filter(
+    (row) => (!type || row.type === type) && (!maxMinutes || (row.runtime > 0 && row.runtime <= maxMinutes)),
+  );
+  if (fitting.length === 0) return none("no_match");
+  const candidates = fitting.filter((row) => !exclude.includes(row.id));
+  if (candidates.length === 0) return none("exhausted");
+
+  const answer = (rows, reason, model) => ({
+    status: 200,
+    body: {
+      picks: rows.map((row, index) => ({ item: without(row, "services"), reason: reason(row, index) })),
+      remaining_today: left(),
+      model,
+    },
+  });
+  // Three or fewer: there is no choice to make, so no model and no count.
+  if (candidates.length <= 3) return answer(candidates, plainReason, "");
+
+  if (tonightMode === "limit" || tonightUsed >= TONIGHT_LIMIT) {
+    const resets = nextUtcMidnight();
+    const scope = tonightMode === "limit" ? "total" : "user";
+    return {
+      status: 429,
+      headers: { "Retry-After": String(Math.max(1, Math.ceil((resets - Date.now()) / 1000))) },
+      body: {
+        error:
+          scope === "total"
+            ? `today's picks have all been used; the limit resets at ${resets.toISOString()}`
+            : `you have used all ${TONIGHT_LIMIT} of today's picks; the limit resets at ${resets.toISOString()}`,
+        scope,
+        resets_at: resets.toISOString(),
+      },
+    };
+  }
+
+  // From here the call is made, and counts whatever comes of it.
+  tonightUsed += 1;
+  await sleep(tonightMode === "slow" ? 8000 : 900);
+  if (tonightMode === "fail") {
+    return { status: 502, body: { error: "the picks could not be made just now; try again" } };
+  }
+  const shuffled = candidates
+    .map((row) => ({ row, order: Math.random() }))
+    .sort((a, b) => a.order - b.order)
+    .map(({ row }) => row);
+  const offset = Math.floor(Math.random() * TONIGHT_REASONS.length);
+  return answer(
+    shuffled.slice(0, tonightMode === "two" ? 2 : 3),
+    (_row, index) => TONIGHT_REASONS[(offset + index) % TONIGHT_REASONS.length],
+    "mock",
+  );
+}
+
 async function readBody(req) {
   const chunks = [];
   for await (const chunk of req) chunks.push(chunk);
@@ -355,7 +485,17 @@ async function route(req, url) {
   const me = viewer.user;
   const userView = () => (imdbSync ? { ...me, imdb_sync: imdbSync } : me);
 
-  if (pathname === "/api/me" && method === "GET") return { status: 200, body: userView() };
+  if (pathname === "/api/me" && method === "GET") {
+    return { status: 200, body: { ...userView(), features: { recommendations: tonightMode !== "off" } } };
+  }
+
+  if (pathname === "/api/recommendations/tonight" && method === "POST") {
+    if (tonightMode === "off") {
+      return { status: 503, body: { error: "recommendations are not enabled on this server" } };
+    }
+    const { json } = await readBody(req);
+    return tonight(viewer, json);
+  }
 
   if (pathname === "/api/me/preferences" && method === "PATCH") {
     const { json } = await readBody(req);
