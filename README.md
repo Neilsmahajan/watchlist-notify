@@ -292,6 +292,8 @@ Security Notes:
 - JSON: `https://api.watchlistnotify.com/swagger/doc.json`
 - YAML: `/docs/swagger.yaml` (in repository)
 
+**MCP server:** the API is also a Model Context Protocol server, so Claude can read and edit a watchlist; see [`docs/MCP.md`](docs/MCP.md).
+
 **Complete API Guide:**
 See [`docs/API.md`](docs/API.md) for comprehensive documentation including:
 

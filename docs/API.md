@@ -15,6 +15,10 @@ Complete API reference for the Watchlist Notify backend service.
 9. [Request Examples](#request-examples)
 10. [WebSocket Support](#websocket-support)
 
+> **Using the API from an AI client?** The same service is also an MCP server
+> at `POST /mcp`, with its own OAuth audience and scopes. See
+> [MCP.md](MCP.md).
+
 ## Overview
 
 The Watchlist Notify API provides RESTful endpoints for managing personal movie and TV show watchlists with streaming availability notifications.
@@ -63,6 +67,10 @@ The following endpoints do **not** require authentication:
 - `GET /api/demo/watchlist` and `GET /api/demo/services` - the read-only
   public demo (see [Demo Endpoints](#demo-endpoints))
 
+A token for the REST API is not accepted by the MCP endpoint, and a token for
+the MCP endpoint is not accepted here: each has its own audience. See
+[MCP.md](MCP.md#how-authorization-works).
+
 ## Base URL & Endpoints
 
 ### Production
@@ -90,6 +98,7 @@ http://localhost:8080
 | Search        | `/api/search`           | Content discovery               |
 | Availability  | `/api/availability`     | Streaming availability checks   |
 | Notifications | `/api/me/notifications` | Email notification testing      |
+| MCP           | `/mcp`                  | MCP server for AI clients ([MCP.md](MCP.md)) |
 
 ## Interactive Documentation
 
