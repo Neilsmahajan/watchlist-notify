@@ -17,7 +17,10 @@ import (
 
 const (
 	defaultRedisAddr = "redis://localhost:6379"
-	searchKeyPrefix  = "search:v1"
+	// The version changes with the shape of SearchValue, so that entries
+	// written before a field existed are not served without it. v2 added the
+	// overview of each result.
+	searchKeyPrefix  = "search:v2"
 	defaultSearchTTL = 30 * time.Minute
 )
 

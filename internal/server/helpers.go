@@ -2,6 +2,9 @@ package server
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"log"
 	"net/http"
 	"strconv"
 	"time"
@@ -42,38 +45,77 @@ func (s *Server) getUserWithin(ctx context.Context, c *gin.Context) (*models.Use
 		return nil, false
 	}
 	email, _ := emailVal.(string)
+	name, _ := c.Get("name")
+	picture, _ := c.Get("picture")
+
+	user, err := s.resolveUser(ctx, email, toString(name), toString(picture))
+	switch {
+	case errors.Is(err, errReservedAccount):
+		jsonError(c, http.StatusForbidden, err.Error())
+		return nil, false
+	case err != nil:
+		// The other failures are the database's; the text says which step.
+		log.Printf("user lookup: %v", err)
+		jsonError(c, http.StatusInternalServerError, userLookupMessage(err))
+		return nil, false
+	}
+	return user, true
+}
+
+// What resolveUser can fail with. Each wraps its cause, where there is one,
+// for the log; the text of the sentinel is what a client is shown.
+var (
+	// errReservedAccount: the email is the demo account's.
+	errReservedAccount = errors.New("this account is reserved")
+	errFetchUser       = errors.New("failed to fetch user")
+	errCreateUser      = errors.New("failed to create user")
+	errLoadUser        = errors.New("failed to load user")
+)
+
+// userLookupMessage returns the sentinel text of a resolveUser error, without
+// the cause it wraps.
+func userLookupMessage(err error) string {
+	for _, sentinel := range []error{errReservedAccount, errFetchUser, errCreateUser, errLoadUser} {
+		if errors.Is(err, sentinel) {
+			return sentinel.Error()
+		}
+	}
+	return "failed to fetch user"
+}
+
+// resolveUser returns the account of an authenticated caller, identified by
+// the email their token carries. It is the one place a token's identity
+// becomes a user: the REST handlers and the MCP tools both go through it, so
+// both find the same account and both create it the same way on first use.
+//
+// The caller is responsible for the email being verified by the issuer.
+func (s *Server) resolveUser(ctx context.Context, email, name, picture string) (*models.User, error) {
 	if isReservedEmail(email) {
 		// The demo account is served read-only by the public demo endpoints.
 		// It must never be usable as a login, whoever registers its address.
-		jsonError(c, http.StatusForbidden, "this account is reserved")
-		return nil, false
+		return nil, errReservedAccount
 	}
 	user, err := s.db.GetUserByEmail(ctx, email)
 	if err != nil {
-		jsonError(c, http.StatusInternalServerError, "failed to fetch user")
-		return nil, false
+		return nil, fmt.Errorf("%w: %w", errFetchUser, err)
+	}
+	if user != nil {
+		return user, nil
+	}
+
+	// Auto-provision a minimal user record on first authenticated access.
+	if err := s.db.UpsertUser(ctx, &models.User{Email: email, Name: name, Picture: picture}); err != nil {
+		return nil, fmt.Errorf("%w: %w", errCreateUser, err)
+	}
+	// Re-fetch to return the full record including ID, defaults, etc.
+	user, err = s.db.GetUserByEmail(ctx, email)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", errLoadUser, err)
 	}
 	if user == nil {
-		// Auto-provision a minimal user record on first authenticated access
-		name, _ := c.Get("name")
-		picture, _ := c.Get("picture")
-		nu := &models.User{
-			Email:   email,
-			Name:    toString(name),
-			Picture: toString(picture),
-		}
-		if err := s.db.UpsertUser(ctx, nu); err != nil {
-			jsonError(c, http.StatusInternalServerError, "failed to create user")
-			return nil, false
-		}
-		// Re-fetch to return full record including ID, defaults, etc.
-		user, err = s.db.GetUserByEmail(ctx, email)
-		if err != nil || user == nil {
-			jsonError(c, http.StatusInternalServerError, "failed to load user")
-			return nil, false
-		}
+		return nil, errLoadUser
 	}
-	return user, true
+	return user, nil
 }
 
 // toString safely converts interface{} to string.

@@ -50,69 +50,20 @@ func (s *Server) createWatchlistItemHandler(c *gin.Context) {
 		return
 	}
 
-	// Basic validation
-	if body.Title == "" {
-		jsonError(c, http.StatusBadRequest, "title required")
+	item, err := s.addWatchlistItem(c.Request.Context(), user, newWatchlistItem{
+		Title: body.Title, Type: body.Type, Year: body.Year, TMDbID: body.TMDB, Status: body.Status, Tags: body.Tags,
+	})
+	var invalid invalidInputError
+	switch {
+	case errors.As(err, &invalid):
+		jsonError(c, http.StatusBadRequest, invalid.Error())
 		return
-	}
-	typeVal := strings.ToLower(body.Type)
-	if typeVal == "" {
-		typeVal = models.WatchlistTypeMovie
-	}
-	if typeVal != models.WatchlistTypeMovie && typeVal != models.WatchlistTypeShow {
-		jsonError(c, http.StatusBadRequest, "invalid type")
+	case errors.Is(err, database.ErrDuplicateWatchlistItem):
+		jsonError(c, http.StatusConflict, "duplicate item")
 		return
-	}
-	statusVal := body.Status
-	if statusVal == "" {
-		statusVal = models.WatchlistStatusPlanned
-	}
-	if statusVal != models.WatchlistStatusPlanned && statusVal != models.WatchlistStatusWatching && statusVal != models.WatchlistStatusFinished {
-		jsonError(c, http.StatusBadRequest, "invalid status")
-		return
-	}
-	if body.Year != 0 {
-		if body.Year < 1870 || body.Year > time.Now().Year()+1 { // basic sanity
-			jsonError(c, http.StatusBadRequest, "invalid year")
-			return
-		}
-	}
-
-	item := &models.WatchlistItem{
-		ID:        primitive.NilObjectID,
-		UserID:    user.ID,
-		Title:     body.Title,
-		Type:      typeVal,
-		Year:      body.Year,
-		Tags:      body.Tags,
-		Status:    statusVal,
-		AddedAt:   time.Time{}, // set in DB layer
-		UpdatedAt: time.Time{},
-	}
-
-	// Optional association with TMDb ID if provided
-	if body.TMDB != nil {
-		if *body.TMDB <= 0 {
-			jsonError(c, http.StatusBadRequest, "invalid tmdb_id")
-			return
-		}
-		item.TMDbID = *body.TMDB
-	}
-
-	if err := s.db.CreateWatchlistItem(c.Request.Context(), item); err != nil {
-		if errors.Is(err, database.ErrDuplicateWatchlistItem) {
-			jsonError(c, http.StatusConflict, "duplicate item")
-			return
-		}
+	case err != nil:
 		jsonError(c, http.StatusInternalServerError, "failed to create")
 		return
-	}
-
-	// Fetch the title's availability now so the item shows it on the next
-	// list. It is best effort: on a timeout or TMDb failure the list's miss
-	// handling or the daily refresh fills it in.
-	if ref, ok := item.TitleRef(); ok {
-		s.ensureTitles(c.Request.Context(), user, []models.TitleRef{ref}, createEnsureBudget)
 	}
 
 	c.JSON(http.StatusCreated, item)
@@ -120,6 +71,140 @@ func (s *Server) createWatchlistItemHandler(c *gin.Context) {
 
 // createEnsureBudget bounds the availability fetch when adding one item.
 const createEnsureBudget = 1500 * time.Millisecond
+
+// invalidInputError says what is wrong with something a caller supplied. Its
+// text is meant for that caller.
+type invalidInputError string
+
+func (e invalidInputError) Error() string { return string(e) }
+
+// newWatchlistItem is what a caller supplies to add an item.
+type newWatchlistItem struct {
+	Title  string
+	Type   string // movie | show; empty means movie
+	Year   int
+	TMDbID *int   // links the item to TMDb, and so to availability
+	Status string // empty means planned
+	Tags   []string
+}
+
+// addWatchlistItem validates in, stores it on the user's watchlist and
+// fetches the title's availability. It is what POST /api/watchlist and the
+// add_to_watchlist tool both do.
+//
+// The error is an invalidInputError when in is not acceptable and
+// database.ErrDuplicateWatchlistItem when the user already has the title.
+func (s *Server) addWatchlistItem(ctx context.Context, user *models.User, in newWatchlistItem) (*models.WatchlistItem, error) {
+	if in.Title == "" {
+		return nil, invalidInputError("title required")
+	}
+	typeVal := strings.ToLower(in.Type)
+	if typeVal == "" {
+		typeVal = models.WatchlistTypeMovie
+	}
+	if typeVal != models.WatchlistTypeMovie && typeVal != models.WatchlistTypeShow {
+		return nil, invalidInputError("invalid type")
+	}
+	statusVal := in.Status
+	if statusVal == "" {
+		statusVal = models.WatchlistStatusPlanned
+	}
+	if !validWatchlistStatus(statusVal) {
+		return nil, invalidInputError("invalid status")
+	}
+	if in.Year != 0 && !plausibleYear(in.Year) {
+		return nil, invalidInputError("invalid year")
+	}
+
+	item := &models.WatchlistItem{
+		UserID: user.ID,
+		Title:  in.Title,
+		Type:   typeVal,
+		Year:   in.Year,
+		Tags:   in.Tags,
+		Status: statusVal,
+		// The database layer sets the ID and the timestamps.
+	}
+	// Optional association with TMDb ID if provided
+	if in.TMDbID != nil {
+		if *in.TMDbID <= 0 {
+			return nil, invalidInputError("invalid tmdb_id")
+		}
+		item.TMDbID = *in.TMDbID
+	}
+
+	if err := s.db.CreateWatchlistItem(ctx, item); err != nil {
+		return nil, err
+	}
+
+	// Fetch the title's availability now so the item shows it on the next
+	// list. It is best effort: on a timeout or TMDb failure the list's miss
+	// handling or the daily refresh fills it in.
+	if ref, ok := item.TitleRef(); ok {
+		s.ensureTitles(ctx, user, []models.TitleRef{ref}, createEnsureBudget)
+	}
+	return item, nil
+}
+
+// plausibleYear is a basic sanity check on a release year.
+func plausibleYear(year int) bool {
+	return year >= 1870 && year <= time.Now().Year()+1
+}
+
+// watchlistItemPatch holds the fields of an item a caller wants changed. A
+// nil field is left as it is; Tags set to an empty, non-nil slice removes
+// every tag.
+type watchlistItemPatch struct {
+	Title  *string
+	Status *string
+	Tags   []string
+	Year   *int
+	TMDbID *int
+}
+
+// updateWatchlistItem validates patch and applies it to the user's item. It
+// is what PATCH /api/watchlist/{id} and the update_watchlist_item tool both
+// do. The update matches on the item and the user together: an item on
+// someone else's list is database.ErrWatchlistItemNotFound, like one that
+// does not exist.
+//
+// The error is an invalidInputError when patch is not acceptable.
+func (s *Server) updateWatchlistItem(ctx context.Context, userID, itemID primitive.ObjectID, patch watchlistItemPatch) (*models.WatchlistItem, error) {
+	update := map[string]any{}
+	if patch.Title != nil {
+		trimmed := strings.TrimSpace(*patch.Title)
+		if trimmed == "" {
+			return nil, invalidInputError("title cannot be empty")
+		}
+		update["title"] = trimmed
+	}
+	if patch.Status != nil {
+		// Unlike on a new item, an empty status here is not a default.
+		if *patch.Status == "" || !validWatchlistStatus(*patch.Status) {
+			return nil, invalidInputError("invalid status")
+		}
+		update["status"] = *patch.Status
+	}
+	if patch.Tags != nil {
+		update["tags"] = patch.Tags
+	}
+	if patch.Year != nil {
+		if !plausibleYear(*patch.Year) {
+			return nil, invalidInputError("invalid year")
+		}
+		update["year"] = *patch.Year
+	}
+	if patch.TMDbID != nil {
+		if *patch.TMDbID <= 0 {
+			return nil, invalidInputError("invalid tmdb_id")
+		}
+		update["tmdb_id"] = *patch.TMDbID
+	}
+	if len(update) == 0 {
+		return nil, invalidInputError("no fields to update")
+	}
+	return s.db.UpdateWatchlistItem(ctx, userID, itemID, update)
+}
 
 // ensureTitles stores availability baselines for titles that have none in the
 // user's region, spending at most budget. Failures are logged by the
@@ -328,56 +413,21 @@ func (s *Server) updateWatchlistItemHandler(c *gin.Context) {
 		return
 	}
 
-	update := map[string]any{}
-	if body.Title != nil {
-		trimmed := strings.TrimSpace(*body.Title)
-		if trimmed == "" {
-			c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "title cannot be empty"})
-			return
-		}
-		update["title"] = trimmed
-	}
-	if body.Status != nil {
-		st := *body.Status
-		if st != models.WatchlistStatusPlanned && st != models.WatchlistStatusWatching && st != models.WatchlistStatusFinished {
-			c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "invalid status"})
-			return
-		}
-		update["status"] = st
-	}
-	if body.Tags != nil {
-		update["tags"] = body.Tags
-	}
-	if body.Year != nil {
-		if *body.Year < 1870 || *body.Year > time.Now().Year()+1 { // basic sanity
-			c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "invalid year"})
-			return
-		}
-		update["year"] = *body.Year
-	}
-	if body.TMDB != nil {
-		if *body.TMDB <= 0 {
-			c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "invalid tmdb_id"})
-			return
-		}
-		update["tmdb_id"] = *body.TMDB
-	}
-
-	if len(update) == 0 {
-		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "no fields to update"})
+	updated, err := s.updateWatchlistItem(c.Request.Context(), user.ID, itemID, watchlistItemPatch{
+		Title: body.Title, Status: body.Status, Tags: body.Tags, Year: body.Year, TMDbID: body.TMDB,
+	})
+	var invalid invalidInputError
+	switch {
+	case errors.As(err, &invalid):
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": invalid.Error()})
 		return
-	}
-
-	updated, err := s.db.UpdateWatchlistItem(c.Request.Context(), user.ID, itemID, update)
-	if err != nil {
-		if errors.Is(err, database.ErrWatchlistItemNotFound) {
-			c.AbortWithStatusJSON(http.StatusNotFound, gin.H{"error": "not found"})
-			return
-		}
-		if errors.Is(err, database.ErrDuplicateWatchlistItem) {
-			c.AbortWithStatusJSON(http.StatusConflict, gin.H{"error": "duplicate item"})
-			return
-		}
+	case errors.Is(err, database.ErrWatchlistItemNotFound):
+		c.AbortWithStatusJSON(http.StatusNotFound, gin.H{"error": "not found"})
+		return
+	case errors.Is(err, database.ErrDuplicateWatchlistItem):
+		c.AbortWithStatusJSON(http.StatusConflict, gin.H{"error": "duplicate item"})
+		return
+	case err != nil:
 		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "update failed"})
 		return
 	}

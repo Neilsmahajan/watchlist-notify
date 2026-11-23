@@ -2,6 +2,8 @@ package middleware
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"net/url"
@@ -51,30 +53,77 @@ func (c CustomClaims) HasScope(expectedScope string) bool {
 	return false
 }
 
+// allowedClockSkew is how far this server's clock and the issuer's may differ
+// when a token's time claims are checked.
+const allowedClockSkew = time.Minute
+
+// keySetError marks a validation that failed because the issuer's signing
+// keys could not be fetched. It says nothing about the token.
+type keySetError struct{ err error }
+
+func (e *keySetError) Error() string { return "fetching signing keys: " + e.err.Error() }
+func (e *keySetError) Unwrap() error { return e.err }
+
+// Auth0Issuer returns the issuer of the tenant at domain, exactly as it
+// appears in the iss claim of the tokens the tenant signs: with a trailing
+// slash.
+func Auth0Issuer(domain string) (*url.URL, error) {
+	domain = strings.TrimSpace(domain)
+	if domain == "" {
+		return nil, errors.New("AUTH0_DOMAIN is not set")
+	}
+	issuer, err := url.Parse("https://" + domain + "/")
+	if err != nil || issuer.Host == "" {
+		return nil, fmt.Errorf("AUTH0_DOMAIN %q is not a host name", domain)
+	}
+	return issuer, nil
+}
+
+// newValidator returns a validator for RS256 tokens that issuer signed for
+// audience. The signing keys come from the issuer's JWKS and are cached.
+// jwksOptions are passed to the JWKS provider; tests use them to reach an
+// issuer that is not served over public TLS.
+func newValidator(issuer *url.URL, audience string, claims func() validator.CustomClaims, jwksOptions ...any) (*validator.Validator, error) {
+	var options []jwks.ProviderOption
+	for _, option := range jwksOptions {
+		if o, ok := option.(jwks.ProviderOption); ok {
+			options = append(options, o)
+		}
+	}
+	// The library's provider fetches; the caching is ours (see signingKeys).
+	keys := newSigningKeys(jwks.NewProvider(issuer, options...).KeyFunc)
+	return validator.New(
+		keys.KeyFunc,
+		validator.RS256,
+		issuer.String(),
+		[]string{audience},
+		validator.WithCustomClaims(claims),
+		validator.WithAllowedClockSkew(allowedClockSkew),
+	)
+}
+
 // EnsureValidToken returns a Gin middleware that validates incoming JWTs
 // against Auth0 using RS256 and the configured issuer/audience.
 func EnsureValidToken() gin.HandlerFunc {
-	issuerURL, err := url.Parse("https://" + os.Getenv("AUTH0_DOMAIN") + "/")
+	issuerURL, err := Auth0Issuer(os.Getenv("AUTH0_DOMAIN"))
 	if err != nil {
 		log.Fatalf("Failed to parse the issuer url: %v", err)
 	}
-
-	provider := jwks.NewCachingProvider(issuerURL, 5*time.Minute)
-
-	jwtValidator, err := validator.New(
-		provider.KeyFunc,
-		validator.RS256,
-		issuerURL.String(),
-		[]string{os.Getenv("AUTH0_AUDIENCE")},
-		validator.WithCustomClaims(
-			func() validator.CustomClaims {
-				return &CustomClaims{}
-			},
-		),
-		validator.WithAllowedClockSkew(time.Minute),
-	)
+	handler, err := EnsureValidTokenFrom(issuerURL, os.Getenv("AUTH0_AUDIENCE"))
 	if err != nil {
-		log.Fatalf("Failed to set up the jwt validator")
+		log.Fatalf("Failed to set up the jwt validator: %v", err)
+	}
+	return handler
+}
+
+// EnsureValidTokenFrom is EnsureValidToken for a given issuer and audience.
+// jwksOptions are passed to the JWKS provider; see newValidator.
+func EnsureValidTokenFrom(issuerURL *url.URL, audience string, jwksOptions ...any) (gin.HandlerFunc, error) {
+	jwtValidator, err := newValidator(issuerURL, audience, func() validator.CustomClaims {
+		return &CustomClaims{}
+	}, jwksOptions...)
+	if err != nil {
+		return nil, err
 	}
 
 	return func(c *gin.Context) {
@@ -140,5 +189,5 @@ func EnsureValidToken() gin.HandlerFunc {
 		}
 
 		c.Next()
-	}
+	}, nil
 }
