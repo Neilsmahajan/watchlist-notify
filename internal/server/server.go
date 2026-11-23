@@ -15,6 +15,7 @@ import (
 	"github.com/neilsmahajan/watchlist-notify/internal/notifications"
 	"github.com/neilsmahajan/watchlist-notify/internal/providers/imdb"
 	"github.com/neilsmahajan/watchlist-notify/internal/providers/tmdb"
+	"github.com/neilsmahajan/watchlist-notify/internal/tonight"
 	"github.com/neilsmahajan/watchlist-notify/internal/watchlist"
 )
 
@@ -44,6 +45,11 @@ type Server struct {
 	// reconcileDeadline overrides how long a link or an import may take up
 	// to the end of its reconcile, database time included; tests shorten it.
 	reconcileDeadline time.Duration
+
+	// recommender picks what to watch tonight, with Claude. It is nil
+	// without ANTHROPIC_API_KEY: the endpoint then answers 503 and GET
+	// /api/me reports the feature as off.
+	recommender *tonight.Recommender
 }
 
 const (
@@ -88,17 +94,20 @@ func NewServer() *http.Server {
 		finder = tmdbClient
 	}
 
+	lister := watchlist.NewLister(db, refresher, defaultRegion)
+
 	NewServer := &Server{
 		port:                port,
 		db:                  db,
 		cache:               cache.New(),
 		tmdb:                tmdbClient,
 		refresher:           refresher,
-		lister:              watchlist.NewLister(db, refresher, defaultRegion),
+		lister:              lister,
 		defaultRegion:       defaultRegion,
 		notificationsSender: notificationsSender,
 		imdbLists:           imdb.New(),
 		reconciler:          imdbsync.New(db, finder),
+		recommender:         newRecommender(lister, db, os.Getenv),
 	}
 
 	// Declare Server config

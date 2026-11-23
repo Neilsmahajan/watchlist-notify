@@ -10,19 +10,37 @@ import (
 	"github.com/neilsmahajan/watchlist-notify/internal/models"
 )
 
+// MeResponse is the user's profile, plus what this server can do for them.
+// The profile's fields stay where they were, at the top level.
+type MeResponse struct {
+	*models.User
+	Features Features `json:"features"`
+}
+
+// Features says which optional features this server has switched on, so a
+// client can leave out what would not work.
+type Features struct {
+	// Recommendations is true when POST /api/recommendations/tonight is
+	// available: the server has an Anthropic API key.
+	Recommendations bool `json:"recommendations"`
+}
+
 // meHandler godoc
 // @Summary Get current user profile
-// @Description Returns the authenticated user's complete profile including preferences and service subscriptions
+// @Description Returns the authenticated user's complete profile including preferences and service subscriptions, and which optional features the server has switched on
 // @Tags Users
 // @Security BearerAuth
 // @Produce json
-// @Success 200 {object} models.User "User profile"
+// @Success 200 {object} MeResponse "User profile"
 // @Failure 401 {object} ErrorResponse "Unauthorized"
 // @Failure 500 {object} ErrorResponse "Internal server error"
 // @Router /api/me [get]
 func (s *Server) meHandler(c *gin.Context) {
 	if user, ok := s.getUser(c); ok {
-		c.JSON(http.StatusOK, user)
+		c.JSON(http.StatusOK, MeResponse{
+			User:     user,
+			Features: Features{Recommendations: s.recommender != nil},
+		})
 	}
 }
 

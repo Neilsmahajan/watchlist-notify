@@ -110,6 +110,9 @@ func (s *Server) routes(cfg routeConfig) (http.Handler, error) {
 	protected.GET("/availability/:id", s.availabilityHandler)
 	protected.POST("/availability/batch", s.batchAvailabilityHandler)
 
+	// Registered with or without an Anthropic key: without one it answers 503.
+	protected.POST("/recommendations/tonight", s.tonightHandler)
+
 	if cfg.mcp != nil {
 		return withoutMCPQuery(r), nil
 	}
