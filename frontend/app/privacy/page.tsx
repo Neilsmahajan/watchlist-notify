@@ -13,7 +13,7 @@ export default function PrivacyPage() {
       <header className="mb-10 border-b border-line pb-8">
         <p className="eyebrow">Legal</p>
         <h1 className="display mt-4 text-4xl sm:text-6xl">Privacy Policy</h1>
-        <p className="slate mt-5 text-muted">Last updated January 2025</p>
+        <p className="slate mt-5 text-muted">Last updated November 2026</p>
       </header>
       <div className="prose-page">
         
@@ -113,6 +113,43 @@ export default function PrivacyPage() {
             </ul>
           </section>
 
+          {/* Picks made with AI */}
+          <section id="ai" className="scroll-mt-24">
+            <h2>
+              Picks Made with AI
+            </h2>
+            <p>
+              &quot;What should I watch tonight?&quot; on your home page is
+              optional, and nothing is sent anywhere until you press its
+              button. When you do, we send Anthropic&apos;s Claude, an AI
+              model, what it needs to choose three titles:
+            </p>
+            <ul>
+              <li>
+                The titles on your watchlist that are streaming on your
+                services, up to 120 of them: each one&apos;s name, year, type,
+                running time, genres, rating, the names of your services that
+                have it, and the start of its description
+              </li>
+              <li>What you type or choose as your mood</li>
+            </ul>
+            <p>
+              Your name, email address and account ID are not sent. We do not
+              store or log the mood you type or what the model answers. We do
+              keep a count of how many picks you ask for each day, to enforce
+              a daily limit; each day&apos;s count is deleted within two days.
+              Anthropic handles what it receives under its own{" "}
+              <a
+                href="https://www.anthropic.com/legal/privacy"
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                privacy policy
+              </a>
+              .
+            </p>
+          </section>
+
           {/* Data Sharing and Disclosure */}
           <section>
             <h2>
@@ -126,8 +163,10 @@ export default function PrivacyPage() {
               <li>
                 <strong>Service Providers:</strong> We use third-party services
                 including Auth0 (authentication), MongoDB Atlas (database), TMDb
-                (content data), and Postmark (email delivery). These providers
-                access your data only to perform services on our behalf.
+                (content data), Postmark (email delivery), and Anthropic (the
+                AI model behind tonight&apos;s picks, only when you ask for
+                them). These providers access your data only to perform
+                services on our behalf.
               </li>
               <li>
                 <strong>Legal Requirements:</strong> We may disclose your
@@ -160,6 +199,10 @@ export default function PrivacyPage() {
               </li>
               <li>
                 <strong>Postmark:</strong> Email delivery service
+              </li>
+              <li>
+                <strong>Anthropic (Claude):</strong> The AI model that chooses
+                tonight&apos;s picks, when you ask for them
               </li>
               <li>
                 <strong>MongoDB Atlas:</strong> Database hosting

@@ -98,6 +98,7 @@ http://localhost:8080
 | Search        | `/api/search`           | Content discovery               |
 | Availability  | `/api/availability`     | Streaming availability checks   |
 | Notifications | `/api/me/notifications` | Email notification testing      |
+| Recommendations | `/api/recommendations` | "What should I watch tonight?" picks |
 | MCP           | `/mcp`                  | MCP server for AI clients ([MCP.md](MCP.md)) |
 
 ## Interactive Documentation
@@ -142,6 +143,11 @@ Download the OpenAPI 3.0 spec:
 - 1000 requests per hour per user
 - Headers: `X-RateLimit-Limit`, `X-RateLimit-Remaining`, `X-RateLimit-Reset`
 
+One endpoint is limited today because each call to it can cost money:
+[`POST /api/recommendations/tonight`](#pick-what-to-watch-tonight) has a
+per-user and a shared daily limit and answers `429` with a `Retry-After`
+header when either is used up.
+
 ## Error Handling
 
 ### Standard Error Response
@@ -164,10 +170,11 @@ All errors return a consistent JSON structure:
 | `401` | Unauthorized          | Missing or invalid JWT token              |
 | `404` | Not Found             | Resource does not exist                   |
 | `409` | Conflict              | Duplicate resource (e.g., watchlist item) |
+| `429` | Too Many Requests     | A daily limit on recommendations is used up |
 | `500` | Internal Server Error | Server-side error                         |
-| `502` | Bad Gateway           | Upstream service (TMDb) error             |
-| `503` | Service Unavailable   | Service temporarily unavailable           |
-| `504` | Gateway Timeout       | TMDb did not answer within 8 seconds      |
+| `502` | Bad Gateway           | Upstream service (TMDb, Claude) error     |
+| `503` | Service Unavailable   | Service temporarily unavailable, or a feature that is not enabled |
+| `504` | Gateway Timeout       | TMDb did not answer within 8 seconds, or Claude within 20 |
 
 ### Error Examples
 
@@ -372,10 +379,19 @@ Returns authenticated user's complete profile.
     "removed": 0,
     "unmatched": 2
   },
+  "features": {
+    "recommendations": true
+  },
   "created_at": "2025-01-01T10:00:00Z",
   "updated_at": "2025-01-15T10:00:00Z"
 }
 ```
+
+`features` says which optional features this server has switched on, so a
+client can leave out what would not work. `recommendations` is `true` when
+[Pick What to Watch Tonight](#pick-what-to-watch-tonight) is available. Only
+`GET /api/me` carries it; the `PATCH` endpoints below answer with the profile
+alone.
 
 `imdb_sync` is present only while the user has an IMDb list linked (see
 [Link an IMDb List](#link-an-imdb-list)):
@@ -1038,6 +1054,167 @@ POST /api/me/notifications/test
 }
 ```
 
+---
+
+### Recommendation Endpoints
+
+#### Pick What to Watch Tonight
+
+```http
+POST /api/recommendations/tonight
+```
+
+Suggests up to three titles from the user's own watchlist that are streaming
+now on their services, each with a one-sentence reason. Anthropic's Claude
+makes the choice.
+
+The feature is optional. A server without `ANTHROPIC_API_KEY` answers `503`
+and reports `"features": {"recommendations": false}` on
+[`GET /api/me`](#get-current-user). The reserved demo account cannot sign in,
+so it never reaches this endpoint, and there is no public demo version of it.
+
+**Request Body (optional; every field is optional):**
+
+```json
+{
+  "mood": "something light",
+  "max_minutes": 120,
+  "type": "movie",
+  "exclude": ["665f1c2e8b3e4a0012345678"]
+}
+```
+
+**Fields:**
+
+- `mood` - what the user feels like, in their own words. At most 200
+  characters after whitespace is collapsed
+- `max_minutes` - keep titles that run no longer than this (1 to 600). For a
+  show the runtime is one episode's. Titles with no known runtime are left out
+  when this is set
+- `type` - `movie` or `show`
+- `exclude` - IDs of watchlist items to leave out, at most 30. Sending the IDs
+  already shown is how "pick again" gets three different titles
+
+**Response:**
+
+```json
+{
+  "picks": [
+    {
+      "item": {
+        "id": "665f1c2e8b3e4a0012345678",
+        "title": "Palm Springs",
+        "type": "movie",
+        "year": 2020,
+        "status": "planned",
+        "poster_path": "/yf5IuMW6GHghu39kxA0oFx7Bxmj.jpg",
+        "runtime": 90,
+        "availability": {
+          "region": "US",
+          "providers": [
+            { "code": "hulu", "name": "Hulu", "logo_path": "/logo.jpg", "access": ["subscription"] }
+          ],
+          "elsewhere": []
+        }
+      },
+      "reason": "A quick, funny time-loop romance that never drags."
+    }
+  ],
+  "remaining_today": 9,
+  "model": "claude-haiku-5-5"
+}
+```
+
+- `picks[].item` - the item exactly as
+  [List Watchlist Items](#list-watchlist-items) returns it, abbreviated here
+- `picks[].reason` - one sentence, at most 200 characters
+- `remaining_today` - how many more model calls this user can make today: the
+  smaller of what is left of their own limit and of the shared one
+- `model` - the model that chose, or `""` when none was asked
+- `message` and `empty_reason` - present only when `picks` is empty
+
+**How the picks are made:**
+
+1. Candidates are the user's items with status `planned` or `watching` that
+   are streaming now on at least one of their active services, minus
+   `exclude`, filtered by `type` and `max_minutes`.
+2. With no candidates the response is `200` with `"picks": []`, a `message`
+   to show and an `empty_reason`: `no_services` (the user has chosen no
+   services), `nothing_streaming` (nothing on the list is on them),
+   `no_match` (the filters removed everything) or `exhausted` (`exclude`
+   removed everything). No model call is made and nothing is counted.
+3. With three candidates or fewer they are all returned, with a reason that
+   names the services. No model call is made and nothing is counted.
+4. Otherwise both daily limits are checked and the model is asked. At most 120
+   titles are sent; a longer list is sampled at random, so every title has
+   the same chance of being considered rather than the newest always winning.
+
+**What is sent to Anthropic:** for each candidate its title, year, type,
+runtime, genres, rating, the user's services it is on and the first 200
+characters of its overview; and the mood text. Nothing that identifies the
+user is sent: no name, email address or account ID.
+
+**Untrusted text:** the mood and the overviews are data, not instructions.
+They go in the user message, JSON-encoded, and never in the system prompt.
+The model answers through structured outputs with the *numbers* of the titles
+it chose and a reason for each, so nothing it writes can name a title that was
+not offered. The server drops numbers it did not send and repeats, strips
+control characters from the reasons and caps their length. Only the reason
+text reaches the client, as plain text.
+
+**Limits:** per UTC day, at most `AI_DAILY_LIMIT_PER_USER` model calls for one
+user (default 10) and `AI_DAILY_LIMIT_TOTAL` across all users (default 200).
+Each limit is a counter in MongoDB (`usage_counters`) that is incremented only
+if it is still below the limit, in one atomic operation, *before* the call is
+made, so concurrent requests cannot exceed it. A call that fails, times out
+or returns an unusable answer still counts: the request was sent and may have
+been billed, and counting it means a failing upstream cannot be retried
+without bound. A request refused by the shared limit gives the user's own
+place back.
+
+**Cost:** one call is one request to the Claude API with the SDK's retries
+switched off. With the default model, `claude-haiku-5-5`, at $0.10 per million
+input tokens and $0.50 per million output tokens:
+
+- Worst case: 120 titles with every field at its cap is about 62,000
+  characters of prompt. At a pessimistic 2.5 characters per token that is
+  about 24,800 input tokens ($0.0025). Output is capped at 1,024 tokens
+  ($0.0005). Together about **$0.003 a call**.
+- Typical: 40 titles, about 4,800 input and 300 output tokens, about
+  **$0.0006 a call**.
+- At the default shared limit of 200 calls a day the most the feature can
+  spend is about **$0.60 a day**.
+
+Token counts are estimated from character counts; the server logs the real
+ones for every call (and nothing else about it).
+
+**Error Responses:**
+
+- `400` - the body is not valid JSON, `mood` is too long, `type` is unknown,
+  `max_minutes` is out of range, or `exclude` holds too many IDs or something
+  that is not an ID
+- `403` - the account is reserved
+- `429` - a daily limit is used up. No model call was made. The body adds
+  which limit (`user` for the user's own, `total` for the shared one) and
+  when it resets; `Retry-After` gives the same in seconds:
+
+  ```json
+  {
+    "error": "you have used all 10 of today's picks; the limit resets at 2026-11-23T00:00:00Z",
+    "scope": "user",
+    "resets_at": "2026-11-23T00:00:00Z"
+  }
+  ```
+
+- `500` - the database could not be read, which includes the limit counters:
+  when a limit cannot be checked no call is made
+- `502` - Claude returned an error, declined, or gave an answer with no usable
+  pick. The call counted
+- `503` - recommendations are not enabled on this server
+- `504` - Claude did not answer within 20 seconds, and the call counted. Or
+  the request had under 5 seconds left of the 27 it may take, counted from
+  its arrival, so Claude was not asked and nothing counted
+
 ## Request Examples
 
 ### cURL Examples
@@ -1182,6 +1359,10 @@ await api.patch("/api/me/preferences", {
 - Responses are gzip-compressed when the client accepts it
 - The address `demo@watchlistnotify.com` is reserved: signing in with it is
   refused with `403`
+- `POST /api/recommendations/tonight` picks up to three titles to watch
+  tonight with Claude, behind per-user and shared daily limits; it is off
+  unless the server has an Anthropic API key, and `GET /api/me` reports that
+  as `features.recommendations`
 
 ### Upcoming
 

@@ -92,7 +92,10 @@ signed-in view on localhost. Use a throwaway `AUTH0_SECRET` for this, never a
 real one.
 
 `scripts/mock-api.mjs` lists its switches at the top (empty account, no demo,
-no IMDb routes, slow responses).
+no IMDb routes, slow responses, and each state of the "What should I watch
+tonight?" panel: `MOCK_TONIGHT=off`, `limit`, `fail`, `slow`, `two`, `empty`
+or `no_services`). The mock never calls Claude: its picks are a shuffle with
+canned reasons.
 
 ### Checks
 

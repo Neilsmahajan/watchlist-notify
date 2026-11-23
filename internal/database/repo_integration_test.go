@@ -298,7 +298,7 @@ func TestDigestDeliveries(t *testing.T) {
 func TestExpiringCollectionsHaveATTLIndex(t *testing.T) {
 	srv := New().(*service)
 	ctx := context.Background()
-	for _, name := range []string{collEvents, collDelivered} {
+	for _, name := range []string{collEvents, collDelivered, collUsage} {
 		cursor, err := srv.db.Database(databaseName).Collection(name).Indexes().List(ctx)
 		if err != nil {
 			t.Fatalf("%s: list indexes: %v", name, err)

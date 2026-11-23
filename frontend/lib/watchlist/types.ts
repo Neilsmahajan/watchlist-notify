@@ -107,6 +107,11 @@ export type Me = {
     };
   };
   imdb_sync?: ImdbSync | null;
+  // Optional features this API has switched on. Absent on an older API.
+  features?: {
+    // "What should I watch tonight?" needs the server to have an Anthropic key.
+    recommendations?: boolean;
+  };
 };
 
 export const STATUS_LABELS: Record<WatchlistStatus, string> = {

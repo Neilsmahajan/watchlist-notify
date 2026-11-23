@@ -320,7 +320,7 @@
                         "BearerAuth": []
                     }
                 ],
-                "description": "Returns the authenticated user's complete profile including preferences and service subscriptions",
+                "description": "Returns the authenticated user's complete profile including preferences and service subscriptions, and which optional features the server has switched on",
                 "produces": [
                     "application/json"
                 ],
@@ -332,7 +332,7 @@
                     "200": {
                         "description": "User profile",
                         "schema": {
-                            "$ref": "#/definitions/github_com_neilsmahajan_watchlist-notify_internal_models.User"
+                            "$ref": "#/definitions/internal_server.MeResponse"
                         }
                     },
                     "401": {
@@ -737,6 +737,92 @@
                     },
                     "500": {
                         "description": "Failed to update services",
+                        "schema": {
+                            "$ref": "#/definitions/internal_server.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/recommendations/tonight": {
+            "post": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "Suggests up to three titles from the user's watchlist that are streaming now on their services, with a one-sentence reason each. Anthropic's Claude makes the choice when there are more than three candidates; each such call counts against a per-user and a shared daily limit. With three candidates or fewer they are returned as they are, and with none the response has empty picks and a message. The endpoint answers 503 unless the server has an Anthropic API key.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Recommendations"
+                ],
+                "summary": "Pick what to watch tonight",
+                "parameters": [
+                    {
+                        "description": "What to pick for; every field is optional",
+                        "name": "body",
+                        "in": "body",
+                        "schema": {
+                            "$ref": "#/definitions/internal_server.tonightRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Up to three picks, or none with a message",
+                        "schema": {
+                            "$ref": "#/definitions/github_com_neilsmahajan_watchlist-notify_internal_tonight.Result"
+                        }
+                    },
+                    "400": {
+                        "description": "Invalid request body",
+                        "schema": {
+                            "$ref": "#/definitions/internal_server.ErrorResponse"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/internal_server.ErrorResponse"
+                        }
+                    },
+                    "403": {
+                        "description": "The account is reserved",
+                        "schema": {
+                            "$ref": "#/definitions/internal_server.ErrorResponse"
+                        }
+                    },
+                    "429": {
+                        "description": "A daily limit is reached; no model call was made",
+                        "schema": {
+                            "$ref": "#/definitions/internal_server.TonightLimitResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "Database error",
+                        "schema": {
+                            "$ref": "#/definitions/internal_server.ErrorResponse"
+                        }
+                    },
+                    "502": {
+                        "description": "The model failed or its answer could not be used",
+                        "schema": {
+                            "$ref": "#/definitions/internal_server.ErrorResponse"
+                        }
+                    },
+                    "503": {
+                        "description": "Recommendations are not enabled on this server",
+                        "schema": {
+                            "$ref": "#/definitions/internal_server.ErrorResponse"
+                        }
+                    },
+                    "504": {
+                        "description": "The model did not answer in time, or too little time was left to ask it",
                         "schema": {
                             "$ref": "#/definitions/internal_server.ErrorResponse"
                         }
@@ -1498,6 +1584,55 @@
                 }
             }
         },
+        "github_com_neilsmahajan_watchlist-notify_internal_tonight.Pick": {
+            "type": "object",
+            "properties": {
+                "item": {
+                    "description": "Item is the watchlist item, as the watchlist endpoint returns it.",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/github_com_neilsmahajan_watchlist-notify_internal_watchlist.Item"
+                        }
+                    ]
+                },
+                "reason": {
+                    "description": "Reason is one sentence on why it suits tonight.",
+                    "type": "string"
+                }
+            }
+        },
+        "github_com_neilsmahajan_watchlist-notify_internal_tonight.Result": {
+            "type": "object",
+            "properties": {
+                "empty_reason": {
+                    "type": "string",
+                    "enum": [
+                        "no_services",
+                        "nothing_streaming",
+                        "no_match",
+                        "exhausted"
+                    ]
+                },
+                "message": {
+                    "description": "Message and EmptyReason explain an answer without picks.",
+                    "type": "string"
+                },
+                "model": {
+                    "description": "Model is the ID of the model that chose, or empty when no model was\ncalled: there was nothing to choose between.",
+                    "type": "string"
+                },
+                "picks": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/github_com_neilsmahajan_watchlist-notify_internal_tonight.Pick"
+                    }
+                },
+                "remaining_today": {
+                    "description": "RemainingToday is how many more model calls the user may make before\nthe next UTC day.",
+                    "type": "integer"
+                }
+            }
+        },
         "github_com_neilsmahajan_watchlist-notify_internal_watchlist.Availability": {
             "type": "object",
             "properties": {
@@ -1772,6 +1907,15 @@
                 }
             }
         },
+        "internal_server.Features": {
+            "type": "object",
+            "properties": {
+                "recommendations": {
+                    "description": "Recommendations is true when POST /api/recommendations/tonight is\navailable: the server has an Anthropic API key.",
+                    "type": "boolean"
+                }
+            }
+        },
         "internal_server.IMDbLinkRequest": {
             "type": "object",
             "properties": {
@@ -1823,6 +1967,52 @@
                 }
             }
         },
+        "internal_server.MeResponse": {
+            "type": "object",
+            "properties": {
+                "created_at": {
+                    "type": "string"
+                },
+                "email": {
+                    "type": "string"
+                },
+                "features": {
+                    "$ref": "#/definitions/internal_server.Features"
+                },
+                "id": {
+                    "type": "string"
+                },
+                "imdb_sync": {
+                    "description": "IMDbSync is present while the user has a public IMDb list linked.",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/github_com_neilsmahajan_watchlist-notify_internal_models.IMDbSync"
+                        }
+                    ]
+                },
+                "name": {
+                    "type": "string"
+                },
+                "picture": {
+                    "type": "string"
+                },
+                "preferences": {
+                    "$ref": "#/definitions/github_com_neilsmahajan_watchlist-notify_internal_models.Preferences"
+                },
+                "region": {
+                    "type": "string"
+                },
+                "services": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/github_com_neilsmahajan_watchlist-notify_internal_models.ServiceSubscription"
+                    }
+                },
+                "updated_at": {
+                    "type": "string"
+                }
+            }
+        },
         "internal_server.ProviderInfo": {
             "type": "object",
             "properties": {
@@ -1843,6 +2033,29 @@
                 },
                 "name": {
                     "type": "string"
+                }
+            }
+        },
+        "internal_server.TonightLimitResponse": {
+            "type": "object",
+            "properties": {
+                "error": {
+                    "type": "string",
+                    "example": "you have used all 10 of today's picks; the limit resets at 2026-11-23T00:00:00Z"
+                },
+                "resets_at": {
+                    "description": "When the next day's budget starts.",
+                    "type": "string",
+                    "example": "2026-11-23T00:00:00Z"
+                },
+                "scope": {
+                    "description": "Which limit: the user's own, or the one shared by all users.",
+                    "type": "string",
+                    "enum": [
+                        "user",
+                        "total"
+                    ],
+                    "example": "user"
                 }
             }
         },
@@ -1922,6 +2135,36 @@
                     "description": "Row is the line of the file, counting the header as row 1.",
                     "type": "integer",
                     "example": 7
+                }
+            }
+        },
+        "internal_server.tonightRequest": {
+            "type": "object",
+            "properties": {
+                "exclude": {
+                    "description": "IDs of watchlist items to leave out, such as the ones already suggested. At most 30.",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "max_minutes": {
+                    "description": "Keep titles that run no longer than this many minutes (1 to 600). For a show, one episode.",
+                    "type": "integer",
+                    "example": 120
+                },
+                "mood": {
+                    "description": "What the viewer is in the mood for, in their own words. At most 200 characters.",
+                    "type": "string",
+                    "example": "something light"
+                },
+                "type": {
+                    "description": "Keep only films or only shows.",
+                    "type": "string",
+                    "enum": [
+                        "movie",
+                        "show"
+                    ]
                 }
             }
         }
