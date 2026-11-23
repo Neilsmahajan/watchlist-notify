@@ -50,6 +50,9 @@ type routeConfig struct {
 func (s *Server) routes(cfg routeConfig) (http.Handler, error) {
 	r := gin.Default()
 
+	// Handlers that answer by a deadline count it from here.
+	r.Use(stampArrival)
+
 	// The MCP endpoint and its metadata take neither of the two global
 	// middlewares below; see exceptMCP.
 	global := func(mw gin.HandlerFunc) gin.HandlerFunc { return mw }

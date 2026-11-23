@@ -721,6 +721,46 @@ func TestTheCallHasADeadline(t *testing.T) {
 	}
 }
 
+// A request with too little time left is refused before a place is taken or
+// a call is paid for.
+func TestNoCallWithoutTimeForIt(t *testing.T) {
+	f := newFixture(t, generous)
+	f.addMany("Title", 5)
+
+	ctx, cancel := context.WithTimeout(context.Background(), MinCallTime-time.Second)
+	defer cancel()
+	_, err := f.rec.Tonight(ctx, f.user, Request{})
+	var modelErr *ModelError
+	if !errors.Is(err, ErrNoTimeForCall) || !errors.Is(err, context.DeadlineExceeded) || errors.As(err, &modelErr) {
+		t.Fatalf("error = %v, want ErrNoTimeForCall", err)
+	}
+	if f.model.called() != 0 {
+		t.Errorf("the model was called %d times with no time to answer", f.model.called())
+	}
+	if used := f.store.Usage(totalKey); used != 0 {
+		t.Errorf("the total count is %d after a refused request, want 0", used)
+	}
+
+	// With the time, the same request goes through.
+	ctx, cancel = context.WithTimeout(context.Background(), MinCallTime+time.Minute)
+	defer cancel()
+	if _, err := f.rec.Tonight(ctx, f.user, Request{}); err != nil {
+		t.Fatalf("Tonight with time left: %v", err)
+	}
+	if f.model.called() != 1 {
+		t.Errorf("the model was called %d times, want 1", f.model.called())
+	}
+
+	// Answers that need no call are not held to it.
+	few := newFixture(t, generous)
+	few.addMany("Title", 2)
+	ctx, cancel = context.WithTimeout(context.Background(), MinCallTime-time.Second)
+	defer cancel()
+	if result, err := few.rec.Tonight(ctx, few.user, Request{}); err != nil || len(result.Picks) != 2 {
+		t.Fatalf("Tonight without a call = %v, %v; want two picks", result, err)
+	}
+}
+
 func TestDatabaseFailures(t *testing.T) {
 	boom := errors.New("database is down")
 	for _, method := range []string{"ListWatchlistItems", "ReserveUsage"} {

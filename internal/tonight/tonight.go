@@ -20,6 +20,7 @@ package tonight
 
 import (
 	"context"
+	"fmt"
 	"math/rand/v2"
 	"strings"
 	"time"
@@ -37,7 +38,16 @@ const (
 	// ModelTimeout is the deadline on the model call. The API's write timeout
 	// is 30 seconds; this leaves room for the database on either side.
 	ModelTimeout = 20 * time.Second
+	// MinCallTime is the least time that must be left before the caller's
+	// deadline for a model call to be started. With less, the call would be
+	// paid for and counted and then most likely cut off before it answered.
+	MinCallTime = 5 * time.Second
 )
+
+// ErrNoTimeForCall is returned when too little time is left before the
+// caller's deadline to call the model. No call was made and nothing was
+// counted against the daily limits. It matches context.DeadlineExceeded.
+var ErrNoTimeForCall = fmt.Errorf("too little time left to call the model: %w", context.DeadlineExceeded)
 
 // Why an answer has no picks.
 const (
@@ -113,6 +123,8 @@ type Recommender struct {
 	// shuffle orders the candidates at random; tests replace it.
 	shuffle func(n int, swap func(i, j int))
 	timeout time.Duration
+	// minTime is the least time left before ctx's deadline to start a call.
+	minTime time.Duration
 }
 
 // New returns a Recommender that lets model choose, within limits.
@@ -123,6 +135,7 @@ func New(lister Lister, model Model, store UsageStore, limits Limits) *Recommend
 		quota:   quota{store: store, limits: limits, now: time.Now},
 		shuffle: rand.Shuffle,
 		timeout: ModelTimeout,
+		minTime: MinCallTime,
 	}
 }
 
@@ -138,9 +151,10 @@ func (r *Recommender) Limits() Limits { return r.quota.limits }
 // the result explains why, and with MaxPicks or fewer they are all returned
 // as they are. Neither case counts against the daily limits.
 //
-// It returns a *LimitError when a daily limit is reached, in which case no
-// call was made, and a *ModelError when the call was made but produced
-// nothing usable. Any other error is the database's.
+// It returns a *LimitError when a daily limit is reached and
+// ErrNoTimeForCall when ctx's deadline is too close, in which cases no call
+// was made, and a *ModelError when the call was made but produced nothing
+// usable. Any other error is the database's.
 func (r *Recommender) Tonight(ctx context.Context, user *models.User, req Request) (*Result, error) {
 	candidates, emptyReason, err := r.candidates(ctx, user, req)
 	if err != nil {
@@ -160,6 +174,12 @@ func (r *Recommender) Tonight(ctx context.Context, user *models.User, req Reques
 			result.Picks = append(result.Picks, Pick{Item: candidates[i], Reason: plainReason(&candidates[i])})
 		}
 		return result, nil
+	}
+
+	// A request that reached this point late, behind a slow sign-in check or
+	// a slow database, is refused before anything is spent on it.
+	if deadline, ok := ctx.Deadline(); ok && time.Until(deadline) < r.minTime {
+		return nil, ErrNoTimeForCall
 	}
 
 	// From here on a model call is made, and paid for: take the places first.

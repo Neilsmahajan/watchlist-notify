@@ -29,6 +29,26 @@ func jsonError(c *gin.Context, status int, msg string) {
 	c.AbortWithStatusJSON(status, gin.H{"error": msg})
 }
 
+// arrivalKey is where stampArrival keeps the time a request arrived.
+const arrivalKey = "request_arrival"
+
+// stampArrival records when a request reached the router, before any other
+// middleware has spent time on it.
+func stampArrival(c *gin.Context) {
+	c.Set(arrivalKey, time.Now())
+}
+
+// requestArrival returns when the request arrived, or now when it was not
+// stamped.
+func requestArrival(c *gin.Context) time.Time {
+	if at, ok := c.Get(arrivalKey); ok {
+		if at, ok := at.(time.Time); ok {
+			return at
+		}
+	}
+	return time.Now()
+}
+
 // getUser fetches the authenticated user from context and DB. It writes the
 // appropriate error and returns (nil, false) on failure.
 func (s *Server) getUser(c *gin.Context) (*models.User, bool) {
