@@ -458,6 +458,9 @@ func TestTonightPerUserLimit(t *testing.T) {
 	if !resets.Equal(nextDay) && !resets.Equal(nextDay.AddDate(0, 0, 1)) {
 		t.Errorf("resets_at = %s, want the next UTC midnight (%s)", resets, nextDay)
 	}
+	if body["scope"] != tonight.ScopeUser {
+		t.Errorf("scope = %v, want the user's own limit", body["scope"])
+	}
 	msg, _ := body["error"].(string)
 	if !strings.Contains(msg, "all 2 of today's picks") || !strings.Contains(msg, resets.Format(time.RFC3339)) {
 		t.Errorf("error = %q, want it to give the limit and when it resets", msg)
@@ -480,8 +483,8 @@ func TestTonightTotalLimit(t *testing.T) {
 	if msg, _ := body["error"].(string); !strings.Contains(msg, "today's picks have all been used") {
 		t.Errorf("error = %q, want the shared limit's message", msg)
 	}
-	if _, ok := body["resets_at"].(string); !ok {
-		t.Errorf("body = %v, want resets_at", body)
+	if _, ok := body["resets_at"].(string); !ok || body["scope"] != tonight.ScopeTotal {
+		t.Errorf("body = %v, want resets_at and the shared scope", body)
 	}
 	if h.model.called() != 1 {
 		t.Errorf("the model was called %d times with a total limit of 1", h.model.called())

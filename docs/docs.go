@@ -2049,6 +2049,15 @@ const docTemplate = `{
                     "description": "When the next day's budget starts.",
                     "type": "string",
                     "example": "2026-11-23T00:00:00Z"
+                },
+                "scope": {
+                    "description": "Which limit: the user's own, or the one shared by all users.",
+                    "type": "string",
+                    "enum": [
+                        "user",
+                        "total"
+                    ],
+                    "example": "user"
                 }
             }
         },

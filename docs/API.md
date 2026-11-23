@@ -1195,11 +1195,13 @@ ones for every call (and nothing else about it).
   that is not an ID
 - `403` - the account is reserved
 - `429` - a daily limit is used up. No model call was made. The body adds
-  when the limit resets, and `Retry-After` gives the same in seconds:
+  which limit (`user` for the user's own, `total` for the shared one) and
+  when it resets; `Retry-After` gives the same in seconds:
 
   ```json
   {
     "error": "you have used all 10 of today's picks; the limit resets at 2026-11-23T00:00:00Z",
+    "scope": "user",
     "resets_at": "2026-11-23T00:00:00Z"
   }
   ```

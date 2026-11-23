@@ -478,6 +478,13 @@ definitions:
         description: When the next day's budget starts.
         example: "2026-11-23T00:00:00Z"
         type: string
+      scope:
+        description: 'Which limit: the user''s own, or the one shared by all users.'
+        enum:
+        - user
+        - total
+        example: user
+        type: string
     type: object
   internal_server.WatchlistImportResponse:
     properties:

@@ -43,6 +43,8 @@ type tonightRequest struct {
 // TonightLimitResponse is the body of a 429 from the recommendations endpoint.
 type TonightLimitResponse struct {
 	Error string `json:"error" example:"you have used all 10 of today's picks; the limit resets at 2026-11-23T00:00:00Z"`
+	// Which limit: the user's own, or the one shared by all users.
+	Scope string `json:"scope" enums:"user,total" example:"user"`
 	// When the next day's budget starts.
 	ResetsAt time.Time `json:"resets_at" example:"2026-11-23T00:00:00Z"`
 }
@@ -106,6 +108,7 @@ func (s *Server) tonightHandler(c *gin.Context) {
 		c.Header("Retry-After", strconv.Itoa(max(1, int(math.Ceil(wait.Seconds())))))
 		c.AbortWithStatusJSON(http.StatusTooManyRequests, TonightLimitResponse{
 			Error:    s.limitMessage(limitErr),
+			Scope:    limitErr.Scope,
 			ResetsAt: limitErr.ResetsAt,
 		})
 
