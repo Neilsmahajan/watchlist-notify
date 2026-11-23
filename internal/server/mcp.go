@@ -132,9 +132,13 @@ func exceptMCP(mw gin.HandlerFunc) gin.HandlerFunc {
 // before anything sees it. The endpoint takes no parameters, and the access
 // log prints the query: a client that wrongly put its token there
 // (?access_token=...) would otherwise have it written to the log.
+//
+// The path is compared without trailing slashes. The router answers /mcp/
+// with a redirect to /mcp that repeats the query, and in debug mode prints
+// the redirect, so that spelling must lose its query as well.
 func withoutMCPQuery(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if isMCPPath(r.URL.Path) && r.URL.RawQuery != "" {
+		if isMCPPath(strings.TrimRight(r.URL.Path, "/")) && r.URL.RawQuery != "" {
 			r.URL.RawQuery = ""
 			r.RequestURI = r.URL.RequestURI()
 		}
@@ -322,15 +326,19 @@ func toolsCalled(body []byte) []string {
 	}
 	var names []string
 	for _, message := range messages {
-		var call struct {
-			Method string `json:"method"`
-			Params struct {
-				Name string `json:"name"`
-			} `json:"params"`
+		// Members are looked up by their exact names, as the SDK reads them.
+		// Decoding into a struct would match "Name" as well as "name", and a
+		// call carrying both could show this function one tool and the SDK
+		// another.
+		var call, params map[string]json.RawMessage
+		var method, name string
+		if json.Unmarshal(message, &call) != nil ||
+			json.Unmarshal(call["method"], &method) != nil || method != "tools/call" ||
+			json.Unmarshal(call["params"], &params) != nil ||
+			json.Unmarshal(params["name"], &name) != nil {
+			continue
 		}
-		if err := json.Unmarshal(message, &call); err == nil && call.Method == "tools/call" {
-			names = append(names, call.Params.Name)
-		}
+		names = append(names, name)
 	}
 	return names
 }

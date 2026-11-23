@@ -701,11 +701,15 @@ func TestToolsCalled(t *testing.T) {
 		"  \n" + callRequest("add_to_watchlist", "{}"):                                   {"add_to_watchlist"},
 		"[" + listToolsRequest + ", " + callRequest("update_watchlist_item", "{}") + "]": {"update_watchlist_item"},
 		listToolsRequest:                     nil,
-		`{"method":"tools/call"}`:            {""},
+		`{"method":"tools/call"}`:            nil,
 		`{"method":"tools/call","params":7}`: nil,
-		`not json`:                           nil,
-		`[1, "two"]`:                         nil,
-		``:                                   nil,
+		// Member names are matched exactly, as the SDK matches them: a
+		// differently cased twin does not hide the tool that will run.
+		`{"method":"tools/call","params":{"name":"remove_from_watchlist","Name":"list_watchlist"}}`: {"remove_from_watchlist"},
+		`{"Method":"tools/call","params":{"name":"remove_from_watchlist"}}`:                         nil,
+		`not json`:   nil,
+		`[1, "two"]`: nil,
+		``:           nil,
 	}
 	for body, want := range tests {
 		if got := toolsCalled([]byte(body)); !slices.Equal(got, want) {
@@ -863,10 +867,23 @@ func TestMCPQueryStringsNeverReachTheLog(t *testing.T) {
 	handler := withoutMCPQuery(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
 		seen = append(seen, r.URL.Path+"?"+r.URL.RawQuery+" "+r.RequestURI)
 	}))
-	for _, target := range []string{"/mcp?access_token=secret", mcpMetadataPath + "/mcp?access_token=secret", "/api/search?query=dune"} {
+	for _, target := range []string{
+		"/mcp?access_token=secret",
+		mcpMetadataPath + "/mcp?access_token=secret",
+		// The router redirects these to the paths above, query included.
+		"/mcp/?access_token=secret",
+		mcpMetadataPath + "/?access_token=secret",
+		"/api/search?query=dune",
+	} {
 		handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, target, nil))
 	}
-	want := []string{"/mcp? /mcp", mcpMetadataPath + "/mcp? " + mcpMetadataPath + "/mcp", "/api/search?query=dune /api/search?query=dune"}
+	want := []string{
+		"/mcp? /mcp",
+		mcpMetadataPath + "/mcp? " + mcpMetadataPath + "/mcp",
+		"/mcp/? /mcp/",
+		mcpMetadataPath + "/? " + mcpMetadataPath + "/",
+		"/api/search?query=dune /api/search?query=dune",
+	}
 	if !reflect.DeepEqual(seen, want) {
 		t.Errorf("requests seen = %q, want %q", seen, want)
 	}

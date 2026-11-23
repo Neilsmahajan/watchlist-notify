@@ -53,10 +53,6 @@ func (c CustomClaims) HasScope(expectedScope string) bool {
 	return false
 }
 
-// jwksCacheTTL is how long the tenant's signing keys are kept before they are
-// fetched again.
-const jwksCacheTTL = 5 * time.Minute
-
 // allowedClockSkew is how far this server's clock and the issuer's may differ
 // when a token's time claims are checked.
 const allowedClockSkew = time.Minute
@@ -88,16 +84,16 @@ func Auth0Issuer(domain string) (*url.URL, error) {
 // jwksOptions are passed to the JWKS provider; tests use them to reach an
 // issuer that is not served over public TLS.
 func newValidator(issuer *url.URL, audience string, claims func() validator.CustomClaims, jwksOptions ...any) (*validator.Validator, error) {
-	provider := jwks.NewCachingProvider(issuer, jwksCacheTTL, jwksOptions...)
-	keyFunc := func(ctx context.Context) (any, error) {
-		keys, err := provider.KeyFunc(ctx)
-		if err != nil {
-			return nil, &keySetError{err: err}
+	var options []jwks.ProviderOption
+	for _, option := range jwksOptions {
+		if o, ok := option.(jwks.ProviderOption); ok {
+			options = append(options, o)
 		}
-		return keys, nil
 	}
+	// The library's provider fetches; the caching is ours (see signingKeys).
+	keys := newSigningKeys(jwks.NewProvider(issuer, options...).KeyFunc)
 	return validator.New(
-		keyFunc,
+		keys.KeyFunc,
 		validator.RS256,
 		issuer.String(),
 		[]string{audience},
